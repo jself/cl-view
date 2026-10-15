@@ -35,8 +35,11 @@ work = ~/.claude-work
 personal = ~/.claude
 ```
 
-Any `--<profile>` flag selects that profile. Without a config file there is a
-single `default` profile that leaves `CLAUDE_CONFIG_DIR` untouched.
+Any `--<profile>` flag selects that profile. If `CLAUDE_CONFIG_DIR` is set when
+`cl` runs, it overrides `default`: the profile with that directory is used, or
+one named after the directory (`~/.claude-work` becomes `claude-work`) is added
+for this run. Without a config file there is a single `default` profile that
+leaves `CLAUDE_CONFIG_DIR` untouched.
 
 ## Usage
 

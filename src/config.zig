@@ -3,6 +3,10 @@
 //!   default = work
 //!   work = ~/.claude-work
 //!   personal = ~/.claude
+//!
+//! When CLAUDE_CONFIG_DIR is set in the environment it overrides `default`:
+//! the profile with that directory is used, or one named after the directory
+//! is added if none matches.
 const std = @import("std");
 const Ctx = @import("ctx.zig");
 
@@ -49,10 +53,26 @@ pub fn load(ctx: Ctx) !Config {
         }
     }
     if (profiles.items.len == 0) return fallback(ctx);
+    if (ctx.env.get("CLAUDE_CONFIG_DIR")) |env_dir| {
+        default = try fromEnv(ctx, &profiles, env_dir);
+    }
     return .{
         .profiles = try profiles.toOwnedSlice(ctx.perm),
         .default = default orelse profiles.items[0].name,
     };
+}
+
+/// Return the name of the profile whose config dir is `env_dir`, adding one if needed.
+fn fromEnv(ctx: Ctx, profiles: *std.ArrayList(Profile), env_dir: []const u8) ![]const u8 {
+    const want = std.mem.trimEnd(u8, try expandHomePerm(ctx, env_dir), "/");
+    for (profiles.items) |p| {
+        const have = std.mem.trimEnd(u8, p.config_dir orelse continue, "/");
+        if (std.mem.eql(u8, have, want)) return p.name;
+    }
+    const base = std.fs.path.basename(want);
+    const name = std.mem.trimStart(u8, base, ".");
+    try profiles.append(ctx.perm, .{ .name = if (name.len > 0) name else "env", .config_dir = want });
+    return profiles.items[profiles.items.len - 1].name;
 }
 
 fn fallback(ctx: Ctx) !Config {
