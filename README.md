@@ -66,7 +66,9 @@ cl kill <name>            kill a session
 cl send <name> <text>     type text + Enter into a session
 cl output <name> [lines]  status, latest reply, and pane tail (default 40 lines)
 cl watch                  print a line whenever a session's status changes
+cl closed                 closed sessions, most recently closed first
 cl operator               attach to the operator session (o in the chooser)
+cl alert <text> | --clear flag the chooser header from the operator
 
 launch options:
   -p, --profile <name>    profile from the config
@@ -89,8 +91,15 @@ The latest reply comes from the transcript Claude writes under
 `<config dir>/projects/<cwd>/<session id>.jsonl` (only the last 256 KB is read).
 
 Chooser keys: `j`/`k` move, `Enter` attach, `Tab` toggle details, `n` new session
-(asks for directory, name, profile, optional first message), `o` operator, `d` kill, `r` rename,
-`s` send a line, `/` filter, `gg`/`G`, `R` refresh, `q` quit.
+(asks for directory, name, profile, optional first message), `o` operator, `R` resume a closed session, `d` kill, `r` rename,
+`s` send a line, `/` filter, `gg`/`G`, `Ctrl-R` refresh, `q` quit.
+
+`R` lists sessions that are no longer running, most recently closed first, with
+Claude's last reply; `Enter` brings one back with `claude --resume` in its old
+directory, name, and profile. Every launch is recorded in
+`~/.local/state/cl/history.jsonl`, and the chooser keeps each running session's
+Claude session id up to date there (so `/clear` is followed). "Closed" is when
+the transcript was last written.
 
 ## Operator
 
@@ -100,6 +109,14 @@ say what everyone is doing, or keep an eye on things; it runs `cl watch` to hear
 about status changes. It is not started until you first press `o`, then keeps
 running like any other session. It is hidden from the list and from `cl list`,
 `send` and `kill`; the header shows its status while it runs.
+
+When something needs you, the operator runs `cl alert "<text>"` and the chooser
+shows a ⚑ flag with that text in the top-right corner. Opening the operator
+clears it (or `cl alert --clear`).
+
+The operator keeps notes in `~/.config/cl/operator/notes/` (an `index.md` plus
+a file per topic), reads them when it starts, and updates them as it goes, so
+they survive restarting it. Tell it "note that ..." to add one.
 
 It runs in `~/.config/cl/operator/` with the profile from the `operator`
 setting. Its instructions come from the binary (`src/operator.zig`); put a

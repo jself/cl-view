@@ -17,6 +17,8 @@ pub const Session = struct {
     activity: i64,
     /// "operator" for the operator session, "" otherwise.
     role: []const u8,
+    /// The operator's pending alert for the human (@cl_alert), "" if none.
+    alert: []const u8,
 };
 
 pub const operator_role = "operator";
@@ -143,7 +145,7 @@ pub fn ensureDetachBinding(ctx: Ctx) !void {
     });
 }
 
-const list_format = "#{session_name}\t#{@cl_name}\t#{@cl_dir}\t#{@cl_profile}\t#{@cl_created}\t#{pane_dead}\t#{session_activity}\t#{@cl_role}\t#{pane_title}";
+const list_format = "#{session_name}\t#{@cl_name}\t#{@cl_dir}\t#{@cl_profile}\t#{@cl_created}\t#{pane_dead}\t#{session_activity}\t#{@cl_role}\t#{@cl_alert}\t#{pane_title}";
 
 /// List cl sessions, oldest first, leaving out the operator. Caller owns the
 /// slice and its strings (use an arena).
@@ -182,6 +184,7 @@ fn listAll(ctx: Ctx, arena: std.mem.Allocator) ![]Session {
         const dead_s = f.next() orelse continue;
         const act_s = f.next() orelse continue;
         const role = f.next() orelse continue;
+        const alert = f.next() orelse continue;
         const title = f.rest();
         try sessions.append(arena, .{
             .tmux_name = try arena.dupe(u8, tmux_name),
@@ -192,6 +195,7 @@ fn listAll(ctx: Ctx, arena: std.mem.Allocator) ![]Session {
             .pane_dead = std.mem.eql(u8, dead_s, "1"),
             .activity = std.fmt.parseInt(i64, act_s, 10) catch 0,
             .role = try arena.dupe(u8, role),
+            .alert = try arena.dupe(u8, alert),
             .pane_title = try arena.dupe(u8, title),
         });
     }
@@ -214,6 +218,11 @@ pub fn find(ctx: Ctx, arena: std.mem.Allocator, name: []const u8) !?Session {
 
 pub fn kill(ctx: Ctx, tmux_name: []const u8) !void {
     try runQuiet(ctx, &.{ "kill-session", "-t", tmux_name });
+}
+
+/// Set (or with "" clear) the alert shown in the chooser's header.
+pub fn setAlert(ctx: Ctx, tmux_name: []const u8, text: []const u8) !void {
+    try runQuiet(ctx, &.{ "set-option", "-t", tmux_name, "@cl_alert", text });
 }
 
 pub fn rename(ctx: Ctx, tmux_name: []const u8, new_name: []const u8) !void {

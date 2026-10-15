@@ -4,6 +4,7 @@ const Ctx = @import("ctx.zig");
 const config = @import("config.zig");
 const tmux = @import("tmux.zig");
 const claude = @import("claude.zig");
+const history = @import("history.zig");
 
 pub const Options = struct {
     dir: ?[]const u8 = null,
@@ -35,13 +36,19 @@ pub fn create(ctx: Ctx, cfg: config.Config, o: Options) ![]const u8 {
     defer cmd.deinit(ctx.gpa);
     try cmd.append(ctx.gpa, "claude");
     var idbuf: [36]u8 = undefined;
+    // Claude's session id when we know it up front; the chooser fills in the rest.
+    var session_id: []const u8 = "";
     if (o.resume_flag) {
         try cmd.append(ctx.gpa, "--resume");
-        if (o.resume_id) |id| try cmd.append(ctx.gpa, id);
+        if (o.resume_id) |id| {
+            try cmd.append(ctx.gpa, id);
+            session_id = id;
+        }
     } else if (o.continue_flag) {
         try cmd.append(ctx.gpa, "--continue");
     } else if (!claude.argsPickSession(o.extra)) {
-        try cmd.appendSlice(ctx.gpa, &.{ "--session-id", claude.uuid4(ctx, &idbuf) });
+        session_id = claude.uuid4(ctx, &idbuf);
+        try cmd.appendSlice(ctx.gpa, &.{ "--session-id", session_id });
     }
     try cmd.appendSlice(ctx.gpa, o.extra);
 
@@ -53,6 +60,10 @@ pub fn create(ctx: Ctx, cfg: config.Config, o: Options) ![]const u8 {
         .role = o.role,
         .command = cmd.items,
     });
+
+    if (o.role.len == 0) {
+        history.record(ctx, .{ .tmux = tmux_name, .name = name, .dir = dir, .profile = profile.name, .session_id = session_id, .created = ctx.nowSeconds() }) catch {};
+    }
 
     if (o.message) |m| {
         if (m.len > 0) try claude.sendInitialMessage(ctx, tmux_name, m);

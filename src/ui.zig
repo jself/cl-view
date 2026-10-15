@@ -8,6 +8,7 @@ const claude = @import("claude.zig");
 const launch = @import("launch.zig");
 const sgr = @import("sgr.zig");
 const operator = @import("operator.zig");
+const history = @import("history.zig");
 
 const Event = union(enum) {
     key_press: vaxis.Key,
@@ -17,6 +18,8 @@ const Event = union(enum) {
 
 const Mode = union(enum) {
     list,
+    /// R: closed sessions, most recently closed first; Enter resumes one.
+    history,
     confirm_kill,
     input: Input,
 };
@@ -36,6 +39,12 @@ const App = struct {
     /// Lives across refreshes: form fields and the filter string.
     form_state: std.heap.ArenaAllocator,
     sessions: []tmux.Session = &.{},
+    /// tmux name -> Claude session id already in the history file.
+    known: std.StringHashMapUnmanaged([]const u8) = .empty,
+    /// Loaded when the resume list opens; lives in hist_state.
+    hist_state: std.heap.ArenaAllocator,
+    closed: []history.Closed = &.{},
+    hist_cursor: usize = 0,
     /// The operator, when it is running (hidden from `sessions`).
     op: ?tmux.Session = null,
     statuses: claude.StatusMap = .empty,
@@ -106,6 +115,7 @@ const App = struct {
         self.sessions = try tmux.list(self.ctx, self.arena());
         self.op = try tmux.operator(self.ctx, self.arena());
         self.statuses = try claude.readStatuses(self.ctx, self.arena(), self.cfg);
+        history.sync(self.ctx, self.ctx.gpa, &self.known, self.sessions, self.statuses) catch {};
         if (keep) |k| self.selectByName(k);
         try self.loadPreview();
         self.last_refresh_ms = std.Io.Timestamp.now(self.ctx.io, .real).toMilliseconds();
@@ -157,6 +167,7 @@ const App = struct {
         self.dirty = true;
         switch (self.mode) {
             .list => try self.handleListKey(key),
+            .history => try self.handleHistoryKey(key),
             .confirm_kill => {
                 if (key.matches('y', .{}) or key.matches(vaxis.Key.enter, .{})) {
                     if (self.selected()) |s| {
@@ -230,7 +241,13 @@ const App = struct {
             const cwd = std.process.currentPathAlloc(self.ctx.io, self.arena()) catch "";
             try self.input.insertSliceAtCursor(try self.ctx.shortenHomeIn(self.arena(), cwd));
             self.mode = .{ .input = .new_dir };
-        } else if (key.matches('R', .{}) or key.matches('r', .{ .ctrl = true })) {
+        } else if (key.matches('R', .{}) or key.matches('r', .{ .shift = true })) {
+            _ = self.hist_state.reset(.retain_capacity);
+            self.closed = history.closed(self.ctx, self.hist_state.allocator(), self.cfg, self.sessions, self.statuses) catch &.{};
+            self.hist_cursor = 0;
+            self.scroll = 0;
+            self.mode = .history;
+        } else if (key.matches('r', .{ .ctrl = true })) {
             try self.refresh();
         } else if (key.matches(vaxis.Key.tab, .{})) {
             self.expanded = !self.expanded;
@@ -239,8 +256,73 @@ const App = struct {
                 self.setMessage("operator failed: {s} (profile {s})", .{ @errorName(err), self.cfg.operator });
                 return;
             };
+            // Opening the operator is how you acknowledge its alert.
+            tmux.setAlert(self.ctx, tmux_name, "") catch {};
             try self.attach(tmux_name);
         }
+    }
+
+    fn handleHistoryKey(self: *App, key: vaxis.Key) !void {
+        const count = self.closed.len;
+        if (key.matches('g', .{})) {
+            if (self.pending_g) self.hist_cursor = 0;
+            self.pending_g = !self.pending_g;
+            return;
+        }
+        self.pending_g = false;
+        if (key.matches(vaxis.Key.escape, .{}) or key.matches('q', .{}) or key.matches('R', .{}) or key.matches('r', .{ .shift = true })) {
+            self.mode = .list;
+            self.scroll = 0;
+        } else if (key.matches('c', .{ .ctrl = true })) {
+            self.quit = true;
+        } else if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) {
+            if (self.hist_cursor + 1 < count) self.hist_cursor += 1;
+        } else if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) {
+            if (self.hist_cursor > 0) self.hist_cursor -= 1;
+        } else if (key.matches('G', .{}) or key.matches('g', .{ .shift = true })) {
+            if (count > 0) self.hist_cursor = count - 1;
+        } else if (key.matches(vaxis.Key.enter, .{}) or key.matches('l', .{})) {
+            if (count == 0) return;
+            const e = self.closed[self.hist_cursor].entry;
+            const tmux_name = launch.create(self.ctx, self.cfg, .{
+                .dir = e.dir,
+                .name = e.name,
+                .profile = e.profile,
+                .resume_flag = e.session_id.len > 0,
+                .resume_id = if (e.session_id.len > 0) e.session_id else null,
+                .continue_flag = e.session_id.len == 0,
+            }) catch |err| {
+                self.setMessage("resume failed: {s}", .{@errorName(err)});
+                return;
+            };
+            self.mode = .list;
+            self.scroll = 0;
+            try self.refresh();
+            try self.attach(tmux_name);
+        }
+    }
+
+    fn buildHistoryLines(self: *App, width: u16) ![]Line {
+        var lines: std.ArrayList(Line) = .empty;
+        const now = self.ctx.nowSeconds();
+        for (self.closed, 0..) |c, i| {
+            const age = try ageText(self.arena(), now - c.closed);
+            const short = try self.ctx.shortenHomeIn(self.arena(), c.entry.dir);
+            // "  name  profile  ~/dir  reply  age"
+            const fixed = 2 + cols(c.entry.name) + 2 + cols(c.entry.profile) + 2 + cols(short) + 2 + 2 + age.len;
+            try lines.append(self.arena(), .{ .vi = i, .segs = try self.arena().dupe(vaxis.Segment, &.{
+                .{ .text = "  " },
+                .{ .text = c.entry.name, .style = .{ .bold = true } },
+                .{ .text = "  " },
+                .{ .text = c.entry.profile, .style = .{ .dim = true } },
+                .{ .text = "  " },
+                .{ .text = short, .style = .{ .dim = true } },
+                .{ .text = "  " },
+                .{ .text = try truncate(self.arena(), c.reply, width -| fixed) },
+                .{ .text = try std.fmt.allocPrint(self.arena(), "  {s}", .{age}), .style = .{ .dim = true } },
+            }) });
+        }
+        return lines.toOwnedSlice(self.arena());
     }
 
     fn submitInput(self: *App, kind: Input, text: []const u8) !void {
@@ -365,10 +447,17 @@ const App = struct {
         var buf: [1024]usize = undefined;
         const vis = self.visible(&buf);
 
+        const in_history = self.mode == .history;
+        if (in_history) {
+            _ = win.print(&.{
+                .{ .text = " RESUME  ", .style = bold },
+                .{ .text = try std.fmt.allocPrint(self.arena(), "{d} closed sessions, most recently closed first", .{self.closed.len}), .style = .{ .dim = true } },
+            }, .{ .wrap = .none });
+        }
         // Header: counts per group, like `claude agents`.
         var counts = std.enums.EnumArray(claude.Status, usize).initFill(0);
         for (vis) |si| counts.getPtr(self.status(self.sessions[si])).* += 1;
-        _ = win.print(&.{
+        if (!in_history) _ = win.print(&.{
             .{ .text = " SESSIONS  ", .style = bold },
             .{ .text = try std.fmt.allocPrint(self.arena(), "{d} need input", .{counts.get(.blocked)}), .style = .{ .fg = statusColor(.blocked) } },
             .{ .text = " · ", .style = .{ .dim = true } },
@@ -380,12 +469,17 @@ const App = struct {
         }, .{ .wrap = .none });
         if (self.op) |op| {
             const st = self.status(op);
-            const t = try std.fmt.allocPrint(self.arena(), "operator {s} ", .{st.label()});
-            _ = win.printSegment(.{ .text = t, .style = .{ .fg = statusColor(st) } }, .{ .col_offset = win.width -| @as(u16, @intCast(cols(t))), .wrap = .none });
+            const t = if (op.alert.len > 0)
+                try std.fmt.allocPrint(self.arena(), " ⚑ {s} (o) ", .{try truncate(self.arena(), op.alert, win.width / 2)})
+            else
+                try std.fmt.allocPrint(self.arena(), "operator {s} ", .{st.label()});
+            const style: vaxis.Style = if (op.alert.len > 0) .{ .fg = .{ .index = 0 }, .bg = .{ .index = 3 }, .bold = true } else .{ .fg = statusColor(st) };
+            _ = win.printSegment(.{ .text = t, .style = style }, .{ .col_offset = win.width -| @as(u16, @intCast(cols(t))), .wrap = .none });
         }
 
         // Split the rest between the list (top) and the preview (bottom).
-        const lines = try self.buildLines(vis, win.width);
+        const lines = if (in_history) try self.buildHistoryLines(win.width) else try self.buildLines(vis, win.width);
+        const cursor = if (in_history) self.hist_cursor else self.cursor;
         const avail: u16 = win.height -| 4; // header, gap under list, separator, bottom line
         const preview_min: u16 = @min(10, avail / 2);
         // The list takes at most a third of the window, then scrolls.
@@ -395,7 +489,7 @@ const App = struct {
 
         // Scroll so the selected row is on screen.
         var cursor_line: usize = 0;
-        for (lines, 0..) |l, i| if (l.vi == self.cursor) {
+        for (lines, 0..) |l, i| if (l.vi == cursor) {
             cursor_line = i;
         };
         if (cursor_line < self.scroll) self.scroll = cursor_line;
@@ -404,7 +498,7 @@ const App = struct {
 
         const list = win.child(.{ .y_off = 1, .height = list_h });
         for (lines[self.scroll..@min(lines.len, self.scroll + list_h)], 0..) |l, y| {
-            const sel = l.vi != null and l.vi.? == self.cursor;
+            const sel = l.vi != null and l.vi.? == cursor;
             const row = list.child(.{ .y_off = @intCast(y), .height = 1 });
             if (sel) {
                 row.fill(.{ .style = .{ .reverse = true } });
@@ -415,7 +509,9 @@ const App = struct {
                 _ = row.print(l.segs, .{ .wrap = .none });
             }
         }
-        if (vis.len == 0) {
+        if (in_history and self.closed.len == 0) {
+            _ = list.printSegment(.{ .text = "  no closed sessions yet.", .style = .{ .dim = true } }, .{ .wrap = .none });
+        } else if (!in_history and vis.len == 0) {
             _ = list.printSegment(.{ .text = "  no sessions. press n to launch one.", .style = .{ .dim = true } }, .{ .wrap = .none });
         }
 
@@ -423,7 +519,15 @@ const App = struct {
         const sep_y: u16 = 1 + list_h + 1;
         var x: u16 = 0;
         while (x < win.width) : (x += 1) win.writeCell(x, sep_y, .{ .char = .{ .grapheme = "─" }, .style = .{ .dim = true } });
-        if (self.selected()) |s| {
+        if (in_history) {
+            if (self.closed.len > 0) {
+                const c = self.closed[self.hist_cursor];
+                const title = try std.fmt.allocPrint(self.arena(), " {s}  {s} ", .{ c.entry.name, if (c.entry.session_id.len > 0) c.entry.session_id else "no session id: resumes with --continue" });
+                _ = win.printSegment(.{ .text = title, .style = .{ .dim = true } }, .{ .row_offset = sep_y, .col_offset = 1, .wrap = .none });
+                const right = win.child(.{ .x_off = 2, .y_off = sep_y + 1, .width = win.width -| 4, .height = preview_h });
+                _ = right.printSegment(.{ .text = if (c.reply.len > 0) c.reply else "(no reply recorded)" }, .{ .wrap = .word });
+            }
+        } else if (self.selected()) |s| {
             const title = try std.fmt.allocPrint(self.arena(), " {s}  {s} ", .{ s.name, s.tmux_name });
             _ = win.printSegment(.{ .text = title, .style = .{ .dim = true } }, .{ .row_offset = sep_y, .col_offset = 1, .wrap = .none });
             const right = win.child(.{ .y_off = sep_y + 1, .height = preview_h });
@@ -438,7 +542,11 @@ const App = struct {
         const bottom = win.child(.{ .y_off = win.height -| 1, .height = 1 });
         switch (self.mode) {
             .list => {
-                const help = if (self.message.len > 0) self.message else  " enter attach  tab details  n new  o operator  d kill  r rename  s send  / filter  q quit  (ctrl-q detaches)";
+                const help = if (self.message.len > 0) self.message else  " enter attach  tab details  n new  o operator  R resume closed  d kill  r rename  s send  / filter  q quit  (ctrl-q detaches)";
+                _ = bottom.printSegment(.{ .text = help, .style = .{ .dim = true } }, .{ .wrap = .none });
+            },
+            .history => {
+                const help = if (self.message.len > 0) self.message else " enter resume  j/k move  esc back";
                 _ = bottom.printSegment(.{ .text = help, .style = .{ .dim = true } }, .{ .wrap = .none });
             },
             .confirm_kill => {
@@ -546,10 +654,14 @@ pub fn run(ctx: Ctx, cfg: config.Config, select: ?[]const u8) !void {
         .loop = &loop,
         .arena_state = std.heap.ArenaAllocator.init(ctx.gpa),
         .form_state = std.heap.ArenaAllocator.init(ctx.gpa),
+        .hist_state = std.heap.ArenaAllocator.init(ctx.gpa),
         .input = vaxis.widgets.TextInput.init(ctx.gpa),
     };
     defer app.arena_state.deinit();
     defer app.form_state.deinit();
+    defer app.hist_state.deinit();
+    defer history.freeKnown(ctx.gpa, &app.known);
+    history.seed(ctx, ctx.gpa, &app.known) catch {};
     defer app.input.deinit();
 
     try app.refresh();

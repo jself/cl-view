@@ -73,6 +73,8 @@ pub const Info = struct {
     updated_ms: i64,
     /// Start of Claude's most recent reply (whitespace squashed), "" if unknown.
     summary: []const u8,
+    /// Claude's current session id, "" if unknown.
+    session_id: []const u8,
 };
 
 pub const StatusMap = std.StringHashMapUnmanaged(Info);
@@ -102,6 +104,7 @@ pub fn readStatuses(ctx: Ctx, arena: std.mem.Allocator, cfg: config.Config) !Sta
                 .status_since_ms = reg.statusUpdatedAt orelse 0,
                 .updated_ms = reg.updatedAt orelse 0,
                 .summary = lastReply(ctx, arena, config_dir, reg.cwd, reg.sessionId) catch "",
+                .session_id = try arena.dupe(u8, reg.sessionId orelse ""),
             });
         }
     }
@@ -121,7 +124,7 @@ pub fn transcriptPath(arena: std.mem.Allocator, config_dir: []const u8, cwd: []c
 const tail_bytes = 256 * 1024;
 
 /// Read the last assistant text block from the session transcript.
-fn lastReply(ctx: Ctx, arena: std.mem.Allocator, config_dir: []const u8, cwd: ?[]const u8, session_id: ?[]const u8) ![]const u8 {
+pub fn lastReply(ctx: Ctx, arena: std.mem.Allocator, config_dir: []const u8, cwd: ?[]const u8, session_id: ?[]const u8) ![]const u8 {
     const path = try transcriptPath(arena, config_dir, cwd orelse return "", session_id orelse return "");
     const file = try std.Io.Dir.openFileAbsolute(ctx.io, path, .{});
     defer file.close(ctx.io);
@@ -196,7 +199,7 @@ test "lastAssistantText picks the newest text block" {
     try std.testing.expectEqualStrings("/c/projects/-home-u-a-b/sid.jsonl", try transcriptPath(arena_state.allocator(), "/c", "/home/u/a.b", "sid"));
 }
 
-fn defaultConfigDir(ctx: Ctx, arena: std.mem.Allocator) ![]const u8 {
+pub fn defaultConfigDir(ctx: Ctx, arena: std.mem.Allocator) ![]const u8 {
     if (ctx.env.get("CLAUDE_CONFIG_DIR")) |d| return d;
     return std.fmt.allocPrint(arena, "{s}/.claude", .{ctx.home});
 }
