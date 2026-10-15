@@ -47,6 +47,8 @@ const App = struct {
     dirty: bool = true,
     quit: bool = false,
     pending_g: bool = false,
+    /// Tab toggles per-session details (directory, tmux name, Claude's name).
+    expanded: bool = false,
     // state for the "new session" form
     new_dir: []const u8 = "",
     new_name: []const u8 = "",
@@ -60,6 +62,7 @@ const App = struct {
         return self.form_state.allocator();
     }
 
+    /// Indices of sessions passing the filter, grouped by status (needs input first).
     fn visible(self: *App, buf: []usize) []usize {
         var n: usize = 0;
         for (self.sessions, 0..) |s, i| {
@@ -69,7 +72,17 @@ const App = struct {
                 n += 1;
             }
         }
-        return buf[0..n];
+        const vis = buf[0..n];
+        std.sort.insertion(usize, vis, self, lessByGroup);
+        return vis;
+    }
+
+    fn lessByGroup(self: *App, a: usize, b: usize) bool {
+        return self.status(self.sessions[a]).rank() < self.status(self.sessions[b]).rank();
+    }
+
+    fn status(self: *App, s: tmux.Session) claude.Status {
+        return claude.statusFor(self.ctx, self.statuses, s);
     }
 
     fn selected(self: *App) ?tmux.Session {
@@ -214,6 +227,8 @@ const App = struct {
             self.mode = .{ .input = .new_dir };
         } else if (key.matches('R', .{}) or key.matches('r', .{ .ctrl = true })) {
             try self.refresh();
+        } else if (key.matches(vaxis.Key.tab, .{})) {
+            self.expanded = !self.expanded;
         }
     }
 
@@ -293,40 +308,51 @@ const App = struct {
         _ = left.printSegment(.{ .text = " SESSIONS", .style = bold }, .{ .wrap = .none });
         var buf: [1024]usize = undefined;
         const vis = self.visible(&buf);
-        var row: u16 = 2;
+        var row: u16 = 1;
+        var group: ?claude.Status = null;
         for (vis, 0..) |si, vi| {
             if (row >= win.height - 2) break;
             const s = self.sessions[si];
-            const st = claude.statusFor(self.ctx, self.statuses, s);
-            const dot_style: vaxis.Style = .{ .fg = statusColor(st) };
+            const st = self.status(s);
+            const color = statusColor(st);
+            if (group == null or group.? != st) {
+                group = st;
+                // vaxis keeps text slices until render, so this must outlive the loop.
+                const title = try std.fmt.allocPrint(self.arena(), " {s}", .{st.groupLabel()});
+                _ = left.printSegment(.{ .text = title, .style = .{ .fg = color, .bold = true } }, .{ .row_offset = row + 1, .wrap = .none });
+                row += 2;
+                if (row >= win.height - 2) break;
+            }
             const sel = vi == self.cursor;
             const row_style: vaxis.Style = if (sel) .{ .reverse = true } else .{};
             const line = left.child(.{ .y_off = row, .height = 1 });
             if (sel) line.fill(.{ .style = row_style });
             _ = line.print(&.{
-                .{ .text = " ", .style = row_style },
-                .{ .text = "●", .style = .{ .fg = dot_style.fg, .reverse = sel } },
+                .{ .text = "  ", .style = row_style },
+                .{ .text = "●", .style = .{ .fg = color, .reverse = sel } },
                 .{ .text = " ", .style = row_style },
                 .{ .text = s.name, .style = .{ .bold = true, .reverse = sel } },
                 .{ .text = "  ", .style = row_style },
                 .{ .text = s.profile, .style = .{ .dim = true, .reverse = sel } },
             }, .{ .wrap = .none });
             row += 1;
-            if (row >= win.height - 2) break;
+            if (!self.expanded) continue;
             const short = try self.ctx.shortenHomeIn(self.arena(), s.dir);
-            const sub = left.child(.{ .y_off = row, .height = 1 });
-            _ = sub.print(&.{
-                .{ .text = "    ", .style = .{} },
-                .{ .text = st.label(), .style = .{ .fg = dot_style.fg } },
-                .{ .text = "  ", .style = .{} },
-                .{ .text = short, .style = .{ .dim = true } },
-            }, .{ .wrap = .none });
-            row += 1;
+            const detail = [_][]const u8{ short, s.tmux_name };
+            for (detail) |text| {
+                if (row >= win.height - 2) break;
+                const sub = left.child(.{ .y_off = row, .height = 1 });
+                _ = sub.print(&.{
+                    .{ .text = "      ", .style = .{} },
+                    .{ .text = text, .style = .{ .dim = true } },
+                }, .{ .wrap = .none });
+                row += 1;
+            }
             if (self.statuses.get(s.tmux_name)) |info| {
                 if (info.name.len > 0 and !std.mem.eql(u8, info.name, s.name) and row < win.height - 2) {
                     const sub2 = left.child(.{ .y_off = row, .height = 1 });
                     _ = sub2.print(&.{
-                        .{ .text = "    ", .style = .{} },
+                        .{ .text = "      ", .style = .{} },
                         .{ .text = info.name, .style = .{ .italic = true, .dim = true } },
                     }, .{ .wrap = .none });
                     row += 1;
@@ -339,8 +365,7 @@ const App = struct {
 
         // preview
         if (self.selected()) |s| {
-            var hdr: [256]u8 = undefined;
-            const title = std.fmt.bufPrint(&hdr, " {s}  ({s})", .{ s.name, s.tmux_name }) catch " ";
+            const title = try std.fmt.allocPrint(self.arena(), " {s}  ({s})", .{ s.name, s.tmux_name });
             _ = right.printSegment(.{ .text = title, .style = bold }, .{ .wrap = .none });
             var py: u16 = 2;
             for (self.preview) |segs| {
@@ -355,7 +380,7 @@ const App = struct {
         const bottom = win.child(.{ .y_off = win.height -| 1, .height = 1 });
         switch (self.mode) {
             .list => {
-                const help = if (self.message.len > 0) self.message else " enter attach  n new  d kill  r rename  s send  / filter  q quit  (ctrl-q detaches)";
+                const help = if (self.message.len > 0) self.message else " enter attach  tab details  n new  d kill  r rename  s send  / filter  q quit  (ctrl-q detaches)";
                 _ = bottom.printSegment(.{ .text = help, .style = .{ .dim = true } }, .{ .wrap = .none });
             },
             .confirm_kill => {

@@ -57,9 +57,13 @@ launch options:
   -- <args...>            everything after -- goes to claude verbatim
 ```
 
-Chooser keys: `j`/`k` move, `Enter` attach, `n` new session (asks for directory,
-name, profile, optional first message), `d` kill, `r` rename, `s` send a line,
-`/` filter, `gg`/`G`, `R` refresh, `q` quit.
+The chooser groups sessions by status (needs input, working, idle, starting,
+unknown, gone) and shows one line per session. `Tab` expands every row with the
+directory, tmux session name, and Claude's own session name.
+
+Chooser keys: `j`/`k` move, `Enter` attach, `Tab` toggle details, `n` new session
+(asks for directory, name, profile, optional first message), `d` kill, `r` rename,
+`s` send a line, `/` filter, `gg`/`G`, `R` refresh, `q` quit.
 
 ## Notes
 

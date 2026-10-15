@@ -16,6 +16,29 @@ pub const Status = enum {
     pub fn label(s: Status) []const u8 {
         return @tagName(s);
     }
+
+    /// Display order in the chooser: sessions that need a human come first.
+    pub fn rank(s: Status) u8 {
+        return switch (s) {
+            .blocked => 0,
+            .busy => 1,
+            .idle => 2,
+            .starting => 3,
+            .unknown => 4,
+            .gone => 5,
+        };
+    }
+
+    pub fn groupLabel(s: Status) []const u8 {
+        return switch (s) {
+            .blocked => "NEEDS INPUT",
+            .busy => "WORKING",
+            .idle => "IDLE",
+            .starting => "STARTING",
+            .unknown => "UNKNOWN",
+            .gone => "GONE",
+        };
+    }
 };
 
 const Registry = struct {
