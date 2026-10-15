@@ -371,9 +371,11 @@ const App = struct {
 
         // Split the rest between the list (top) and the preview (bottom).
         const lines = try self.buildLines(vis, win.width);
-        const avail: u16 = win.height -| 3; // header, separator, bottom line
+        const avail: u16 = win.height -| 4; // header, gap under list, separator, bottom line
         const preview_min: u16 = @min(10, avail / 2);
-        const list_h: u16 = @intCast(@min(lines.len, @max(1, avail -| preview_min)));
+        // The list takes at most a third of the window, then scrolls.
+        const list_max: u16 = @max(1, win.height / 3);
+        const list_h: u16 = @intCast(@min(lines.len, list_max, @max(1, avail -| preview_min)));
         const preview_h: u16 = avail -| list_h;
 
         // Scroll so the selected row is on screen.
@@ -403,7 +405,7 @@ const App = struct {
         }
 
         // separator + preview of the selected pane
-        const sep_y: u16 = 1 + list_h;
+        const sep_y: u16 = 1 + list_h + 1;
         var x: u16 = 0;
         while (x < win.width) : (x += 1) win.writeCell(x, sep_y, .{ .char = .{ .grapheme = "─" }, .style = .{ .dim = true } });
         if (self.selected()) |s| {

@@ -24,14 +24,14 @@ pub const Status = enum {
     /// Display order in the chooser: sessions that need a human come first.
     pub fn rank(s: Status) u8 {
         return switch (s) {
-            .blocked => 0,
-            .busy => 1,
-            .waiting => 2,
-            .shell => 3,
-            .idle => 4,
-            .starting => 5,
-            .unknown => 6,
-            .gone => 7,
+            .idle => 0,
+            .shell => 1,
+            .blocked => 2,
+            .waiting => 3,
+            .starting => 4,
+            .unknown => 5,
+            .gone => 6,
+            .busy => 7,
         };
     }
 
