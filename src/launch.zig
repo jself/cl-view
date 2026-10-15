@@ -22,7 +22,9 @@ pub const Error = error{ NoSuchDir, NoSuchProfile, PromptTimeout };
 /// Create the tmux session, optionally send the initial message, return the tmux name.
 pub fn create(ctx: Ctx, cfg: config.Config, o: Options) ![]const u8 {
     const profile = if (o.profile) |p| (cfg.find(p) orelse return error.NoSuchProfile) else cfg.defaultProfile();
-    const raw_dir = if (o.dir) |d| try ctx.expandHome(d) else try std.process.currentPathAlloc(ctx.io, ctx.gpa);
+    // currentPathAlloc returns a sentinel slice; freeing its plain-slice coercion trips the safe allocator.
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const raw_dir = if (o.dir) |d| try ctx.expandHome(d) else try ctx.gpa.dupe(u8, cwd_buf[0..try std.process.currentPath(ctx.io, &cwd_buf)]);
     defer ctx.gpa.free(raw_dir);
     const dir = std.Io.Dir.cwd().realPathFileAlloc(ctx.io, raw_dir, ctx.perm) catch return error.NoSuchDir;
     const name = if (o.name) |n| (if (n.len > 0) n else std.fs.path.basename(dir)) else std.fs.path.basename(dir);
