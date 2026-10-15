@@ -13,6 +13,18 @@ with its metadata in `@cl_*` options. Status comes from the registry files Claud
 itself writes under `<config dir>/sessions/`, the same source `claude agents` uses,
 so `busy` / `idle` / `blocked` match what Claude reports.
 
+Linux only for now: checking whether a Claude process is still alive reads `/proc`.
+
+## Install
+
+Static binaries for x86_64 and aarch64 Linux are on the
+[releases page](https://github.com/jself/cl-view/releases):
+
+```
+curl -L https://github.com/jself/cl-view/releases/latest/download/cl-x86_64-linux-musl.tar.gz | tar xz
+install -m755 cl-x86_64-linux-musl/cl ~/.local/bin/cl
+```
+
 ## Build
 
 Requires Zig 0.16.0 (the pinned libvaxis commit targets exactly that version).
@@ -61,8 +73,8 @@ launch options:
 ```
 
 The chooser looks like `claude agents`: a count line, then sessions grouped by
-status (needs input, working, waiting, idle with background tasks
-running, idle, starting, unknown, gone), one line each
+status (idle, idle with background tasks running, needs input, waiting,
+starting, unknown, gone, working), one line each
 with the start of Claude's latest reply and how long ago the status changed.
 The selected session's pane is previewed below the list. `Tab` expands every
 row with the directory, tmux session name, and Claude's own session name.
@@ -82,3 +94,8 @@ Chooser keys: `j`/`k` move, `Enter` attach, `Tab` toggle details, `n` new sessio
   nested client.
 - `-m` waits for Claude's composer prompt (a `❯` line under the composer border)
   so it never answers a trust or onboarding dialog by accident.
+
+## Releasing
+
+Push a `v*` tag (`git tag v0.1.0 && git push origin v0.1.0`). CI builds both
+Linux targets, then publishes a GitHub release with the tarballs and `SHA256SUMS`.
