@@ -49,6 +49,9 @@ const Registry = struct {
     name: ?[]const u8 = null,
     nameSource: ?[]const u8 = null,
     statusUpdatedAt: ?i64 = null,
+    updatedAt: ?i64 = null,
+    sessionId: ?[]const u8 = null,
+    cwd: ?[]const u8 = null,
 };
 
 /// What Claude reports about one of our sessions (same source `claude agents` uses).
@@ -58,6 +61,10 @@ pub const Info = struct {
     name: []const u8,
     /// Unix ms of the last status change, 0 if unknown.
     status_since_ms: i64,
+    /// Unix ms of the last registry update, 0 if unknown.
+    updated_ms: i64,
+    /// Start of Claude's most recent reply (whitespace squashed), "" if unknown.
+    summary: []const u8,
 };
 
 pub const StatusMap = std.StringHashMapUnmanaged(Info);
@@ -66,7 +73,8 @@ pub const StatusMap = std.StringHashMapUnmanaged(Info);
 pub fn readStatuses(ctx: Ctx, arena: std.mem.Allocator, cfg: config.Config) !StatusMap {
     var map: StatusMap = .empty;
     for (cfg.profiles) |p| {
-        const dir_path = try std.fmt.allocPrint(arena, "{s}/sessions", .{p.config_dir orelse try defaultConfigDir(ctx, arena)});
+        const config_dir = p.config_dir orelse try defaultConfigDir(ctx, arena);
+        const dir_path = try std.fmt.allocPrint(arena, "{s}/sessions", .{config_dir});
         var dir = std.Io.Dir.openDirAbsolute(ctx.io, dir_path, .{ .iterate = true }) catch continue;
         defer dir.close(ctx.io);
         var it = dir.iterate();
@@ -84,10 +92,99 @@ pub fn readStatuses(ctx: Ctx, arena: std.mem.Allocator, cfg: config.Config) !Sta
                 .status = st,
                 .name = try arena.dupe(u8, reg.name orelse ""),
                 .status_since_ms = reg.statusUpdatedAt orelse 0,
+                .updated_ms = reg.updatedAt orelse 0,
+                .summary = lastReply(ctx, arena, config_dir, reg.cwd, reg.sessionId) catch "",
             });
         }
     }
     return map;
+}
+
+/// Claude stores transcripts under <config>/projects/<cwd with non-alphanumerics as '-'>/<sessionId>.jsonl.
+pub fn transcriptPath(arena: std.mem.Allocator, config_dir: []const u8, cwd: []const u8, session_id: []const u8) ![]const u8 {
+    const enc = try arena.dupe(u8, cwd);
+    for (enc) |*c| if (!std.ascii.isAlphanumeric(c.*)) {
+        c.* = '-';
+    };
+    return std.fmt.allocPrint(arena, "{s}/projects/{s}/{s}.jsonl", .{ config_dir, enc, session_id });
+}
+
+const tail_bytes = 64 * 1024;
+
+/// Read the last assistant text block from the session transcript.
+fn lastReply(ctx: Ctx, arena: std.mem.Allocator, config_dir: []const u8, cwd: ?[]const u8, session_id: ?[]const u8) ![]const u8 {
+    const path = try transcriptPath(arena, config_dir, cwd orelse return "", session_id orelse return "");
+    const file = try std.Io.Dir.openFileAbsolute(ctx.io, path, .{});
+    defer file.close(ctx.io);
+    const len = try file.length(ctx.io);
+    const start = len -| tail_bytes;
+    const buf = try arena.alloc(u8, @intCast(len - start));
+    const n = try file.readPositionalAll(ctx.io, buf, start);
+    var data = buf[0..n];
+    // A tail that starts mid-file begins with a partial line; drop it.
+    if (start > 0) {
+        const nl = std.mem.indexOfScalar(u8, data, '\n') orelse return "";
+        data = data[nl + 1 ..];
+    }
+    return lastAssistantText(arena, data);
+}
+
+/// Scan JSONL from the end for the newest assistant message with a text block.
+pub fn lastAssistantText(arena: std.mem.Allocator, data: []const u8) ![]const u8 {
+    var it = std.mem.splitBackwardsScalar(u8, data, '\n');
+    while (it.next()) |line| {
+        if (line.len == 0) continue;
+        const parsed = std.json.parseFromSliceLeaky(std.json.Value, arena, line, .{}) catch continue;
+        const obj = switch (parsed) {
+            .object => |o| o,
+            else => continue,
+        };
+        const kind = obj.get("type") orelse continue;
+        if (kind != .string or !std.mem.eql(u8, kind.string, "assistant")) continue;
+        const msg = obj.get("message") orelse continue;
+        if (msg != .object) continue;
+        const content = msg.object.get("content") orelse continue;
+        if (content != .array) continue;
+        for (content.array.items) |part| {
+            if (part != .object) continue;
+            const pt = part.object.get("type") orelse continue;
+            if (pt != .string or !std.mem.eql(u8, pt.string, "text")) continue;
+            const text = part.object.get("text") orelse continue;
+            if (text != .string) continue;
+            return squash(arena, text.string);
+        }
+    }
+    return "";
+}
+
+/// Collapse runs of whitespace (including newlines) into single spaces.
+fn squash(arena: std.mem.Allocator, text: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var in_space = true;
+    for (text) |c| {
+        if (std.ascii.isWhitespace(c)) {
+            if (!in_space) try out.append(arena, ' ');
+            in_space = true;
+        } else {
+            try out.append(arena, c);
+            in_space = false;
+        }
+    }
+    return std.mem.trimEnd(u8, out.items, " ");
+}
+
+test "lastAssistantText picks the newest text block" {
+    const data =
+        \\{"type":"user","message":{"content":"hi"}}
+        \\{"type":"assistant","message":{"content":[{"type":"text","text":"Hello\n  there"}]}}
+        \\{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash"}]}}
+        \\not json
+    ;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const got = try lastAssistantText(arena_state.allocator(), data);
+    try std.testing.expectEqualStrings("Hello there", got);
+    try std.testing.expectEqualStrings("/c/projects/-home-u-a-b/sid.jsonl", try transcriptPath(arena_state.allocator(), "/c", "/home/u/a.b", "sid"));
 }
 
 fn defaultConfigDir(ctx: Ctx, arena: std.mem.Allocator) ![]const u8 {

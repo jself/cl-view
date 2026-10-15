@@ -49,6 +49,8 @@ const App = struct {
     pending_g: bool = false,
     /// Tab toggles per-session details (directory, tmux name, Claude's name).
     expanded: bool = false,
+    /// First list line drawn (keeps the cursor on screen).
+    scroll: usize = 0,
     // state for the "new session" form
     new_dir: []const u8 = "",
     new_name: []const u8 = "",
@@ -122,8 +124,7 @@ const App = struct {
             self.preview = &.{};
             return;
         };
-        const height = self.vx.window().height;
-        const rows: usize = if (height > 4) height - 4 else 1;
+        const rows: usize = @max(1, self.vx.window().height);
         const raw = tmux.capture(self.ctx, s.tmux_name, rows) catch {
             self.preview = &.{};
             return;
@@ -293,86 +294,126 @@ const App = struct {
         try self.loadPreview();
     }
 
-    fn draw(self: *App) !void {
-        const win = self.vx.window();
-        win.clear();
-        win.hideCursor();
-        const left_w: u16 = @max(24, win.width * 35 / 100);
-        const left = win.child(.{ .width = left_w, .height = win.height });
-        const right = win.child(.{ .x_off = left_w + 1, .width = win.width -| (left_w + 1), .height = win.height });
-        // separator
-        var y: u16 = 0;
-        while (y < win.height) : (y += 1) win.writeCell(left_w, y, .{ .char = .{ .grapheme = "│" }, .style = .{ .dim = true } });
+    /// One row of the list: a group heading, a session, or a detail line under a session.
+    const Line = struct {
+        segs: []const vaxis.Segment,
+        /// Index into the visible list when this row is selectable.
+        vi: ?usize = null,
+    };
 
-        const bold: vaxis.Style = .{ .bold = true };
-        _ = left.printSegment(.{ .text = " SESSIONS", .style = bold }, .{ .wrap = .none });
-        var buf: [1024]usize = undefined;
-        const vis = self.visible(&buf);
-        var row: u16 = 1;
+    fn buildLines(self: *App, vis: []const usize, width: u16) ![]Line {
+        var lines: std.ArrayList(Line) = .empty;
         var group: ?claude.Status = null;
         for (vis, 0..) |si, vi| {
-            if (row >= win.height - 2) break;
             const s = self.sessions[si];
             const st = self.status(s);
             const color = statusColor(st);
             if (group == null or group.? != st) {
                 group = st;
-                // vaxis keeps text slices until render, so this must outlive the loop.
-                const title = try std.fmt.allocPrint(self.arena(), " {s}", .{st.groupLabel()});
-                _ = left.printSegment(.{ .text = title, .style = .{ .fg = color, .bold = true } }, .{ .row_offset = row + 1, .wrap = .none });
-                row += 2;
-                if (row >= win.height - 2) break;
+                if (lines.items.len > 0) try lines.append(self.arena(), .{ .segs = &.{} });
+                try lines.append(self.arena(), .{ .segs = try self.arena().dupe(vaxis.Segment, &.{
+                    .{ .text = try std.fmt.allocPrint(self.arena(), " {s}", .{st.groupLabel()}), .style = .{ .fg = color, .bold = true } },
+                }) });
             }
-            const sel = vi == self.cursor;
-            const row_style: vaxis.Style = if (sel) .{ .reverse = true } else .{};
-            const line = left.child(.{ .y_off = row, .height = 1 });
-            if (sel) line.fill(.{ .style = row_style });
-            _ = line.print(&.{
-                .{ .text = "  ", .style = row_style },
-                .{ .text = "●", .style = .{ .fg = color, .reverse = sel } },
-                .{ .text = " ", .style = row_style },
-                .{ .text = s.name, .style = .{ .bold = true, .reverse = sel } },
-                .{ .text = "  ", .style = row_style },
-                .{ .text = s.profile, .style = .{ .dim = true, .reverse = sel } },
-            }, .{ .wrap = .none });
-            row += 1;
+            const info = self.statuses.get(s.tmux_name);
+            const age = try ageText(self.arena(), self.ctx.nowSeconds() - ageSince(s, info));
+            // "  ● name  profile  summary  age": fit the summary into what is left.
+            const fixed = 2 + 1 + 1 + cols(s.name) + 2 + cols(s.profile) + 2 + 2 + age.len;
+            const summary = if (info) |i| try truncate(self.arena(), i.summary, width -| fixed) else "";
+            try lines.append(self.arena(), .{ .vi = vi, .segs = try self.arena().dupe(vaxis.Segment, &.{
+                .{ .text = "  " },
+                .{ .text = "●", .style = .{ .fg = color } },
+                .{ .text = " " },
+                .{ .text = s.name, .style = .{ .bold = true } },
+                .{ .text = "  " },
+                .{ .text = s.profile, .style = .{ .dim = true } },
+                .{ .text = "  " },
+                .{ .text = summary },
+                .{ .text = try std.fmt.allocPrint(self.arena(), "  {s}", .{age}), .style = .{ .dim = true } },
+            }) });
             if (!self.expanded) continue;
             const short = try self.ctx.shortenHomeIn(self.arena(), s.dir);
-            const detail = [_][]const u8{ short, s.tmux_name };
-            for (detail) |text| {
-                if (row >= win.height - 2) break;
-                const sub = left.child(.{ .y_off = row, .height = 1 });
-                _ = sub.print(&.{
-                    .{ .text = "      ", .style = .{} },
-                    .{ .text = text, .style = .{ .dim = true } },
-                }, .{ .wrap = .none });
-                row += 1;
-            }
-            if (self.statuses.get(s.tmux_name)) |info| {
-                if (info.name.len > 0 and !std.mem.eql(u8, info.name, s.name) and row < win.height - 2) {
-                    const sub2 = left.child(.{ .y_off = row, .height = 1 });
-                    _ = sub2.print(&.{
-                        .{ .text = "      ", .style = .{} },
-                        .{ .text = info.name, .style = .{ .italic = true, .dim = true } },
-                    }, .{ .wrap = .none });
-                    row += 1;
-                }
+            try lines.append(self.arena(), .{ .segs = try self.arena().dupe(vaxis.Segment, &.{
+                .{ .text = "      " }, .{ .text = short, .style = .{ .dim = true } },
+                .{ .text = "  " },   .{ .text = s.tmux_name, .style = .{ .dim = true } },
+            }) });
+            if (info) |i| if (i.name.len > 0 and !std.mem.eql(u8, i.name, s.name)) {
+                try lines.append(self.arena(), .{ .segs = try self.arena().dupe(vaxis.Segment, &.{
+                    .{ .text = "      " }, .{ .text = i.name, .style = .{ .italic = true, .dim = true } },
+                }) });
+            };
+        }
+        return lines.toOwnedSlice(self.arena());
+    }
+
+    fn draw(self: *App) !void {
+        const win = self.vx.window();
+        win.clear();
+        win.hideCursor();
+        const bold: vaxis.Style = .{ .bold = true };
+
+        var buf: [1024]usize = undefined;
+        const vis = self.visible(&buf);
+
+        // Header: counts per group, like `claude agents`.
+        var counts = std.enums.EnumArray(claude.Status, usize).initFill(0);
+        for (vis) |si| counts.getPtr(self.status(self.sessions[si])).* += 1;
+        _ = win.print(&.{
+            .{ .text = " SESSIONS  ", .style = bold },
+            .{ .text = try std.fmt.allocPrint(self.arena(), "{d} need input", .{counts.get(.blocked)}), .style = .{ .fg = statusColor(.blocked) } },
+            .{ .text = " · ", .style = .{ .dim = true } },
+            .{ .text = try std.fmt.allocPrint(self.arena(), "{d} working", .{counts.get(.busy)}), .style = .{ .fg = statusColor(.busy) } },
+            .{ .text = " · ", .style = .{ .dim = true } },
+            .{ .text = try std.fmt.allocPrint(self.arena(), "{d} idle", .{counts.get(.idle)}), .style = .{ .fg = statusColor(.idle) } },
+            .{ .text = " · ", .style = .{ .dim = true } },
+            .{ .text = try std.fmt.allocPrint(self.arena(), "{d} other", .{vis.len - counts.get(.blocked) - counts.get(.busy) - counts.get(.idle)}), .style = .{ .dim = true } },
+        }, .{ .wrap = .none });
+
+        // Split the rest between the list (top) and the preview (bottom).
+        const lines = try self.buildLines(vis, win.width);
+        const avail: u16 = win.height -| 3; // header, separator, bottom line
+        const preview_min: u16 = @min(10, avail / 2);
+        const list_h: u16 = @intCast(@min(lines.len, @max(1, avail -| preview_min)));
+        const preview_h: u16 = avail -| list_h;
+
+        // Scroll so the selected row is on screen.
+        var cursor_line: usize = 0;
+        for (lines, 0..) |l, i| if (l.vi == self.cursor) {
+            cursor_line = i;
+        };
+        if (cursor_line < self.scroll) self.scroll = cursor_line;
+        if (cursor_line >= self.scroll + list_h) self.scroll = cursor_line + 1 - list_h;
+        if (self.scroll + list_h > lines.len) self.scroll = lines.len -| list_h;
+
+        const list = win.child(.{ .y_off = 1, .height = list_h });
+        for (lines[self.scroll..@min(lines.len, self.scroll + list_h)], 0..) |l, y| {
+            const sel = l.vi != null and l.vi.? == self.cursor;
+            const row = list.child(.{ .y_off = @intCast(y), .height = 1 });
+            if (sel) {
+                row.fill(.{ .style = .{ .reverse = true } });
+                const segs = try self.arena().dupe(vaxis.Segment, l.segs);
+                for (segs) |*sg| sg.style.reverse = true;
+                _ = row.print(segs, .{ .wrap = .none });
+            } else {
+                _ = row.print(l.segs, .{ .wrap = .none });
             }
         }
         if (vis.len == 0) {
-            _ = left.printSegment(.{ .text = "  no sessions. press n to launch one.", .style = .{ .dim = true } }, .{ .row_offset = 2, .wrap = .none });
+            _ = list.printSegment(.{ .text = "  no sessions. press n to launch one.", .style = .{ .dim = true } }, .{ .wrap = .none });
         }
 
-        // preview
+        // separator + preview of the selected pane
+        const sep_y: u16 = 1 + list_h;
+        var x: u16 = 0;
+        while (x < win.width) : (x += 1) win.writeCell(x, sep_y, .{ .char = .{ .grapheme = "─" }, .style = .{ .dim = true } });
         if (self.selected()) |s| {
-            const title = try std.fmt.allocPrint(self.arena(), " {s}  ({s})", .{ s.name, s.tmux_name });
-            _ = right.printSegment(.{ .text = title, .style = bold }, .{ .wrap = .none });
-            var py: u16 = 2;
-            for (self.preview) |segs| {
-                if (py >= right.height - 2) break;
-                const pl = right.child(.{ .y_off = py, .height = 1 });
+            const title = try std.fmt.allocPrint(self.arena(), " {s}  {s} ", .{ s.name, s.tmux_name });
+            _ = win.printSegment(.{ .text = title, .style = .{ .dim = true } }, .{ .row_offset = sep_y, .col_offset = 1, .wrap = .none });
+            const right = win.child(.{ .y_off = sep_y + 1, .height = preview_h });
+            const shown = if (self.preview.len > preview_h) self.preview[self.preview.len - preview_h ..] else self.preview;
+            for (shown, 0..) |segs, py| {
+                const pl = right.child(.{ .y_off = @intCast(py), .height = 1 });
                 _ = pl.print(segs, .{ .wrap = .none });
-                py += 1;
             }
         }
 
@@ -385,8 +426,7 @@ const App = struct {
             },
             .confirm_kill => {
                 const s = self.selected().?;
-                var kb: [256]u8 = undefined;
-                const t = std.fmt.bufPrint(&kb, " kill {s}? [y/N] ", .{s.name}) catch "";
+                const t = try std.fmt.allocPrint(self.arena(), " kill {s}? [y/N] ", .{s.name});
                 _ = bottom.printSegment(.{ .text = t, .style = .{ .fg = .{ .index = 1 }, .bold = true } }, .{ .wrap = .none });
             },
             .input => |kind| {
@@ -409,6 +449,51 @@ const App = struct {
         self.dirty = false;
     }
 };
+
+/// Approximate display width: one column per codepoint.
+fn cols(text: []const u8) usize {
+    return std.unicode.utf8CountCodepoints(text) catch text.len;
+}
+
+/// Cut `text` to at most `max` columns, ending in "…" when shortened.
+fn truncate(arena: std.mem.Allocator, text: []const u8, max: usize) ![]const u8 {
+    if (max == 0) return "";
+    if (cols(text) <= max) return text;
+    var it = std.unicode.Utf8View.initUnchecked(text).iterator();
+    var n: usize = 0;
+    var end: usize = 0;
+    while (it.nextCodepointSlice()) |cp| {
+        if (n + 1 >= max) break;
+        n += 1;
+        end += cp.len;
+    }
+    return std.fmt.allocPrint(arena, "{s}…", .{std.mem.trimEnd(u8, text[0..end], " ")});
+}
+
+/// Unix seconds of the last thing that happened to the session.
+fn ageSince(s: tmux.Session, info: ?claude.Info) i64 {
+    if (info) |i| {
+        const ms = if (i.status_since_ms > 0) i.status_since_ms else i.updated_ms;
+        if (ms > 0) return @divTrunc(ms, 1000);
+    }
+    return if (s.activity > 0) s.activity else s.created;
+}
+
+fn ageText(arena: std.mem.Allocator, secs: i64) ![]const u8 {
+    const t = @max(secs, 0);
+    if (t < 60) return "now";
+    if (t < 3600) return std.fmt.allocPrint(arena, "{d}m", .{@divTrunc(t, 60)});
+    if (t < 86400) return std.fmt.allocPrint(arena, "{d}h", .{@divTrunc(t, 3600)});
+    return std.fmt.allocPrint(arena, "{d}d", .{@divTrunc(t, 86400)});
+}
+
+test "truncate keeps codepoints whole" {
+    var a = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer a.deinit();
+    try std.testing.expectEqualStrings("héllo", try truncate(a.allocator(), "héllo", 5));
+    try std.testing.expectEqualStrings("hél…", try truncate(a.allocator(), "héllo world", 4));
+    try std.testing.expectEqualStrings("", try truncate(a.allocator(), "x", 0));
+}
 
 fn statusColor(st: claude.Status) vaxis.Color {
     return switch (st) {
