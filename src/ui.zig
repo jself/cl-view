@@ -7,6 +7,7 @@ const tmux = @import("tmux.zig");
 const claude = @import("claude.zig");
 const launch = @import("launch.zig");
 const sgr = @import("sgr.zig");
+const operator = @import("operator.zig");
 
 const Event = union(enum) {
     key_press: vaxis.Key,
@@ -35,6 +36,8 @@ const App = struct {
     /// Lives across refreshes: form fields and the filter string.
     form_state: std.heap.ArenaAllocator,
     sessions: []tmux.Session = &.{},
+    /// The operator, when it is running (hidden from `sessions`).
+    op: ?tmux.Session = null,
     statuses: claude.StatusMap = .empty,
     preview: []PreviewLine = &.{},
     preview_of: []const u8 = "",
@@ -101,6 +104,7 @@ const App = struct {
         _ = self.arena_state.reset(.retain_capacity);
         self.preview = &.{};
         self.sessions = try tmux.list(self.ctx, self.arena());
+        self.op = try tmux.operator(self.ctx, self.arena());
         self.statuses = try claude.readStatuses(self.ctx, self.arena(), self.cfg);
         if (keep) |k| self.selectByName(k);
         try self.loadPreview();
@@ -230,6 +234,12 @@ const App = struct {
             try self.refresh();
         } else if (key.matches(vaxis.Key.tab, .{})) {
             self.expanded = !self.expanded;
+        } else if (key.matches('o', .{})) {
+            const tmux_name = operator.ensure(self.ctx, self.cfg) catch |err| {
+                self.setMessage("operator failed: {s} (profile {s})", .{ @errorName(err), self.cfg.operator });
+                return;
+            };
+            try self.attach(tmux_name);
         }
     }
 
@@ -368,6 +378,11 @@ const App = struct {
             .{ .text = " · ", .style = .{ .dim = true } },
             .{ .text = try std.fmt.allocPrint(self.arena(), "{d} other", .{vis.len - counts.get(.blocked) - counts.get(.busy) - counts.get(.idle) - counts.get(.shell)}), .style = .{ .dim = true } },
         }, .{ .wrap = .none });
+        if (self.op) |op| {
+            const st = self.status(op);
+            const t = try std.fmt.allocPrint(self.arena(), "operator {s} ", .{st.label()});
+            _ = win.printSegment(.{ .text = t, .style = .{ .fg = statusColor(st) } }, .{ .col_offset = win.width -| @as(u16, @intCast(cols(t))), .wrap = .none });
+        }
 
         // Split the rest between the list (top) and the preview (bottom).
         const lines = try self.buildLines(vis, win.width);
@@ -423,7 +438,7 @@ const App = struct {
         const bottom = win.child(.{ .y_off = win.height -| 1, .height = 1 });
         switch (self.mode) {
             .list => {
-                const help = if (self.message.len > 0) self.message else " enter attach  tab details  n new  d kill  r rename  s send  / filter  q quit  (ctrl-q detaches)";
+                const help = if (self.message.len > 0) self.message else  " enter attach  tab details  n new  o operator  d kill  r rename  s send  / filter  q quit  (ctrl-q detaches)";
                 _ = bottom.printSegment(.{ .text = help, .style = .{ .dim = true } }, .{ .wrap = .none });
             },
             .confirm_kill => {

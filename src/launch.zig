@@ -14,6 +14,8 @@ pub const Options = struct {
     resume_flag: bool = false,
     continue_flag: bool = false,
     detach: bool = false,
+    /// See tmux.NewOptions.role.
+    role: []const u8 = "",
     extra: []const []const u8 = &.{},
 };
 
@@ -48,6 +50,7 @@ pub fn create(ctx: Ctx, cfg: config.Config, o: Options) ![]const u8 {
         .dir = dir,
         .profile = profile.name,
         .config_dir = profile.config_dir,
+        .role = o.role,
         .command = cmd.items,
     });
 

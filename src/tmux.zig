@@ -15,7 +15,11 @@ pub const Session = struct {
     pane_title: []const u8,
     pane_dead: bool,
     activity: i64,
+    /// "operator" for the operator session, "" otherwise.
+    role: []const u8,
 };
+
+pub const operator_role = "operator";
 
 pub const Error = error{TmuxFailed};
 
@@ -71,6 +75,8 @@ pub const NewOptions = struct {
     dir: []const u8,
     profile: []const u8,
     config_dir: ?[]const u8,
+    /// Stored as @cl_role; "operator" hides the session from listings.
+    role: []const u8 = "",
     /// Command to run as the pane's initial process.
     command: []const []const u8,
 };
@@ -113,6 +119,7 @@ pub fn newSession(ctx: Ctx, opts: NewOptions) ![]const u8 {
         "set-option", "-t", tmux_name, "@cl_dir", opts.dir, ";",
         "set-option", "-t", tmux_name, "@cl_profile", opts.profile, ";",
         "set-option", "-t", tmux_name, "@cl_created", created, ";",
+        "set-option", "-t", tmux_name, "@cl_role", opts.role, ";",
         "set-option", "-t", tmux_name, "mouse", "on", ";",
         "set-option", "-t", tmux_name, "-q", "allow-passthrough", "on", ";",
         "set-option", "-t", tmux_name, "set-clipboard", "on", ";",
@@ -136,10 +143,27 @@ pub fn ensureDetachBinding(ctx: Ctx) !void {
     });
 }
 
-const list_format = "#{session_name}\t#{@cl_name}\t#{@cl_dir}\t#{@cl_profile}\t#{@cl_created}\t#{pane_dead}\t#{session_activity}\t#{pane_title}";
+const list_format = "#{session_name}\t#{@cl_name}\t#{@cl_dir}\t#{@cl_profile}\t#{@cl_created}\t#{pane_dead}\t#{session_activity}\t#{@cl_role}\t#{pane_title}";
 
-/// List all cl sessions, oldest first. Caller owns the slice and its strings (use an arena).
+/// List cl sessions, oldest first, leaving out the operator. Caller owns the
+/// slice and its strings (use an arena).
 pub fn list(ctx: Ctx, arena: std.mem.Allocator) ![]Session {
+    const all = try listAll(ctx, arena);
+    var n: usize = 0;
+    for (all) |s| if (!std.mem.eql(u8, s.role, operator_role)) {
+        all[n] = s;
+        n += 1;
+    };
+    return all[0..n];
+}
+
+/// The operator session, if it is running.
+pub fn operator(ctx: Ctx, arena: std.mem.Allocator) !?Session {
+    for (try listAll(ctx, arena)) |s| if (std.mem.eql(u8, s.role, operator_role)) return s;
+    return null;
+}
+
+fn listAll(ctx: Ctx, arena: std.mem.Allocator) ![]Session {
     const out = run(ctx, &.{ "list-sessions", "-F", list_format }) catch |err| switch (err) {
         error.TmuxFailed => return &.{}, // no server running
         else => return err,
@@ -157,6 +181,7 @@ pub fn list(ctx: Ctx, arena: std.mem.Allocator) ![]Session {
         const created_s = f.next() orelse continue;
         const dead_s = f.next() orelse continue;
         const act_s = f.next() orelse continue;
+        const role = f.next() orelse continue;
         const title = f.rest();
         try sessions.append(arena, .{
             .tmux_name = try arena.dupe(u8, tmux_name),
@@ -166,6 +191,7 @@ pub fn list(ctx: Ctx, arena: std.mem.Allocator) ![]Session {
             .created = std.fmt.parseInt(i64, created_s, 10) catch 0,
             .pane_dead = std.mem.eql(u8, dead_s, "1"),
             .activity = std.fmt.parseInt(i64, act_s, 10) catch 0,
+            .role = try arena.dupe(u8, role),
             .pane_title = try arena.dupe(u8, title),
         });
     }
@@ -199,6 +225,13 @@ pub fn capture(ctx: Ctx, tmux_name: []const u8, lines: usize) ![]u8 {
     var buf: [16]u8 = undefined;
     const start = try std.fmt.bufPrint(&buf, "-{d}", .{lines});
     return run(ctx, &.{ "capture-pane", "-t", tmux_name, "-p", "-e", "-S", start });
+}
+
+/// Plain-text capture of the last `lines` lines of the pane. Caller owns result.
+pub fn capturePlainLines(ctx: Ctx, tmux_name: []const u8, lines: usize) ![]u8 {
+    var buf: [16]u8 = undefined;
+    const start = try std.fmt.bufPrint(&buf, "-{d}", .{lines});
+    return run(ctx, &.{ "capture-pane", "-t", tmux_name, "-p", "-S", start });
 }
 
 /// Plain-text capture of the visible pane. Caller owns result.

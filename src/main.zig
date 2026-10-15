@@ -5,6 +5,7 @@ const config = @import("config.zig");
 const tmux = @import("tmux.zig");
 const claude = @import("claude.zig");
 const ui = @import("ui.zig");
+const operator = @import("operator.zig");
 
 pub const panic = @import("vaxis").panic_handler;
 pub const std_options: std.Options = .{ .log_level = .warn };
@@ -17,9 +18,12 @@ const usage =
     \\  cl attach <name>          attach to a session (Ctrl-Q detaches)
     \\  cl kill <name>            kill a session
     \\  cl send <name> <text>     type text + Enter into a session
+    \\  cl output <name> [lines]  status, latest reply, and pane tail (default 40 lines)
+    \\  cl watch                  print a line whenever a session's status changes
+    \\  cl operator               attach to the operator session (o in the chooser)
     \\
     \\options for launch:
-    \\  --<profile>               choose profile from ~/.config/cl/config (e.g. --work, --personal)
+    \\  -p, --profile <name>      profile from ~/.config/cl/config
     \\  -n, --name <name>         session name (default: basename of dir)
     \\  -m, --message <text>      send an initial prompt once claude is ready
     \\  -r, --resume [id]         resume a claude session (claude -r)
@@ -48,9 +52,12 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, cmd, "attach")) return cmdAttach(ctx, cfg, argv[1..]);
         if (std.mem.eql(u8, cmd, "kill")) return cmdKill(ctx, argv[1..]);
         if (std.mem.eql(u8, cmd, "send")) return cmdSend(ctx, argv[1..]);
+        if (std.mem.eql(u8, cmd, "output")) return cmdOutput(ctx, cfg, argv[1..]);
+        if (std.mem.eql(u8, cmd, "watch")) return cmdWatch(ctx, cfg);
+        if (std.mem.eql(u8, cmd, "operator")) return cmdOperator(ctx, cfg);
         if (std.mem.eql(u8, cmd, "help") or std.mem.eql(u8, cmd, "-h") or std.mem.eql(u8, cmd, "--help")) return out(usage);
     }
-    const opts = parseLaunch(cfg, argv) catch {
+    const opts = parseLaunch(argv) catch {
         try out(usage);
         std.process.exit(2);
     };
@@ -68,7 +75,7 @@ fn fail(comptime fmt: []const u8, a: anytype) noreturn {
     std.process.exit(1);
 }
 
-fn parseLaunch(cfg: config.Config, argv: []const []const u8) !LaunchOptions {
+fn parseLaunch(argv: []const []const u8) !LaunchOptions {
     var o: LaunchOptions = .{};
     var i: usize = 0;
     while (i < argv.len) : (i += 1) {
@@ -94,8 +101,10 @@ fn parseLaunch(cfg: config.Config, argv: []const []const u8) !LaunchOptions {
             o.continue_flag = true;
         } else if (std.mem.eql(u8, a, "-d") or std.mem.eql(u8, a, "--detach")) {
             o.detach = true;
-        } else if (std.mem.startsWith(u8, a, "--") and cfg.find(a[2..]) != null) {
-            o.profile = a[2..];
+        } else if (std.mem.eql(u8, a, "-p") or std.mem.eql(u8, a, "--profile")) {
+            i += 1;
+            if (i >= argv.len) return error.BadArgs;
+            o.profile = argv[i];
         } else if (a[0] == '-') {
             return error.BadArgs;
         } else {
@@ -177,6 +186,75 @@ fn cmdSend(ctx: Ctx, argv: []const []const u8) !void {
     defer arena_state.deinit();
     const s = (try tmux.find(ctx, arena_state.allocator(), argv[0])) orelse fail("no session named {s}", .{argv[0]});
     try tmux.sendLine(ctx, s.tmux_name, argv[1]);
+}
+
+fn cmdOutput(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void {
+    if (argv.len < 1 or argv.len > 2) fail("usage: cl output <name> [lines]", .{});
+    const lines = if (argv.len == 2) std.fmt.parseInt(usize, argv[1], 10) catch fail("not a line count: {s}", .{argv[1]}) else 40;
+    var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const s = (try tmux.find(ctx, arena, argv[0])) orelse fail("no session named {s}", .{argv[0]});
+    const statuses = try claude.readStatuses(ctx, arena, cfg);
+    const reply = if (statuses.get(s.tmux_name)) |info| info.summary else "";
+    const pane = try tmux.capturePlainLines(ctx, s.tmux_name, lines);
+    defer ctx.gpa.free(pane);
+    try out(try std.fmt.allocPrint(arena, "status: {s}\nlatest reply: {s}\n--- pane ---\n{s}\n", .{
+        claude.statusFor(ctx, statuses, s).label(), reply, std.mem.trimEnd(u8, pane, "\n"),
+    }));
+}
+
+/// Poll every two seconds and print `<name> <old> -> <new>` on each change,
+/// plus `<name> new <status>` and `<name> ended` as sessions come and go.
+fn cmdWatch(ctx: Ctx, cfg: config.Config) !void {
+    var prev = std.heap.ArenaAllocator.init(ctx.gpa);
+    defer prev.deinit();
+    var last: std.StringHashMapUnmanaged(claude.Status) = .empty;
+    var first = true;
+    while (true) : (ctx.sleepMs(2000)) {
+        var cur = std.heap.ArenaAllocator.init(ctx.gpa);
+        const arena = cur.allocator();
+        const sessions = try tmux.list(ctx, arena);
+        const statuses = try claude.readStatuses(ctx, arena, cfg);
+        var now: std.StringHashMapUnmanaged(claude.Status) = .empty;
+        var aw: std.Io.Writer.Allocating = .init(arena);
+        for (sessions) |s| {
+            const st = claude.statusFor(ctx, statuses, s);
+            try now.put(arena, s.tmux_name, st);
+            if (first) continue;
+            if (last.get(s.tmux_name)) |old| {
+                if (old != st) try aw.writer.print("{s} {s} -> {s}\n", .{ s.name, old.label(), st.label() });
+            } else try aw.writer.print("{s} new {s}\n", .{ s.name, st.label() });
+        }
+        if (!first) {
+            var it = last.iterator();
+            while (it.next()) |e| if (!now.contains(e.key_ptr.*)) {
+                try aw.writer.print("{s} ended\n", .{nameFromTmux(e.key_ptr.*)});
+            };
+        }
+        if (aw.writer.buffered().len > 0) try out(aw.writer.buffered());
+        first = false;
+        // Keep this tick's map; free the one before it.
+        prev.deinit();
+        prev = cur;
+        last = now;
+    }
+}
+
+/// cl_<name>_<id> -> <name> (sanitized; the real name is gone with the session).
+fn nameFromTmux(tmux_name: []const u8) []const u8 {
+    const rest = tmux_name[@min(tmux.prefix.len, tmux_name.len)..];
+    const us = std.mem.lastIndexOfScalar(u8, rest, '_') orelse return rest;
+    return rest[0..us];
+}
+
+fn cmdOperator(ctx: Ctx, cfg: config.Config) !void {
+    const tmux_name = operator.ensure(ctx, cfg) catch |err| switch (err) {
+        error.NoSuchProfile => fail("operator profile not found: {s}", .{cfg.operator}),
+        else => return err,
+    };
+    try tmux.attach(ctx, tmux_name);
+    try ui.run(ctx, cfg, null);
 }
 
 test {

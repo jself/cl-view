@@ -1,8 +1,12 @@
 //! Profiles: a name -> Claude config dir mapping, read from ~/.config/cl/config.
 //!
 //!   default = work
+//!   operator = work
 //!   work = ~/.claude-work
 //!   personal = ~/.claude
+//!
+//! `default` and `operator` are settings, every other key is a profile.
+//! `operator` picks the operator's profile and falls back to `default`.
 //!
 //! When CLAUDE_CONFIG_DIR is set in the environment it overrides `default`:
 //! the profile with that directory is used, or one named after the directory
@@ -19,6 +23,8 @@ pub const Profile = struct {
 pub const Config = struct {
     profiles: []Profile,
     default: []const u8,
+    /// Profile for the operator session. Not affected by CLAUDE_CONFIG_DIR.
+    operator: []const u8,
 
     pub fn find(self: Config, name: []const u8) ?Profile {
         for (self.profiles) |p| if (std.mem.eql(u8, p.name, name)) return p;
@@ -39,6 +45,7 @@ pub fn load(ctx: Ctx) !Config {
 
     var profiles: std.ArrayList(Profile) = .empty;
     var default: ?[]const u8 = null;
+    var operator: ?[]const u8 = null;
     var lines = std.mem.splitScalar(u8, data, '\n');
     while (lines.next()) |raw| {
         const line = std.mem.trim(u8, raw, " \t\r");
@@ -48,17 +55,21 @@ pub fn load(ctx: Ctx) !Config {
         const val = std.mem.trim(u8, line[eq + 1 ..], " \t");
         if (std.mem.eql(u8, key, "default")) {
             default = val;
+        } else if (std.mem.eql(u8, key, "operator")) {
+            operator = val;
         } else {
             try profiles.append(ctx.perm, .{ .name = key, .config_dir = try expandHomePerm(ctx, val) });
         }
     }
     if (profiles.items.len == 0) return fallback(ctx);
+    const operator_profile = operator orelse default orelse profiles.items[0].name;
     if (ctx.env.get("CLAUDE_CONFIG_DIR")) |env_dir| {
         default = try fromEnv(ctx, &profiles, env_dir);
     }
     return .{
         .profiles = try profiles.toOwnedSlice(ctx.perm),
         .default = default orelse profiles.items[0].name,
+        .operator = operator_profile,
     };
 }
 
@@ -78,7 +89,7 @@ fn fromEnv(ctx: Ctx, profiles: *std.ArrayList(Profile), env_dir: []const u8) ![]
 fn fallback(ctx: Ctx) !Config {
     const profiles = try ctx.perm.alloc(Profile, 1);
     profiles[0] = .{ .name = "default", .config_dir = null };
-    return .{ .profiles = profiles, .default = "default" };
+    return .{ .profiles = profiles, .default = "default", .operator = "default" };
 }
 
 fn expandHomePerm(ctx: Ctx, path: []const u8) ![]const u8 {
