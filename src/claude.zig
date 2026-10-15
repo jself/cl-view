@@ -7,6 +7,10 @@ const config = @import("config.zig");
 
 pub const Status = enum {
     busy,
+    /// Idle at the prompt, but a background shell task (e.g. a dev server) is still running.
+    shell,
+    /// Background session waiting on something external.
+    waiting,
     idle,
     blocked,
     starting,
@@ -22,10 +26,12 @@ pub const Status = enum {
         return switch (s) {
             .blocked => 0,
             .busy => 1,
-            .idle => 2,
-            .starting => 3,
-            .unknown => 4,
-            .gone => 5,
+            .waiting => 2,
+            .shell => 3,
+            .idle => 4,
+            .starting => 5,
+            .unknown => 6,
+            .gone => 7,
         };
     }
 
@@ -33,6 +39,8 @@ pub const Status = enum {
         return switch (s) {
             .blocked => "NEEDS INPUT",
             .busy => "WORKING",
+            .waiting => "WAITING",
+            .shell => "IDLE, BACKGROUND TASKS RUNNING",
             .idle => "IDLE",
             .starting => "STARTING",
             .unknown => "UNKNOWN",
@@ -109,7 +117,8 @@ pub fn transcriptPath(arena: std.mem.Allocator, config_dir: []const u8, cwd: []c
     return std.fmt.allocPrint(arena, "{s}/projects/{s}/{s}.jsonl", .{ config_dir, enc, session_id });
 }
 
-const tail_bytes = 64 * 1024;
+/// Tool results can be large; look back far enough to find Claude's last prose.
+const tail_bytes = 256 * 1024;
 
 /// Read the last assistant text block from the session transcript.
 fn lastReply(ctx: Ctx, arena: std.mem.Allocator, config_dir: []const u8, cwd: ?[]const u8, session_id: ?[]const u8) ![]const u8 {
@@ -196,8 +205,9 @@ fn parseStatus(s: []const u8) Status {
     if (std.mem.eql(u8, s, "busy")) return .busy;
     if (std.mem.eql(u8, s, "idle")) return .idle;
     if (std.mem.eql(u8, s, "blocked")) return .blocked;
-    if (std.mem.eql(u8, s, "running")) return .busy;
-    if (std.mem.eql(u8, s, "waiting")) return .blocked;
+    if (std.mem.eql(u8, s, "shell")) return .shell;
+    if (std.mem.eql(u8, s, "waiting")) return .waiting;
+    if (std.mem.eql(u8, s, "running") or std.mem.eql(u8, s, "working")) return .busy;
     return .unknown;
 }
 

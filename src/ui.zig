@@ -364,9 +364,9 @@ const App = struct {
             .{ .text = " · ", .style = .{ .dim = true } },
             .{ .text = try std.fmt.allocPrint(self.arena(), "{d} working", .{counts.get(.busy)}), .style = .{ .fg = statusColor(.busy) } },
             .{ .text = " · ", .style = .{ .dim = true } },
-            .{ .text = try std.fmt.allocPrint(self.arena(), "{d} idle", .{counts.get(.idle)}), .style = .{ .fg = statusColor(.idle) } },
+            .{ .text = try std.fmt.allocPrint(self.arena(), "{d} idle", .{counts.get(.idle) + counts.get(.shell)}), .style = .{ .fg = statusColor(.idle) } },
             .{ .text = " · ", .style = .{ .dim = true } },
-            .{ .text = try std.fmt.allocPrint(self.arena(), "{d} other", .{vis.len - counts.get(.blocked) - counts.get(.busy) - counts.get(.idle)}), .style = .{ .dim = true } },
+            .{ .text = try std.fmt.allocPrint(self.arena(), "{d} other", .{vis.len - counts.get(.blocked) - counts.get(.busy) - counts.get(.idle) - counts.get(.shell)}), .style = .{ .dim = true } },
         }, .{ .wrap = .none });
 
         // Split the rest between the list (top) and the preview (bottom).
@@ -498,6 +498,8 @@ test "truncate keeps codepoints whole" {
 fn statusColor(st: claude.Status) vaxis.Color {
     return switch (st) {
         .busy => .{ .index = 3 },
+        .waiting => .{ .index = 5 },
+        .shell => .{ .index = 6 },
         .idle => .{ .index = 2 },
         .blocked => .{ .index = 1 },
         .starting => .{ .index = 4 },

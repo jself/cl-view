@@ -75,8 +75,9 @@ fn applySgr(style: *vaxis.Style, params: []const u8) void {
             90...97 => style.fg = .{ .index = @intCast(nums[k] - 90 + 8) },
             100...107 => style.bg = .{ .index = @intCast(nums[k] - 100 + 8) },
             38, 48, 58 => {
+                const which = nums[k]; // `extended` moves k past the color parameters
                 const color = extended(nums[0..n], &k) orelse continue;
-                switch (nums[k]) {
+                switch (which) {
                     38 => style.fg = color,
                     48 => style.bg = color,
                     else => style.ul = color,
@@ -114,4 +115,13 @@ test "basic sgr" {
     try std.testing.expect(segs[1].style.bold);
     try std.testing.expectEqual(vaxis.Color{ .index = 1 }, segs[1].style.fg);
     try std.testing.expectEqualStrings("c", segs[2].text);
+}
+
+test "extended colors land on the right attribute" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const segs = try parseLine(arena.allocator(), "\x1b[38;5;246ma\x1b[48;2;1;2;3mb", .{});
+    try std.testing.expectEqual(vaxis.Color{ .index = 246 }, segs[0].style.fg);
+    try std.testing.expectEqual(vaxis.Color.default, segs[0].style.ul);
+    try std.testing.expectEqual(vaxis.Color{ .rgb = .{ 1, 2, 3 } }, segs[1].style.bg);
 }

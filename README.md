@@ -61,13 +61,14 @@ launch options:
 ```
 
 The chooser looks like `claude agents`: a count line, then sessions grouped by
-status (needs input, working, idle, starting, unknown, gone), one line each
+status (needs input, working, waiting, idle with background tasks
+running, idle, starting, unknown, gone), one line each
 with the start of Claude's latest reply and how long ago the status changed.
 The selected session's pane is previewed below the list. `Tab` expands every
 row with the directory, tmux session name, and Claude's own session name.
 
 The latest reply comes from the transcript Claude writes under
-`<config dir>/projects/<cwd>/<session id>.jsonl` (only the last 64 KB is read).
+`<config dir>/projects/<cwd>/<session id>.jsonl` (only the last 256 KB is read).
 
 Chooser keys: `j`/`k` move, `Enter` attach, `Tab` toggle details, `n` new session
 (asks for directory, name, profile, optional first message), `d` kill, `r` rename,
