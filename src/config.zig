@@ -5,8 +5,12 @@
 //!   work = ~/.claude-work
 //!   personal = ~/.claude
 //!
-//! `default` and `operator` are settings, every other key is a profile.
-//! `operator` picks the operator's profile and falls back to `default`.
+//!   web.autostart = true
+//!   web.listen = 127.0.0.1:8421, tailscale:8421
+//!   web.password = $argon2id$...      (from `cl web hash`)
+//!
+//! `default`, `operator` and dotted keys are settings; every other key is a
+//! profile. `operator` picks the operator's profile and falls back to `default`.
 //!
 //! When CLAUDE_CONFIG_DIR is set in the environment it overrides `default`:
 //! the profile with that directory is used, or one named after the directory
@@ -25,6 +29,7 @@ pub const Config = struct {
     default: []const u8,
     /// Profile for the operator session. Not affected by CLAUDE_CONFIG_DIR.
     operator: []const u8,
+    web: Web = .{},
 
     pub fn find(self: Config, name: []const u8) ?Profile {
         for (self.profiles) |p| if (std.mem.eql(u8, p.name, name)) return p;
@@ -34,6 +39,15 @@ pub const Config = struct {
     pub fn defaultProfile(self: Config) Profile {
         return self.find(self.default) orelse self.profiles[0];
     }
+};
+
+pub const Web = struct {
+    /// Start `cl web` in the background whenever cl launches, lists or attaches.
+    autostart: bool = false,
+    /// Comma-separated host:port list; the host `tailscale` means this machine's tailnet IPv4.
+    listen: []const u8 = "127.0.0.1:8421",
+    /// argon2id PHC string; the server refuses to start without one.
+    password: []const u8 = "",
 };
 
 pub fn load(ctx: Ctx) !Config {
@@ -46,6 +60,7 @@ pub fn load(ctx: Ctx) !Config {
     var profiles: std.ArrayList(Profile) = .empty;
     var default: ?[]const u8 = null;
     var operator: ?[]const u8 = null;
+    var web: Web = .{};
     var lines = std.mem.splitScalar(u8, data, '\n');
     while (lines.next()) |raw| {
         const line = std.mem.trim(u8, raw, " \t\r");
@@ -57,11 +72,23 @@ pub fn load(ctx: Ctx) !Config {
             default = val;
         } else if (std.mem.eql(u8, key, "operator")) {
             operator = val;
+        } else if (std.mem.eql(u8, key, "web.autostart")) {
+            web.autostart = std.mem.eql(u8, val, "true") or std.mem.eql(u8, val, "yes") or std.mem.eql(u8, val, "on");
+        } else if (std.mem.eql(u8, key, "web.listen")) {
+            web.listen = val;
+        } else if (std.mem.eql(u8, key, "web.password")) {
+            web.password = val;
+        } else if (std.mem.indexOfScalar(u8, key, '.') != null) {
+            continue; // unknown setting
         } else {
             try profiles.append(ctx.perm, .{ .name = key, .config_dir = try expandHomePerm(ctx, val) });
         }
     }
-    if (profiles.items.len == 0) return fallback(ctx);
+    if (profiles.items.len == 0) {
+        var c = try fallback(ctx);
+        c.web = web;
+        return c;
+    }
     const operator_profile = operator orelse default orelse profiles.items[0].name;
     if (ctx.env.get("CLAUDE_CONFIG_DIR")) |env_dir| {
         default = try fromEnv(ctx, &profiles, env_dir);
@@ -70,6 +97,7 @@ pub fn load(ctx: Ctx) !Config {
         .profiles = try profiles.toOwnedSlice(ctx.perm),
         .default = default orelse profiles.items[0].name,
         .operator = operator_profile,
+        .web = web,
     };
 }
 

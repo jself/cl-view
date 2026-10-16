@@ -7,6 +7,7 @@ const claude = @import("claude.zig");
 const ui = @import("ui.zig");
 const operator = @import("operator.zig");
 const history = @import("history.zig");
+const web = @import("web.zig");
 
 pub const panic = @import("vaxis").panic_handler;
 pub const std_options: std.Options = .{ .log_level = .warn };
@@ -24,6 +25,9 @@ const usage =
     \\  cl closed                 closed sessions, most recently closed first (R in the chooser)
     \\  cl operator               attach to the operator session (o in the chooser)
     \\  cl alert <text> | --clear  flag the chooser header from the operator
+    \\  cl web                    serve the chooser to a browser (see web.* in the config)
+    \\  cl web password | start | stop
+    \\                            set the web password, or run the server in the background
     \\
     \\options for launch:
     \\  -p, --profile <name>      profile from ~/.config/cl/config
@@ -60,6 +64,7 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, cmd, "closed")) return cmdClosed(ctx, cfg);
         if (std.mem.eql(u8, cmd, "operator")) return cmdOperator(ctx, cfg);
         if (std.mem.eql(u8, cmd, "alert")) return cmdAlert(ctx, argv[1..]);
+        if (std.mem.eql(u8, cmd, "web")) return web.main(ctx, cfg, argv[1..]);
         if (std.mem.eql(u8, cmd, "help") or std.mem.eql(u8, cmd, "-h") or std.mem.eql(u8, cmd, "--help")) return out(usage);
     }
     const opts = parseLaunch(argv) catch {
@@ -121,6 +126,7 @@ fn parseLaunch(argv: []const []const u8) !LaunchOptions {
 }
 
 fn cmdLaunch(ctx: Ctx, cfg: config.Config, o: LaunchOptions) !void {
+    autostartWeb(ctx, cfg);
     const tmux_name = launch.create(ctx, cfg, o) catch |err| switch (err) {
         error.NoSuchDir => fail("no such directory: {s}", .{o.dir orelse "."}),
         error.NoSuchProfile => fail("no such profile: {s}", .{o.profile orelse ""}),
@@ -138,7 +144,10 @@ fn cmdLaunch(ctx: Ctx, cfg: config.Config, o: LaunchOptions) !void {
 fn cmdList(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void {
     const plain = argv.len > 0 and std.mem.eql(u8, argv[0], "--plain");
     const json = argv.len > 0 and std.mem.eql(u8, argv[0], "--json");
-    if (!plain and !json) return ui.run(ctx, cfg, null);
+    if (!plain and !json) {
+        autostartWeb(ctx, cfg);
+        return ui.run(ctx, cfg, null);
+    }
 
     var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);
     defer arena_state.deinit();
@@ -173,6 +182,7 @@ fn cmdAttach(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void {
     var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);
     defer arena_state.deinit();
     const s = (try tmux.find(ctx, arena_state.allocator(), argv[0])) orelse fail("no session named {s}", .{argv[0]});
+    autostartWeb(ctx, cfg);
     try tmux.attach(ctx, s.tmux_name);
     try ui.run(ctx, cfg, s.tmux_name);
 }
@@ -278,7 +288,13 @@ fn cmdAlert(ctx: Ctx, argv: []const []const u8) !void {
     try tmux.setAlert(ctx, op.tmux_name, text);
 }
 
+/// With web.autostart, make sure `cl web` is running in the background.
+fn autostartWeb(ctx: Ctx, cfg: config.Config) void {
+    web.start(ctx, cfg, false) catch {};
+}
+
 fn cmdOperator(ctx: Ctx, cfg: config.Config) !void {
+    autostartWeb(ctx, cfg);
     const tmux_name = operator.ensure(ctx, cfg) catch |err| switch (err) {
         error.NoSuchProfile => fail("operator profile not found: {s}", .{cfg.operator}),
         else => return err,

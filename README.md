@@ -48,7 +48,7 @@ work = ~/.claude-work
 personal = ~/.claude
 ```
 
-`default` and `operator` are settings; every other key is a profile.
+`default`, `operator` and dotted keys (`web.*`) are settings; every other key is a profile.
 `-p <profile>` selects a profile, and `operator` picks the operator's
 profile (falling back to `default`). If `CLAUDE_CONFIG_DIR` is set when
 `cl` runs, it overrides `default`: the profile with that directory is used, or
@@ -69,6 +69,9 @@ cl watch                  print a line whenever a session's status changes
 cl closed                 closed sessions, most recently closed first
 cl operator               attach to the operator session (o in the chooser)
 cl alert <text> | --clear flag the chooser header from the operator
+cl web                    serve the chooser to a browser (foreground)
+cl web password           set the web password (stored as an argon2id hash)
+cl web start | stop       run the web server in the background / stop it
 
 launch options:
   -p, --profile <name>    profile from the config
@@ -121,6 +124,38 @@ they survive restarting it. Tell it "note that ..." to add one.
 It runs in `~/.config/cl/operator/` with the profile from the `operator`
 setting. Its instructions come from the binary (`src/operator.zig`); put a
 `CLAUDE.md` in that directory to add your own.
+
+## Web
+
+`cl web` serves the chooser to a browser, for using it from a phone. Each page
+load runs its own `cl list` in a terminal (xterm.js, built into the binary), so
+everything works as on the desktop. A key bar along the bottom has **← Back**
+(sends `Ctrl-Q`, detaching from a session back to the list), Esc, Tab, arrows,
+Enter, **Ctrl-J** (a newline in Claude's composer), and Ctrl-C.
+
+```
+web.autostart = true            # start it whenever cl launches, lists or attaches
+web.listen = 127.0.0.1:8421, tailscale:8421   # one or more host:port
+web.password = $argon2id$...    # written by `cl web password`
+```
+
+- `cl web password` asks for a password and writes its hash to the config. The
+  server refuses to start without one.
+- `web.listen` takes one or more comma-separated `host:port` addresses (default
+  `127.0.0.1:8421`; `0.0.0.0:8421` for every interface). The host `tailscale`
+  binds to this machine's tailnet IPv4, so the page is reachable from your
+  other Tailscale devices (http://<machine>:8421) and not from the LAN. While
+  Tailscale is down or logged out, that listener waits and retries every 30 s;
+  the others serve meanwhile.
+- With `web.autostart`, the server runs in a hidden tmux session and logs to
+  `~/.local/state/cl/web.log`. After changing the password or upgrading cl,
+  run `cl web stop` and it starts again with the next cl command.
+- Signing in sets a 30-day cookie signed with a key derived from the password
+  hash, so it survives restarts and a new password signs everyone out. Failed
+  logins are limited to five a minute, and the terminal WebSocket only accepts
+  same-origin connections.
+- Attaching from the phone resizes that session to the phone's width
+  (`window-size latest`); it switches back when you use it at the desk.
 
 ## Notes
 

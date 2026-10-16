@@ -15,13 +15,14 @@ pub const Session = struct {
     pane_title: []const u8,
     pane_dead: bool,
     activity: i64,
-    /// "operator" for the operator session, "" otherwise.
+    /// "operator" or "web" for cl's own hidden sessions, "" for Claude sessions.
     role: []const u8,
     /// The operator's pending alert for the human (@cl_alert), "" if none.
     alert: []const u8,
 };
 
 pub const operator_role = "operator";
+pub const web_role = "web";
 
 pub const Error = error{TmuxFailed};
 
@@ -77,7 +78,7 @@ pub const NewOptions = struct {
     dir: []const u8,
     profile: []const u8,
     config_dir: ?[]const u8,
-    /// Stored as @cl_role; "operator" hides the session from listings.
+    /// Stored as @cl_role; any role hides the session from listings.
     role: []const u8 = "",
     /// Command to run as the pane's initial process.
     command: []const []const u8,
@@ -147,12 +148,12 @@ pub fn ensureDetachBinding(ctx: Ctx) !void {
 
 const list_format = "#{session_name}\t#{@cl_name}\t#{@cl_dir}\t#{@cl_profile}\t#{@cl_created}\t#{pane_dead}\t#{session_activity}\t#{@cl_role}\t#{@cl_alert}\t#{pane_title}";
 
-/// List cl sessions, oldest first, leaving out the operator. Caller owns the
-/// slice and its strings (use an arena).
+/// List Claude sessions, oldest first, leaving out cl's own (operator, web).
+/// Caller owns the slice and its strings (use an arena).
 pub fn list(ctx: Ctx, arena: std.mem.Allocator) ![]Session {
     const all = try listAll(ctx, arena);
     var n: usize = 0;
-    for (all) |s| if (!std.mem.eql(u8, s.role, operator_role)) {
+    for (all) |s| if (s.role.len == 0) {
         all[n] = s;
         n += 1;
     };
@@ -161,7 +162,11 @@ pub fn list(ctx: Ctx, arena: std.mem.Allocator) ![]Session {
 
 /// The operator session, if it is running.
 pub fn operator(ctx: Ctx, arena: std.mem.Allocator) !?Session {
-    for (try listAll(ctx, arena)) |s| if (std.mem.eql(u8, s.role, operator_role)) return s;
+    return findRole(ctx, arena, operator_role);
+}
+
+pub fn findRole(ctx: Ctx, arena: std.mem.Allocator, role: []const u8) !?Session {
+    for (try listAll(ctx, arena)) |s| if (std.mem.eql(u8, s.role, role)) return s;
     return null;
 }
 

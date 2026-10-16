@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
+<meta name="color-scheme" content="dark">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>cl</title>
+<link rel="stylesheet" href="/xterm.css">
+<style>
+  :root { --bg: #111; --bar: #1c1c1c; --key: #2a2a2a; --key-down: #3a3a3a; --fg: #e5e5e5; --muted: #999; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); overflow: hidden; }
+  body { display: flex; flex-direction: column; height: 100dvh; }
+  #term { flex: 1; min-height: 0; padding: 4px 0 0 4px; }
+  /* Wraps to fit the screen; buttons stretch to fill each row. */
+  #keys { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
+          background: var(--bar); flex-shrink: 0; }
+  #keys button { flex: 1 1 auto; min-width: 44px; height: 40px; padding: 0 8px; border: 0; border-radius: 8px;
+                 background: var(--key); color: var(--fg); font: 15px ui-monospace, SFMono-Regular, Menlo, monospace;
+                 touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+                 -webkit-tap-highlight-color: transparent; }
+  #keys button.down { background: var(--key-down); }
+  #keys .back { font-weight: bold; }
+  #overlay { position: fixed; inset: 0; display: none; place-items: center; background: rgba(0,0,0,.6);
+             font: 16px ui-monospace, SFMono-Regular, Menlo, monospace; }
+  #overlay.show { display: grid; }
+  #overlay button { font: inherit; padding: 12px 20px; border-radius: 8px; border: 0; background: #2563eb; color: #fff; }
+</style>
+</head>
+<body>
+<div id="term"></div>
+<div id="keys">
+  <button class="back" data-send="\x11" title="Back to the list (Ctrl-Q)">← Back</button>
+  <button data-send="\x1b">Esc</button>
+  <button data-send="\t">Tab</button>
+  <button data-send="\x1b[A">↑</button>
+  <button data-send="\x1b[B">↓</button>
+  <button data-send="\x1b[D">←</button>
+  <button data-send="\x1b[C">→</button>
+  <button data-send="\r">Enter</button>
+  <button data-send="\n" title="New line in Claude's composer">Ctrl-J</button>
+  <button data-send="\x03">Ctrl-C</button>
+</div>
+<div id="overlay"><button id="reconnect">Reconnect</button></div>
+<script src="/xterm.js"></script>
+<script src="/addon-fit.js"></script>
+<script>
+  const narrow = window.matchMedia("(max-width: 600px)").matches;
+  const term = new Terminal({
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, "DejaVu Sans Mono", monospace',
+    fontSize: narrow ? 12 : 14,
+    cursorBlink: true,
+    scrollback: 0,
+    theme: { background: "#111111" },
+  });
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open(document.getElementById("term"));
+
+  const overlay = document.getElementById("overlay");
+  let ws = null;
+  const enc = new TextEncoder();
+
+  function send(kind, text) {
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(kind + text);
+  }
+  function sendSize() {
+    fit.fit();
+    send("1", term.cols + "," + term.rows);
+  }
+
+  function connect() {
+    overlay.classList.remove("show");
+    term.reset();
+    ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
+    ws.binaryType = "arraybuffer";
+    ws.onopen = () => { sendSize(); term.focus(); };
+    ws.onmessage = (e) => term.write(new Uint8Array(e.data));
+    ws.onclose = () => overlay.classList.add("show");
+  }
+
+  term.onData((d) => send("0", d));
+  document.getElementById("reconnect").onclick = connect;
+
+  // Keys fire on touchstart (phones) or click (mouse). preventDefault on
+  // touchstart/mousedown keeps focus, so the on-screen keyboard stays open;
+  // on touch it also suppresses the click that would send the key twice.
+  for (const b of document.querySelectorAll("#keys button")) {
+    const seq = JSON.parse('"' + b.dataset.send.replace(/\\x/g, "\\u00") + '"');
+    const fire = () => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) { overlay.classList.add("show"); return; }
+      send("0", seq);
+      b.classList.add("down");
+      setTimeout(() => b.classList.remove("down"), 120);
+    };
+    b.addEventListener("touchstart", (e) => { e.preventDefault(); fire(); }, { passive: false });
+    b.addEventListener("mousedown", (e) => e.preventDefault());
+    b.addEventListener("click", fire);
+  }
+
+  let resizeTimer = 0;
+  const onResize = () => {
+    // iOS keeps 100dvh under the on-screen keyboard; size to what is visible.
+    if (window.visualViewport) document.body.style.height = window.visualViewport.height + "px";
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(sendSize, 80);
+  };
+  window.addEventListener("resize", onResize);
+  if (window.visualViewport) window.visualViewport.addEventListener("resize", onResize);
+
+  connect();
+</script>
+</body>
+</html>

@@ -448,16 +448,18 @@ const App = struct {
         const vis = self.visible(&buf);
 
         const in_history = self.mode == .history;
+        // Where the header text ends, so the operator label can avoid it.
+        var header_end: u16 = 0;
         if (in_history) {
-            _ = win.print(&.{
+            header_end = win.print(&.{
                 .{ .text = " RESUME  ", .style = bold },
                 .{ .text = try std.fmt.allocPrint(self.arena(), "{d} closed sessions, most recently closed first", .{self.closed.len}), .style = .{ .dim = true } },
-            }, .{ .wrap = .none });
+            }, .{ .wrap = .none }).col;
         }
         // Header: counts per group, like `claude agents`.
         var counts = std.enums.EnumArray(claude.Status, usize).initFill(0);
         for (vis) |si| counts.getPtr(self.status(self.sessions[si])).* += 1;
-        if (!in_history) _ = win.print(&.{
+        if (!in_history) header_end = win.print(&.{
             .{ .text = " SESSIONS  ", .style = bold },
             .{ .text = try std.fmt.allocPrint(self.arena(), "{d} need input", .{counts.get(.blocked)}), .style = .{ .fg = statusColor(.blocked) } },
             .{ .text = " · ", .style = .{ .dim = true } },
@@ -466,15 +468,19 @@ const App = struct {
             .{ .text = try std.fmt.allocPrint(self.arena(), "{d} idle", .{counts.get(.idle) + counts.get(.shell)}), .style = .{ .fg = statusColor(.idle) } },
             .{ .text = " · ", .style = .{ .dim = true } },
             .{ .text = try std.fmt.allocPrint(self.arena(), "{d} other", .{vis.len - counts.get(.blocked) - counts.get(.busy) - counts.get(.idle) - counts.get(.shell)}), .style = .{ .dim = true } },
-        }, .{ .wrap = .none });
+        }, .{ .wrap = .none }).col;
         if (self.op) |op| {
             const st = self.status(op);
+            // An alert always shows (over the counts if it must, cut to fit); the
+            // plain status only when there is room after the counts.
+            const room = win.width -| header_end -| 1;
             const t = if (op.alert.len > 0)
-                try std.fmt.allocPrint(self.arena(), " ⚑ {s} (o) ", .{try truncate(self.arena(), op.alert, win.width / 2)})
+                try std.fmt.allocPrint(self.arena(), " ⚑ {s} (o) ", .{try truncate(self.arena(), op.alert, @max(@min(win.width / 2, room -| 7), 8))})
             else
                 try std.fmt.allocPrint(self.arena(), "operator {s} ", .{st.label()});
             const style: vaxis.Style = if (op.alert.len > 0) .{ .fg = .{ .index = 0 }, .bg = .{ .index = 3 }, .bold = true } else .{ .fg = statusColor(st) };
-            _ = win.printSegment(.{ .text = t, .style = style }, .{ .col_offset = win.width -| @as(u16, @intCast(cols(t))), .wrap = .none });
+            if (op.alert.len > 0 or cols(t) <= room)
+                _ = win.printSegment(.{ .text = t, .style = style }, .{ .col_offset = win.width -| @as(u16, @intCast(cols(t))), .wrap = .none });
         }
 
         // Split the rest between the list (top) and the preview (bottom).
