@@ -189,6 +189,12 @@ web.password = $argon2id$...    # written by `cl web password`
   to your terminal (say, after the web page on a phone shrank it), puts
   `window-size latest` back, repaints, and passes `Ctrl-L` on to Claude.
   Elsewhere it is passed through untouched.
+- `←` at the start of Claude's prompt is dropped in `cl_` sessions. There it
+  would open Claude's agents view, which can't be turned off and parks the
+  conversation as a background job. `←` still moves through text you've typed,
+  works in menus, and is untouched in other panes, windows and tmux sessions.
+  If a session does end up in the agents view, `cl` shows the parked
+  conversation's real status, and Enter there returns to it.
 - Nested use works: running `cl` from inside another tmux session attaches a
   nested client.
 - `-m` waits for Claude's composer prompt (a `❯` line under the composer border)

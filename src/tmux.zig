@@ -142,13 +142,21 @@ pub fn newSession(ctx: Ctx, opts: NewOptions) ![]const u8 {
 
 /// Ctrl-Q detaches any client attached to a cl_* session. Ctrl-L there also
 /// fits the window back to this client (after the web page on a phone sized
-/// it) and repaints, then passes Ctrl-L on to Claude. Idempotent.
+/// it) and repaints, then passes Ctrl-L on to Claude. Left is dropped in
+/// Claude's own pane when the cursor is at the start of the prompt, where it
+/// would open Claude's agents view (which can't be turned off); everywhere
+/// else, shells and other panes included, it is a normal Left. Idempotent.
 pub fn ensureDetachBinding(ctx: Ctx) !void {
     try runQuiet(ctx, &.{
         "bind-key", "-n", "C-q", "if-shell", "-F", "#{m:cl_*,#{session_name}}", "detach-client", "", ";",
-        "bind-key", "-n", "C-l", "if-shell", "-F", "#{m:cl_*,#{session_name}}", "resize-window -A ; set-option window-size latest ; refresh-client ; send-keys C-l", "send-keys C-l",
+        "bind-key", "-n", "C-l", "if-shell", "-F", "#{m:cl_*,#{session_name}}", "resize-window -A ; set-option window-size latest ; refresh-client ; send-keys C-l", "send-keys C-l", ";",
+        "bind-key", "-n", "Left", "if-shell", "-F", agents_guard, "", "send-keys Left",
     });
 }
+
+/// In a cl_* session's Claude pane with the cursor at column 2 or less (just
+/// after "❯ "). Menus hide the cursor, so their Left still works.
+const agents_guard = "#{&&:#{m:cl_*,#{session_name}},#{&&:#{==:#{pane_current_command},claude},#{&&:#{cursor_flag},#{e|<=:#{cursor_x},2}}}}";
 
 const list_format = "#{session_name}\t#{@cl_name}\t#{@cl_dir}\t#{@cl_profile}\t#{@cl_created}\t#{pane_dead}\t#{session_activity}\t#{@cl_role}\t#{@cl_alert}\t#{@cl_hidden}\t#{pane_title}";
 

@@ -60,7 +60,25 @@ const Registry = struct {
     updatedAt: ?i64 = null,
     sessionId: ?[]const u8 = null,
     cwd: ?[]const u8 = null,
+    /// Set while Claude's agents view (Left at an empty prompt) is open: the
+    /// conversation then runs as a background job and `status` says "shell".
+    parkedJobId: ?[]const u8 = null,
 };
+
+/// <config>/jobs/<id>/state.json, for a parked conversation.
+const Job = struct {
+    state: ?[]const u8 = null,
+    name: ?[]const u8 = null,
+    sessionId: ?[]const u8 = null,
+};
+
+/// The parked job behind `reg`, if any, so its status is the conversation's.
+fn parkedJob(ctx: Ctx, arena: std.mem.Allocator, config_dir: []const u8, reg: Registry) ?Job {
+    const id = reg.parkedJobId orelse return null;
+    const path = std.fmt.allocPrint(arena, "{s}/jobs/{s}/state.json", .{ config_dir, id }) catch return null;
+    const data = std.Io.Dir.cwd().readFileAlloc(ctx.io, path, arena, .limited(1024 * 1024)) catch return null;
+    return std.json.parseFromSliceLeaky(Job, arena, data, .{ .ignore_unknown_fields = true }) catch null;
+}
 
 /// What Claude reports about one of our sessions (same source `claude agents` uses).
 pub const Info = struct {
@@ -97,14 +115,22 @@ pub fn readStatuses(ctx: Ctx, arena: std.mem.Allocator, cfg: config.Config) !Sta
             if (reg.pid) |pid| if (!pidAlive(pid)) continue;
             const colon = std.mem.indexOfScalar(u8, target, ':') orelse target.len;
             const key = try arena.dupe(u8, target[0..colon]);
-            const st = parseStatus(reg.status orelse reg.state orelse "");
+            var st = parseStatus(reg.status orelse reg.state orelse "");
+            var name = reg.name;
+            var session_id = reg.sessionId;
+            if (parkedJob(ctx, arena, config_dir, reg)) |job| {
+                const js = job.state orelse "";
+                st = if (std.mem.eql(u8, js, "done")) .idle else parseStatus(js);
+                name = job.name orelse name;
+                session_id = job.sessionId orelse session_id;
+            }
             try map.put(arena, key, .{
                 .status = st,
-                .name = try arena.dupe(u8, reg.name orelse ""),
+                .name = try arena.dupe(u8, name orelse ""),
                 .status_since_ms = reg.statusUpdatedAt orelse 0,
                 .updated_ms = reg.updatedAt orelse 0,
-                .summary = lastReply(ctx, arena, config_dir, reg.cwd, reg.sessionId) catch "",
-                .session_id = try arena.dupe(u8, reg.sessionId orelse ""),
+                .summary = lastReply(ctx, arena, config_dir, reg.cwd, session_id) catch "",
+                .session_id = try arena.dupe(u8, session_id orelse ""),
             });
         }
     }
