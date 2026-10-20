@@ -44,7 +44,7 @@ fn serve(ctx: Ctx, cfg: config.Config) !void {
     if (cfg.web.password.len == 0) fail("no web.password in ~/.config/cl/config; run `cl web password`", .{});
 
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const exe_len = try std.Io.Dir.readLinkAbsolute(ctx.io, "/proc/self/exe", &exe_buf);
+    const exe_len = try std.process.executablePath(ctx.io, &exe_buf);
     var state: State = .{ .ctx = ctx, .cfg = cfg, .key = undefined, .exe = exe_buf[0..exe_len] };
     std.crypto.hash.sha2.Sha256.hash(cfg.web.password, &state.key, .{});
 
@@ -116,16 +116,23 @@ fn listenLoop(state: *State, spec: Spec) void {
     }
 }
 
+/// The tailscale CLI: on PATH, or inside the app on macOS (Mac App Store and
+/// standalone installs don't put it on PATH).
+const tailscale_clis = [_][]const u8{ "tailscale", "/Applications/Tailscale.app/Contents/MacOS/Tailscale" };
+
 fn tailscaleIp(ctx: Ctx, buf: []u8) ![]const u8 {
-    const r = std.process.run(ctx.gpa, ctx.io, .{ .argv = &.{ "tailscale", "ip", "-4" } }) catch return error.TailscaleNotRunnable;
-    defer ctx.gpa.free(r.stdout);
-    defer ctx.gpa.free(r.stderr);
-    const ip = std.mem.trim(u8, std.mem.sliceTo(r.stdout, '\n'), " \r\t");
-    if (ip.len == 0) return error.TailscaleHasNoIp;
-    _ = std.Io.net.IpAddress.parse(ip, 0) catch return error.TailscaleHasNoIp;
-    if (ip.len > buf.len) return error.TailscaleHasNoIp;
-    @memcpy(buf[0..ip.len], ip);
-    return buf[0..ip.len];
+    for (tailscale_clis) |cli| {
+        const r = std.process.run(ctx.gpa, ctx.io, .{ .argv = &.{ cli, "ip", "-4" } }) catch continue;
+        defer ctx.gpa.free(r.stdout);
+        defer ctx.gpa.free(r.stderr);
+        const ip = std.mem.trim(u8, std.mem.sliceTo(r.stdout, '\n'), " \r\t");
+        if (ip.len == 0) return error.TailscaleHasNoIp;
+        _ = std.Io.net.IpAddress.parse(ip, 0) catch return error.TailscaleHasNoIp;
+        if (ip.len > buf.len) return error.TailscaleHasNoIp;
+        @memcpy(buf[0..ip.len], ip);
+        return buf[0..ip.len];
+    }
+    return error.TailscaleNotRunnable;
 }
 
 fn handleConnection(state: *State, stream: std.Io.net.Stream) void {
@@ -389,7 +396,7 @@ fn serveTerminal(state: *State, req: *std.http.Server.Request, key: []const u8) 
     }
     // Hang up the whole session (the chooser and any tmux client it started);
     // the pump sees EOF once they are gone.
-    _ = std.os.linux.kill(-term.pid, .HUP);
+    std.posix.kill(-term.pid, .HUP) catch {};
     pump.join();
     term.close();
     logf("terminal closed", .{});
@@ -434,7 +441,7 @@ pub fn start(ctx: Ctx, cfg: config.Config, force: bool) !void {
         return;
     }
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const exe = exe_buf[0..try std.Io.Dir.readLinkAbsolute(ctx.io, "/proc/self/exe", &exe_buf)];
+    const exe = exe_buf[0..try std.process.executablePath(ctx.io, &exe_buf)];
     const log = try logPath(ctx, arena);
     try std.Io.Dir.cwd().createDirPath(ctx.io, std.fs.path.dirname(log).?);
     _ = try tmux.newSession(ctx, .{
@@ -500,24 +507,23 @@ fn setPassword(ctx: Ctx) !void {
 }
 
 fn readSecret(ctx: Ctx, prompt: []const u8, buf: []u8) ![]const u8 {
-    const linux = std.os.linux;
+    const posix = std.posix;
     std.Io.File.stderr().writeStreamingAll(ctx.io, prompt) catch {};
-    var saved: linux.termios = undefined;
-    const tty = linux.errno(linux.tcgetattr(0, &saved)) == .SUCCESS;
-    if (tty) {
-        var quiet = saved;
+    const saved: ?posix.termios = posix.tcgetattr(0) catch null;
+    if (saved) |t| {
+        var quiet = t;
         quiet.lflag.ECHO = false;
-        _ = linux.tcsetattr(0, .NOW, &quiet);
+        posix.tcsetattr(0, .NOW, quiet) catch {};
     }
-    defer if (tty) {
-        _ = linux.tcsetattr(0, .NOW, &saved);
+    defer if (saved) |t| {
+        posix.tcsetattr(0, .NOW, t) catch {};
         std.Io.File.stderr().writeStreamingAll(ctx.io, "\n") catch {};
     };
     var n: usize = 0;
     while (n < buf.len) {
         var c: [1]u8 = undefined;
-        const rc = linux.read(0, &c, 1);
-        if (linux.errno(rc) != .SUCCESS or rc == 0 or c[0] == '\n') break;
+        const got = posix.read(0, &c) catch break;
+        if (got == 0 or c[0] == '\n') break;
         buf[n] = c[0];
         n += 1;
     }

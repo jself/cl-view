@@ -19,6 +19,7 @@ const usage =
     \\  cl list | ls              interactive chooser (--plain / --json for scripts)
     \\  cl attach <name>          attach to a session (Ctrl-Q detaches)
     \\  cl kill <name>            kill a session
+    \\  cl hide | unhide <name>   hide a running session from the chooser (h), or show it again
     \\  cl send <name> <text>     type text + Enter into a session
     \\  cl output <name> [lines]  status, latest reply, and pane tail (default 40 lines)
     \\  cl watch                  print a line whenever a session's status changes
@@ -58,6 +59,8 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, cmd, "list") or std.mem.eql(u8, cmd, "ls")) return cmdList(ctx, cfg, argv[1..]);
         if (std.mem.eql(u8, cmd, "attach")) return cmdAttach(ctx, cfg, argv[1..]);
         if (std.mem.eql(u8, cmd, "kill")) return cmdKill(ctx, argv[1..]);
+        if (std.mem.eql(u8, cmd, "hide")) return cmdHide(ctx, argv[1..], true);
+        if (std.mem.eql(u8, cmd, "unhide")) return cmdHide(ctx, argv[1..], false);
         if (std.mem.eql(u8, cmd, "send")) return cmdSend(ctx, argv[1..]);
         if (std.mem.eql(u8, cmd, "output")) return cmdOutput(ctx, cfg, argv[1..]);
         if (std.mem.eql(u8, cmd, "watch")) return cmdWatch(ctx, cfg);
@@ -127,12 +130,16 @@ fn parseLaunch(argv: []const []const u8) !LaunchOptions {
 
 fn cmdLaunch(ctx: Ctx, cfg: config.Config, o: LaunchOptions) !void {
     autostartWeb(ctx, cfg);
-    const tmux_name = launch.create(ctx, cfg, o) catch |err| switch (err) {
+    var fresh = false;
+    var opts = o;
+    opts.started_fresh = &fresh;
+    const tmux_name = launch.create(ctx, cfg, opts) catch |err| switch (err) {
         error.NoSuchDir => fail("no such directory: {s}", .{o.dir orelse "."}),
         error.NoSuchProfile => fail("no such profile: {s}", .{o.profile orelse ""}),
         error.PromptTimeout => fail("claude never showed a prompt; message not sent", .{}),
         else => return err,
     };
+    if (fresh) std.Io.File.stderr().writeStreamingAll(ctx.io, "cl: no transcript left to resume (Claude deleted it); started a new session\n") catch {};
     if (o.detach) {
         var buf: [256]u8 = undefined;
         return out(try std.fmt.bufPrint(&buf, "{s}\n", .{tmux_name}));
@@ -163,14 +170,15 @@ fn cmdList(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void {
         const st = claude.statusFor(ctx, statuses, s);
         if (json) {
             if (i > 0) try w.writeAll(",");
-            try w.print("{{\"name\":{f},\"tmux\":{f},\"dir\":{f},\"profile\":{f},\"status\":\"{s}\",\"created\":{d}}}", .{
+            try w.print("{{\"name\":{f},\"tmux\":{f},\"dir\":{f},\"profile\":{f},\"status\":\"{s}\",\"created\":{d},\"hidden\":{}}}", .{
                 std.json.fmt(s.name, .{}), std.json.fmt(s.tmux_name, .{}), std.json.fmt(s.dir, .{}),
-                std.json.fmt(s.profile, .{}), st.label(), s.created,
+                std.json.fmt(s.profile, .{}), st.label(), s.created, s.hidden,
             });
         } else {
             const short = try ctx.shortenHome(s.dir);
             defer ctx.gpa.free(short);
-            try w.print("{s}\t{s}\t{s}\t{s}\t{s}\n", .{ s.name, s.profile, short, st.label(), s.tmux_name });
+            // A sixth column, "hidden", only for hidden sessions.
+            try w.print("{s}\t{s}\t{s}\t{s}\t{s}{s}\n", .{ s.name, s.profile, short, st.label(), s.tmux_name, if (s.hidden) "\thidden" else "" });
         }
     }
     if (json) try w.writeAll("]\n");
@@ -193,6 +201,14 @@ fn cmdKill(ctx: Ctx, argv: []const []const u8) !void {
     defer arena_state.deinit();
     const s = (try tmux.find(ctx, arena_state.allocator(), argv[0])) orelse fail("no session named {s}", .{argv[0]});
     try tmux.kill(ctx, s.tmux_name);
+}
+
+fn cmdHide(ctx: Ctx, argv: []const []const u8, hidden: bool) !void {
+    if (argv.len != 1) fail("usage: cl {s} <name>", .{if (hidden) "hide" else "unhide"});
+    var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);
+    defer arena_state.deinit();
+    const s = (try tmux.find(ctx, arena_state.allocator(), argv[0])) orelse fail("no session named {s}", .{argv[0]});
+    try tmux.setHidden(ctx, s.tmux_name, hidden);
 }
 
 fn cmdSend(ctx: Ctx, argv: []const []const u8) !void {
@@ -221,10 +237,12 @@ fn cmdOutput(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void {
 
 /// Poll every two seconds and print `<name> <old> -> <new>` on each change,
 /// plus `<name> new <status>` and `<name> ended` as sessions come and go.
+/// Hidden sessions are tracked but stay quiet: hiding means "not now".
 fn cmdWatch(ctx: Ctx, cfg: config.Config) !void {
     var prev = std.heap.ArenaAllocator.init(ctx.gpa);
     defer prev.deinit();
     var last: std.StringHashMapUnmanaged(claude.Status) = .empty;
+    var last_hidden: std.StringHashMapUnmanaged(void) = .empty;
     var first = true;
     while (true) : (ctx.sleepMs(2000)) {
         var cur = std.heap.ArenaAllocator.init(ctx.gpa);
@@ -232,18 +250,20 @@ fn cmdWatch(ctx: Ctx, cfg: config.Config) !void {
         const sessions = try tmux.list(ctx, arena);
         const statuses = try claude.readStatuses(ctx, arena, cfg);
         var now: std.StringHashMapUnmanaged(claude.Status) = .empty;
+        var now_hidden: std.StringHashMapUnmanaged(void) = .empty;
         var aw: std.Io.Writer.Allocating = .init(arena);
         for (sessions) |s| {
             const st = claude.statusFor(ctx, statuses, s);
             try now.put(arena, s.tmux_name, st);
-            if (first) continue;
+            if (s.hidden) try now_hidden.put(arena, s.tmux_name, {});
+            if (first or s.hidden) continue;
             if (last.get(s.tmux_name)) |old| {
                 if (old != st) try aw.writer.print("{s} {s} -> {s}\n", .{ s.name, old.label(), st.label() });
             } else try aw.writer.print("{s} new {s}\n", .{ s.name, st.label() });
         }
         if (!first) {
             var it = last.iterator();
-            while (it.next()) |e| if (!now.contains(e.key_ptr.*)) {
+            while (it.next()) |e| if (!now.contains(e.key_ptr.*) and !last_hidden.contains(e.key_ptr.*)) {
                 try aw.writer.print("{s} ended\n", .{nameFromTmux(e.key_ptr.*)});
             };
         }
@@ -253,6 +273,7 @@ fn cmdWatch(ctx: Ctx, cfg: config.Config) !void {
         prev.deinit();
         prev = cur;
         last = now;
+        last_hidden = now_hidden;
     }
 }
 

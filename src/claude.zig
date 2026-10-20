@@ -94,7 +94,7 @@ pub fn readStatuses(ctx: Ctx, arena: std.mem.Allocator, cfg: config.Config) !Sta
             const reg = std.json.parseFromSliceLeaky(Registry, arena, data, .{ .ignore_unknown_fields = true }) catch continue;
             const target = reg.tmux orelse continue;
             if (!std.mem.startsWith(u8, target, tmux.prefix)) continue;
-            if (reg.pid) |pid| if (!pidAlive(ctx, pid)) continue;
+            if (reg.pid) |pid| if (!pidAlive(pid)) continue;
             const colon = std.mem.indexOfScalar(u8, target, ':') orelse target.len;
             const key = try arena.dupe(u8, target[0..colon]);
             const st = parseStatus(reg.status orelse reg.state orelse "");
@@ -112,12 +112,36 @@ pub fn readStatuses(ctx: Ctx, arena: std.mem.Allocator, cfg: config.Config) !Sta
 }
 
 /// Claude stores transcripts under <config>/projects/<cwd with non-alphanumerics as '-'>/<sessionId>.jsonl.
-pub fn transcriptPath(arena: std.mem.Allocator, config_dir: []const u8, cwd: []const u8, session_id: []const u8) ![]const u8 {
+/// Where Claude keeps transcripts for sessions started in `cwd`.
+pub fn projectDir(arena: std.mem.Allocator, config_dir: []const u8, cwd: []const u8) ![]const u8 {
     const enc = try arena.dupe(u8, cwd);
     for (enc) |*c| if (!std.ascii.isAlphanumeric(c.*)) {
         c.* = '-';
     };
-    return std.fmt.allocPrint(arena, "{s}/projects/{s}/{s}.jsonl", .{ config_dir, enc, session_id });
+    return std.fmt.allocPrint(arena, "{s}/projects/{s}", .{ config_dir, enc });
+}
+
+pub fn transcriptPath(arena: std.mem.Allocator, config_dir: []const u8, cwd: []const u8, session_id: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(arena, "{s}/{s}.jsonl", .{ try projectDir(arena, config_dir, cwd), session_id });
+}
+
+/// Whether Claude can still resume: the transcript for `session_id` exists, or
+/// with no id (`--continue`), any transcript for `cwd` does. Claude deletes old
+/// transcripts (settings.json `cleanupPeriodDays`, 30 days by default).
+pub fn canResume(ctx: Ctx, arena: std.mem.Allocator, config_dir: []const u8, cwd: []const u8, session_id: []const u8) bool {
+    if (session_id.len > 0) {
+        const p = transcriptPath(arena, config_dir, cwd, session_id) catch return true;
+        std.Io.Dir.cwd().access(ctx.io, p, .{}) catch return false;
+        return true;
+    }
+    const p = projectDir(arena, config_dir, cwd) catch return true;
+    var dir = std.Io.Dir.cwd().openDir(ctx.io, p, .{ .iterate = true }) catch return false;
+    defer dir.close(ctx.io);
+    var it = dir.iterate();
+    while (it.next(ctx.io) catch return true) |e| {
+        if (e.kind == .file and std.mem.endsWith(u8, e.name, ".jsonl")) return true;
+    }
+    return false;
 }
 
 /// Tool results can be large; look back far enough to find Claude's last prose.
@@ -214,10 +238,11 @@ fn parseStatus(s: []const u8) Status {
     return .unknown;
 }
 
-fn pidAlive(ctx: Ctx, pid: i64) bool {
-    var buf: [32]u8 = undefined;
-    const path = std.fmt.bufPrint(&buf, "/proc/{d}", .{pid}) catch return false;
-    std.Io.Dir.accessAbsolute(ctx.io, path, .{}) catch return false;
+fn pidAlive(pid: i64) bool {
+    const p = std.math.cast(std.posix.pid_t, pid) orelse return false;
+    if (p <= 0) return false;
+    // Signal 0 only checks: EPERM means it exists but belongs to someone else.
+    std.posix.kill(p, @enumFromInt(0)) catch |err| return err == error.PermissionDenied;
     return true;
 }
 

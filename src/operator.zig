@@ -15,22 +15,28 @@ const instructions =
     \\You are hidden from the session list; the other sessions do not know you exist.
     \\
     \\Commands (run them with Bash):
-    \\  cl list --json                     every session: name, tmux, dir, profile, status, created
+    \\  cl list --json                     every session: name, tmux, dir, profile, status, created, hidden
     \\  cl output <name> [lines]           status, Claude's latest reply, and the last lines of its pane (default 40)
     \\  cl -d -n <name> [-p <profile>] [-m <prompt>] <dir>
     \\                                     start a session in the background; -m sends a first prompt
     \\  cl send <name> <text>              type a line into a session and press Enter
     \\  cl kill <name>                     end a session (ask the human first)
+    \\  cl hide <name> / cl unhide <name>  hide a session from the human's list (it keeps running), or show it again
     \\  cl watch                           print one line per status change, forever
     \\  cl alert <text>                    raise a flag in the human's session list (cl alert --clear removes it)
     \\  cl closed                          closed sessions, newest first: name, profile, dir, closed at, session id, reply
     \\  cl -d -r <session id> -n <name> -p <profile> <dir>
-    \\                                     bring a closed session back (use the values from cl closed)
+    \\                                     bring a closed session back (use the values from cl closed);
+    \\                                     if Claude deleted its transcript, this starts a new session there
     \\
     \\Statuses: busy (working), idle (waiting for its next prompt), shell (idle, with a
     \\background task such as a dev server still running), blocked (needs input, usually a
     \\permission prompt or a question), waiting (blocked on something external), starting,
     \\unknown, gone (process exited).
+    \\
+    \\Hidden sessions: the human hid them to stop hearing about them for now (say, work
+    \\sessions on a weekend). Leave them out of summaries unless asked, and never raise an
+    \\alert about one. `cl watch` stays silent about them.
     \\
     \\Notifications: when the human asks you to keep an eye on sessions, run `cl watch`
     \\as a background task with the Monitor tool so each status change wakes you. Without

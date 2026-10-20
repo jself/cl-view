@@ -24,6 +24,8 @@ pub const Closed = struct {
     closed: i64,
     /// Claude's latest reply, whitespace squashed.
     reply: []const u8,
+    /// False once Claude has deleted the transcript; resuming starts afresh.
+    resumable: bool = true,
 };
 
 fn path(ctx: Ctx, alloc: std.mem.Allocator) ![]const u8 {
@@ -115,28 +117,35 @@ pub fn closed(ctx: Ctx, arena: std.mem.Allocator, cfg: config.Config, live: []co
         if (statuses.get(s.tmux_name)) |i| if (i.session_id.len > 0) try running.put(arena, i.session_id, {});
     }
     var seen: std.StringHashMapUnmanaged(void) = .empty;
+    // name/dir/profile of entries newer than the current one.
+    var newer: std.StringHashMapUnmanaged(void) = .empty;
     var out: std.ArrayList(Closed) = .empty;
     var i = entries.len;
     while (i > 0) {
         i -= 1;
         const e = entries[i];
+        const like = try std.fmt.allocPrint(arena, "{s}\x00{s}\x00{s}", .{ e.name, e.dir, e.profile });
+        const has_newer = (try newer.getOrPut(arena, like)).found_existing;
         if (running.contains(e.tmux)) continue;
         if (e.session_id.len > 0) {
             if (running.contains(e.session_id)) continue;
             if ((try seen.getOrPut(arena, e.session_id)).found_existing) continue;
         }
+        const config_dir = if (cfg.find(e.profile)) |p| p.config_dir else null;
+        const cd = config_dir orelse try claude.defaultConfigDir(ctx, arena);
+        const resumable = claude.canResume(ctx, arena, cd, e.dir, e.session_id);
+        // Nothing left to resume, and a newer session already took its place.
+        if (!resumable and has_newer) continue;
         var when = e.created;
         var reply: []const u8 = "";
         if (e.session_id.len > 0) {
-            const config_dir = if (cfg.find(e.profile)) |p| p.config_dir else null;
-            const cd = config_dir orelse try claude.defaultConfigDir(ctx, arena);
             const tpath = try claude.transcriptPath(arena, cd, e.dir, e.session_id);
             if (std.Io.Dir.cwd().statFile(ctx.io, tpath, .{})) |st| {
                 when = st.mtime.toSeconds();
             } else |_| {}
             reply = claude.lastReply(ctx, arena, cd, e.dir, e.session_id) catch "";
         }
-        try out.append(arena, .{ .entry = e, .closed = when, .reply = reply });
+        try out.append(arena, .{ .entry = e, .closed = when, .reply = reply, .resumable = resumable });
     }
     std.mem.sort(Closed, out.items, {}, struct {
         fn gt(_: void, a: Closed, b: Closed) bool {

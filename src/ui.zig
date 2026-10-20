@@ -24,7 +24,7 @@ const Mode = union(enum) {
     input: Input,
 };
 
-const Input = enum { filter, rename, send, new_dir, new_name, new_profile, new_message };
+const Input = enum { filter, history_filter, rename, send, new_dir, new_name, new_profile, new_message };
 
 const PreviewLine = []sgr.Segment;
 
@@ -44,7 +44,9 @@ const App = struct {
     /// Loaded when the resume list opens; lives in hist_state.
     hist_state: std.heap.ArenaAllocator,
     closed: []history.Closed = &.{},
+    /// Index into histVisible(), not into `closed`.
     hist_cursor: usize = 0,
+    hist_filter: []const u8 = "",
     /// The operator, when it is running (hidden from `sessions`).
     op: ?tmux.Session = null,
     statuses: claude.StatusMap = .empty,
@@ -54,6 +56,8 @@ const App = struct {
     mode: Mode = .list,
     input: vaxis.widgets.TextInput,
     filter: []const u8 = "",
+    /// H: list hidden sessions too.
+    show_hidden: bool = false,
     message: []const u8 = "",
     last_refresh_ms: i64 = 0,
     dirty: bool = true,
@@ -80,8 +84,8 @@ const App = struct {
     fn visible(self: *App, buf: []usize) []usize {
         var n: usize = 0;
         for (self.sessions, 0..) |s, i| {
-            if (self.filter.len == 0 or std.mem.indexOf(u8, s.name, self.filter) != null or
-                std.mem.indexOf(u8, s.dir, self.filter) != null) {
+            if (s.hidden and !self.show_hidden) continue;
+            if (matches(self.filter, &.{ s.name, s.dir, s.profile })) {
                 buf[n] = i;
                 n += 1;
             }
@@ -89,6 +93,30 @@ const App = struct {
         const vis = buf[0..n];
         std.sort.insertion(usize, vis, self, lessByGroup);
         return vis;
+    }
+
+    /// Indices into `closed` passing the resume list's filter, in order.
+    fn histVisible(self: *App, buf: []usize) []usize {
+        var n: usize = 0;
+        for (self.closed, 0..) |c, i| {
+            if (n == buf.len) break;
+            if (matches(self.hist_filter, &.{ c.entry.name, c.entry.dir, c.entry.profile })) {
+                buf[n] = i;
+                n += 1;
+            }
+        }
+        return buf[0..n];
+    }
+
+    /// Header note about hidden sessions: how many are tucked away, or that they are shown.
+    fn hiddenNote(self: *App) ![]const u8 {
+        var n: usize = 0;
+        for (self.sessions) |s| if (s.hidden) {
+            n += 1;
+        };
+        if (n == 0) return "";
+        if (self.show_hidden) return std.fmt.allocPrint(self.arena(), " · showing {d} hidden", .{n});
+        return std.fmt.allocPrint(self.arena(), " · {d} hidden (H)", .{n});
     }
 
     fn lessByGroup(self: *App, a: usize, b: usize) bool {
@@ -158,6 +186,15 @@ const App = struct {
         self.preview_of = s.tmux_name;
     }
 
+    /// Re-read the terminal size and repaint everything (Ctrl-L, and after attaching).
+    fn redraw(self: *App) !void {
+        if (self.tty.getWinsize()) |ws| {
+            try self.vx.resize(self.ctx.gpa, self.tty.writer(), ws);
+        } else |_| {}
+        self.vx.queueRefresh();
+        try self.refresh();
+    }
+
     fn setMessage(self: *App, comptime fmt: []const u8, args: anytype) void {
         self.message = std.fmt.allocPrint(self.arena(), fmt, args) catch "";
         self.dirty = true;
@@ -165,6 +202,7 @@ const App = struct {
 
     fn handleKey(self: *App, key: vaxis.Key) !void {
         self.dirty = true;
+        if (key.matches('l', .{ .ctrl = true })) return self.redraw();
         switch (self.mode) {
             .list => try self.handleListKey(key),
             .history => try self.handleHistoryKey(key),
@@ -183,6 +221,11 @@ const App = struct {
                     self.input.clearAndFree();
                     self.mode = .list;
                     if (kind == .filter) self.filter = "";
+                    if (kind == .history_filter) {
+                        self.hist_filter = "";
+                        self.hist_cursor = 0;
+                        self.mode = .history;
+                    }
                 } else if (key.matches(vaxis.Key.enter, .{})) {
                     const owned = try self.input.toOwnedSlice();
                     defer self.ctx.gpa.free(owned);
@@ -193,6 +236,10 @@ const App = struct {
                     try self.input.update(.{ .key_press = key });
                     if (kind == .filter) {
                         self.filter = try std.mem.concat(self.form(), u8, &.{ self.input.buf.firstHalf(), self.input.buf.secondHalf() });
+                    }
+                    if (kind == .history_filter) {
+                        self.hist_filter = try std.mem.concat(self.hist_state.allocator(), u8, &.{ self.input.buf.firstHalf(), self.input.buf.secondHalf() });
+                        self.hist_cursor = 0;
                     }
                 }
             },
@@ -233,6 +280,15 @@ const App = struct {
             }
         } else if (key.matches('s', .{})) {
             if (self.selected() != null) self.mode = .{ .input = .send };
+        } else if (key.matches('H', .{}) or key.matches('h', .{ .shift = true })) {
+            self.show_hidden = !self.show_hidden;
+            try self.loadPreview();
+        } else if (key.matches('h', .{})) {
+            if (self.selected()) |s| {
+                tmux.setHidden(self.ctx, s.tmux_name, !s.hidden) catch {};
+                if (s.hidden) self.setMessage("{s} is visible again", .{s.name}) else self.setMessage("hid {s} (H shows hidden sessions)", .{s.name});
+                try self.refresh();
+            }
         } else if (key.matches('/', .{})) {
             self.mode = .{ .input = .filter };
         } else if (key.matches('n', .{})) {
@@ -245,6 +301,7 @@ const App = struct {
             _ = self.hist_state.reset(.retain_capacity);
             self.closed = history.closed(self.ctx, self.hist_state.allocator(), self.cfg, self.sessions, self.statuses) catch &.{};
             self.hist_cursor = 0;
+            self.hist_filter = "";
             self.scroll = 0;
             self.mode = .history;
         } else if (key.matches('r', .{ .ctrl = true })) {
@@ -263,16 +320,24 @@ const App = struct {
     }
 
     fn handleHistoryKey(self: *App, key: vaxis.Key) !void {
-        const count = self.closed.len;
+        var buf: [4096]usize = undefined;
+        const vis = self.histVisible(&buf);
+        const count = vis.len;
         if (key.matches('g', .{})) {
             if (self.pending_g) self.hist_cursor = 0;
             self.pending_g = !self.pending_g;
             return;
         }
         self.pending_g = false;
-        if (key.matches(vaxis.Key.escape, .{}) or key.matches('q', .{}) or key.matches('R', .{}) or key.matches('r', .{ .shift = true })) {
+        if (key.matches(vaxis.Key.escape, .{}) and self.hist_filter.len > 0) {
+            self.hist_filter = "";
+            self.hist_cursor = 0;
+        } else if (key.matches(vaxis.Key.escape, .{}) or key.matches('q', .{}) or key.matches('R', .{}) or key.matches('r', .{ .shift = true })) {
             self.mode = .list;
             self.scroll = 0;
+        } else if (key.matches('/', .{})) {
+            try self.input.insertSliceAtCursor(self.hist_filter);
+            self.mode = .{ .input = .history_filter };
         } else if (key.matches('c', .{ .ctrl = true })) {
             self.quit = true;
         } else if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) {
@@ -283,8 +348,10 @@ const App = struct {
             if (count > 0) self.hist_cursor = count - 1;
         } else if (key.matches(vaxis.Key.enter, .{}) or key.matches('l', .{})) {
             if (count == 0) return;
-            const e = self.closed[self.hist_cursor].entry;
+            const e = self.closed[vis[self.hist_cursor]].entry;
+            var fresh = false;
             const tmux_name = launch.create(self.ctx, self.cfg, .{
+                .started_fresh = &fresh,
                 .dir = e.dir,
                 .name = e.name,
                 .profile = e.profile,
@@ -299,13 +366,15 @@ const App = struct {
             self.scroll = 0;
             try self.refresh();
             try self.attach(tmux_name);
+            if (fresh) self.setMessage("{s}: Claude had deleted the transcript, so that was a new session", .{e.name});
         }
     }
 
-    fn buildHistoryLines(self: *App, width: u16) ![]Line {
+    fn buildHistoryLines(self: *App, vis: []const usize, width: u16) ![]Line {
         var lines: std.ArrayList(Line) = .empty;
         const now = self.ctx.nowSeconds();
-        for (self.closed, 0..) |c, i| {
+        for (vis, 0..) |ci, i| {
+            const c = self.closed[ci];
             const age = try ageText(self.arena(), now - c.closed);
             const short = try self.ctx.shortenHomeIn(self.arena(), c.entry.dir);
             // "  name  profile  ~/dir  reply  age"
@@ -331,6 +400,11 @@ const App = struct {
             .filter => {
                 self.filter = text;
                 self.cursor = 0;
+            },
+            .history_filter => {
+                self.hist_filter = try self.hist_state.allocator().dupe(u8, text);
+                self.hist_cursor = 0;
+                self.mode = .history;
             },
             .rename => if (self.selected()) |s| {
                 if (text.len > 0) tmux.rename(self.ctx, s.tmux_name, text) catch {};
@@ -380,8 +454,8 @@ const App = struct {
         tmux.attach(self.ctx, tmux_name) catch |err| self.setMessage("attach failed: {s}", .{@errorName(err)});
         try self.loop.start();
         try self.vx.enterAltScreen(writer);
-        self.vx.queueRefresh();
-        try self.refresh();
+        // The loop was stopped while attached, so a resize then went unseen.
+        try self.redraw();
         self.selectByName(tmux_name);
         try self.loadPreview();
     }
@@ -410,7 +484,7 @@ const App = struct {
             const info = self.statuses.get(s.tmux_name);
             const age = try ageText(self.arena(), self.ctx.nowSeconds() - ageSince(s, info));
             // "  ● name  profile  summary  age": fit the summary into what is left.
-            const fixed = 2 + 1 + 1 + cols(s.name) + 2 + cols(s.profile) + 2 + 2 + age.len;
+            const fixed = 2 + 1 + 1 + cols(s.name) + 2 + cols(s.profile) + (if (s.hidden) @as(usize, 10) else 2) + 2 + age.len;
             const summary = if (info) |i| try truncate(self.arena(), i.summary, width -| fixed) else "";
             try lines.append(self.arena(), .{ .vi = vi, .segs = try self.arena().dupe(vaxis.Segment, &.{
                 .{ .text = "  " },
@@ -419,7 +493,7 @@ const App = struct {
                 .{ .text = s.name, .style = .{ .bold = true } },
                 .{ .text = "  " },
                 .{ .text = s.profile, .style = .{ .dim = true } },
-                .{ .text = "  " },
+                .{ .text = if (s.hidden) "  hidden  " else "  ", .style = .{ .dim = true, .italic = true } },
                 .{ .text = summary },
                 .{ .text = try std.fmt.allocPrint(self.arena(), "  {s}", .{age}), .style = .{ .dim = true } },
             }) });
@@ -447,13 +521,22 @@ const App = struct {
         var buf: [1024]usize = undefined;
         const vis = self.visible(&buf);
 
-        const in_history = self.mode == .history;
+        const in_history = switch (self.mode) {
+            .history => true,
+            .input => |kind| kind == .history_filter,
+            else => false,
+        };
+        var hbuf: [4096]usize = undefined;
+        const hvis = if (in_history) self.histVisible(&hbuf) else &.{};
         // Where the header text ends, so the operator label can avoid it.
         var header_end: u16 = 0;
         if (in_history) {
             header_end = win.print(&.{
                 .{ .text = " RESUME  ", .style = bold },
-                .{ .text = try std.fmt.allocPrint(self.arena(), "{d} closed sessions, most recently closed first", .{self.closed.len}), .style = .{ .dim = true } },
+                .{ .text = if (self.hist_filter.len > 0)
+                    try std.fmt.allocPrint(self.arena(), "{d} of {d} closed sessions match \"{s}\"", .{ hvis.len, self.closed.len, self.hist_filter })
+                else
+                    try std.fmt.allocPrint(self.arena(), "{d} closed sessions, most recently closed first", .{self.closed.len}), .style = .{ .dim = true } },
             }, .{ .wrap = .none }).col;
         }
         // Header: counts per group, like `claude agents`.
@@ -468,6 +551,7 @@ const App = struct {
             .{ .text = try std.fmt.allocPrint(self.arena(), "{d} idle", .{counts.get(.idle) + counts.get(.shell)}), .style = .{ .fg = statusColor(.idle) } },
             .{ .text = " · ", .style = .{ .dim = true } },
             .{ .text = try std.fmt.allocPrint(self.arena(), "{d} other", .{vis.len - counts.get(.blocked) - counts.get(.busy) - counts.get(.idle) - counts.get(.shell)}), .style = .{ .dim = true } },
+            .{ .text = try self.hiddenNote(), .style = .{ .dim = true, .italic = true } },
         }, .{ .wrap = .none }).col;
         if (self.op) |op| {
             const st = self.status(op);
@@ -484,13 +568,14 @@ const App = struct {
         }
 
         // Split the rest between the list (top) and the preview (bottom).
-        const lines = if (in_history) try self.buildHistoryLines(win.width) else try self.buildLines(vis, win.width);
+        const lines = if (in_history) try self.buildHistoryLines(hvis, win.width) else try self.buildLines(vis, win.width);
         const cursor = if (in_history) self.hist_cursor else self.cursor;
         const avail: u16 = win.height -| 4; // header, gap under list, separator, bottom line
         const preview_min: u16 = @min(10, avail / 2);
         // The list takes at most a third of the window, then scrolls.
         const list_max: u16 = @max(1, win.height / 3);
-        const list_h: u16 = @intCast(@min(lines.len, list_max, @max(1, avail -| preview_min)));
+        // At least one row, for the "no sessions" message.
+        const list_h: u16 = @intCast(@min(@max(lines.len, 1), list_max, @max(1, avail -| preview_min)));
         const preview_h: u16 = avail -| list_h;
 
         // Scroll so the selected row is on screen.
@@ -515,8 +600,9 @@ const App = struct {
                 _ = row.print(l.segs, .{ .wrap = .none });
             }
         }
-        if (in_history and self.closed.len == 0) {
-            _ = list.printSegment(.{ .text = "  no closed sessions yet.", .style = .{ .dim = true } }, .{ .wrap = .none });
+        if (in_history and hvis.len == 0) {
+            const t = if (self.closed.len == 0) "  no closed sessions yet." else "  no closed sessions match the filter.";
+            _ = list.printSegment(.{ .text = t, .style = .{ .dim = true } }, .{ .wrap = .none });
         } else if (!in_history and vis.len == 0) {
             _ = list.printSegment(.{ .text = "  no sessions. press n to launch one.", .style = .{ .dim = true } }, .{ .wrap = .none });
         }
@@ -526,9 +612,15 @@ const App = struct {
         var x: u16 = 0;
         while (x < win.width) : (x += 1) win.writeCell(x, sep_y, .{ .char = .{ .grapheme = "─" }, .style = .{ .dim = true } });
         if (in_history) {
-            if (self.closed.len > 0) {
-                const c = self.closed[self.hist_cursor];
-                const title = try std.fmt.allocPrint(self.arena(), " {s}  {s} ", .{ c.entry.name, if (c.entry.session_id.len > 0) c.entry.session_id else "no session id: resumes with --continue" });
+            if (hvis.len > 0) {
+                const c = self.closed[hvis[self.hist_cursor]];
+                const how = if (!c.resumable)
+                    "transcript deleted by Claude: starts a new session here"
+                else if (c.entry.session_id.len > 0)
+                    c.entry.session_id
+                else
+                    "no session id: resumes with --continue";
+                const title = try std.fmt.allocPrint(self.arena(), " {s}  {s} ", .{ c.entry.name, how });
                 _ = win.printSegment(.{ .text = title, .style = .{ .dim = true } }, .{ .row_offset = sep_y, .col_offset = 1, .wrap = .none });
                 const right = win.child(.{ .x_off = 2, .y_off = sep_y + 1, .width = win.width -| 4, .height = preview_h });
                 _ = right.printSegment(.{ .text = if (c.reply.len > 0) c.reply else "(no reply recorded)" }, .{ .wrap = .word });
@@ -548,11 +640,11 @@ const App = struct {
         const bottom = win.child(.{ .y_off = win.height -| 1, .height = 1 });
         switch (self.mode) {
             .list => {
-                const help = if (self.message.len > 0) self.message else  " enter attach  tab details  n new  o operator  R resume closed  d kill  r rename  s send  / filter  q quit  (ctrl-q detaches)";
+                const help = if (self.message.len > 0) self.message else  " enter attach  tab details  n new  o operator  R resume closed  h hide  H show hidden  d kill  r rename  s send  / filter  q quit  (ctrl-q detaches)";
                 _ = bottom.printSegment(.{ .text = help, .style = .{ .dim = true } }, .{ .wrap = .none });
             },
             .history => {
-                const help = if (self.message.len > 0) self.message else " enter resume  j/k move  esc back";
+                const help = if (self.message.len > 0) self.message else  " enter resume  / filter  j/k move  esc back";
                 _ = bottom.printSegment(.{ .text = help, .style = .{ .dim = true } }, .{ .wrap = .none });
             },
             .confirm_kill => {
@@ -562,7 +654,7 @@ const App = struct {
             },
             .input => |kind| {
                 const label: []const u8 = switch (kind) {
-                    .filter => " filter: ",
+                    .filter, .history_filter => " filter: ",
                     .rename => " rename: ",
                     .send => " send: ",
                     .new_dir => " new session - directory: ",
@@ -580,6 +672,13 @@ const App = struct {
         self.dirty = false;
     }
 };
+
+/// Whether `filter` (case-insensitive) occurs in any of `fields`; an empty filter matches.
+fn matches(filter: []const u8, fields: []const []const u8) bool {
+    if (filter.len == 0) return true;
+    for (fields) |f| if (std.ascii.indexOfIgnoreCase(f, filter) != null) return true;
+    return false;
+}
 
 /// Approximate display width: one column per codepoint.
 fn cols(text: []const u8) usize {

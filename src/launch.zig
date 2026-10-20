@@ -17,6 +17,9 @@ pub const Options = struct {
     detach: bool = false,
     /// See tmux.NewOptions.role.
     role: []const u8 = "",
+    /// Set to true when --resume/--continue had no transcript to resume, so a
+    /// fresh session was started instead.
+    started_fresh: ?*bool = null,
     extra: []const []const u8 = &.{},
 };
 
@@ -38,13 +41,28 @@ pub fn create(ctx: Ctx, cfg: config.Config, o: Options) ![]const u8 {
     var idbuf: [36]u8 = undefined;
     // Claude's session id when we know it up front; the chooser fills in the rest.
     var session_id: []const u8 = "";
-    if (o.resume_flag) {
+    // Claude only exits with "No conversation found" when the transcript was
+    // cleaned up; start a new session with the same options instead.
+    var resume_flag = o.resume_flag;
+    var continue_flag = o.continue_flag;
+    if ((resume_flag and o.resume_id != null) or continue_flag) {
+        var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        const config_dir = profile.config_dir orelse try claude.defaultConfigDir(ctx, arena);
+        if (!claude.canResume(ctx, arena, config_dir, dir, if (resume_flag) o.resume_id.? else "")) {
+            resume_flag = false;
+            continue_flag = false;
+            if (o.started_fresh) |f| f.* = true;
+        }
+    }
+    if (resume_flag) {
         try cmd.append(ctx.gpa, "--resume");
         if (o.resume_id) |id| {
             try cmd.append(ctx.gpa, id);
             session_id = id;
         }
-    } else if (o.continue_flag) {
+    } else if (continue_flag) {
         try cmd.append(ctx.gpa, "--continue");
     } else if (!claude.argsPickSession(o.extra)) {
         session_id = claude.uuid4(ctx, &idbuf);

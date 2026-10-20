@@ -14,7 +14,8 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        target: [x86_64-linux-musl, aarch64-linux-musl]
+        # All cross-compiled here; macOS is tested natively in test-macos.
+        target: [x86_64-linux-musl, aarch64-linux-musl, aarch64-macos, x86_64-macos]
     steps:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
@@ -36,9 +37,21 @@ jobs:
           name: cl-${{ matrix.target }}
           path: dist/*.tar.gz
 
+  test-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Test
+        run: zig build test
+      - name: Build
+        run: zig build -Doptimize=ReleaseSafe
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build, test-macos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

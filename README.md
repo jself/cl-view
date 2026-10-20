@@ -13,17 +13,23 @@ with its metadata in `@cl_*` options. Status comes from the registry files Claud
 itself writes under `<config dir>/sessions/`, the same source `claude agents` uses,
 so `busy` / `idle` / `blocked` match what Claude reports.
 
-Linux only for now: checking whether a Claude process is still alive reads `/proc`.
+Runs on Linux and macOS (Windows: use WSL). It needs tmux on PATH
+(`brew install tmux` on macOS).
 
 ## Install
 
-Static binaries for x86_64 and aarch64 Linux are on the
-[releases page](https://github.com/jself/cl-view/releases):
+Binaries are on the [releases page](https://github.com/jself/cl-view/releases):
+static `x86_64-linux-musl` / `aarch64-linux-musl` for Linux, and
+`aarch64-macos` (Apple silicon) / `x86_64-macos` (Intel) for macOS.
 
 ```
-curl -L https://github.com/jself/cl-view/releases/latest/download/cl-x86_64-linux-musl.tar.gz | tar xz
-install -m755 cl-x86_64-linux-musl/cl ~/.local/bin/cl
+t=x86_64-linux-musl   # or aarch64-linux-musl, aarch64-macos, x86_64-macos
+curl -L https://github.com/jself/cl-view/releases/latest/download/cl-$t.tar.gz | tar xz
+mkdir -p ~/.local/bin && install -m755 cl-$t/cl ~/.local/bin/cl
 ```
+
+On macOS, a binary downloaded with curl runs as is. One downloaded with a
+browser is quarantined; clear that with `xattr -d com.apple.quarantine ~/.local/bin/cl`.
 
 ## Build
 
@@ -63,6 +69,7 @@ cl [options] [dir]        launch claude in dir (default: cwd) and attach
 cl list | ls              interactive chooser (--plain / --json for scripts)
 cl attach <name>          attach to a session (Ctrl-Q detaches)
 cl kill <name>            kill a session
+cl hide | unhide <name>   hide a running session from the chooser, or show it again
 cl send <name> <text>     type text + Enter into a session
 cl output <name> [lines]  status, latest reply, and pane tail (default 40 lines)
 cl watch                  print a line whenever a session's status changes
@@ -94,15 +101,29 @@ The latest reply comes from the transcript Claude writes under
 `<config dir>/projects/<cwd>/<session id>.jsonl` (only the last 256 KB is read).
 
 Chooser keys: `j`/`k` move, `Enter` attach, `Tab` toggle details, `n` new session
-(asks for directory, name, profile, optional first message), `o` operator, `R` resume a closed session, `d` kill, `r` rename,
-`s` send a line, `/` filter, `gg`/`G`, `Ctrl-R` refresh, `q` quit.
+(asks for directory, name, profile, optional first message), `o` operator, `R` resume a closed session, `h` hide / unhide, `H` show hidden, `d` kill, `r` rename,
+`s` send a line, `/` filter (name, directory, profile), `gg`/`G`, `Ctrl-R` refresh, `Ctrl-L` redraw, `q` quit.
+
+`h` hides the selected session without stopping it: Claude, its background
+tasks, and any extra tmux windows keep running, and the header counts what is
+hidden. `H` shows hidden sessions too (marked `hidden`), where `h` unhides one.
+Hidden is a tmux option (`@cl_hidden`), so it lasts as long as the session.
+The operator leaves hidden sessions alone: `cl watch` says nothing about them,
+so they raise no alerts.
 
 `R` lists sessions that are no longer running, most recently closed first, with
 Claude's last reply; `Enter` brings one back with `claude --resume` in its old
 directory, name, and profile. Every launch is recorded in
 `~/.local/state/cl/history.jsonl`, and the chooser keeps each running session's
 Claude session id up to date there (so `/clear` is followed). "Closed" is when
-the transcript was last written.
+the transcript was last written. `/` filters the list by name, directory, or
+profile.
+
+Claude deletes old transcripts (`cleanupPeriodDays` in its `settings.json`, 30
+days by default). Resuming one that is gone starts a new Claude session in the
+same directory with the same name and profile; the list marks those, and drops
+them once a newer session with the same name and directory exists. The same
+applies to `cl -r <id>`.
 
 ## Operator
 
@@ -146,7 +167,9 @@ web.password = $argon2id$...    # written by `cl web password`
   binds to this machine's tailnet IPv4, so the page is reachable from your
   other Tailscale devices (http://<machine>:8421) and not from the LAN. While
   Tailscale is down or logged out, that listener waits and retries every 30 s;
-  the others serve meanwhile.
+  the others serve meanwhile. The address comes from `tailscale ip -4` (on
+  macOS, the CLI inside `/Applications/Tailscale.app` is used if `tailscale`
+  is not on PATH).
 - With `web.autostart`, the server runs in a hidden tmux session and logs to
   `~/.local/state/cl/web.log`. After changing the password or upgrading cl,
   run `cl web stop` and it starts again with the next cl command.
@@ -161,6 +184,11 @@ web.password = $argon2id$...    # written by `cl web password`
 
 - `Ctrl-Q` is bound in tmux (`bind-key -n C-q`) to detach only when the session
   name starts with `cl_`, so it does nothing inside other tmux sessions.
+- `Ctrl-L` redraws when the screen looks off. In the chooser it re-reads the
+  terminal size and repaints. Inside a `cl_` session it fits the window back
+  to your terminal (say, after the web page on a phone shrank it), puts
+  `window-size latest` back, repaints, and passes `Ctrl-L` on to Claude.
+  Elsewhere it is passed through untouched.
 - Nested use works: running `cl` from inside another tmux session attaches a
   nested client.
 - `-m` waits for Claude's composer prompt (a `❯` line under the composer border)
@@ -168,5 +196,5 @@ web.password = $argon2id$...    # written by `cl web password`
 
 ## Releasing
 
-Push a `v*` tag (`git tag v0.1.0 && git push origin v0.1.0`). CI builds both
-Linux targets, then publishes a GitHub release with the tarballs and `SHA256SUMS`.
+Push a `v*` tag (`git tag v0.1.0 && git push origin v0.1.0`). CI builds the
+Linux and macOS targets (and runs the tests on a macOS runner), then publishes a GitHub release with the tarballs and `SHA256SUMS`.

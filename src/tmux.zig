@@ -19,6 +19,8 @@ pub const Session = struct {
     role: []const u8,
     /// The operator's pending alert for the human (@cl_alert), "" if none.
     alert: []const u8,
+    /// Hidden from the chooser (h) while it keeps running (@cl_hidden).
+    hidden: bool = false,
 };
 
 pub const operator_role = "operator";
@@ -127,7 +129,6 @@ pub fn newSession(ctx: Ctx, opts: NewOptions) ![]const u8 {
         "set-option", "-t", tmux_name, "-q", "allow-passthrough", "on", ";",
         "set-option", "-t", tmux_name, "set-clipboard", "on", ";",
         "set-option", "-t", tmux_name, "escape-time", "10", ";",
-        "set-option", "-t", tmux_name, "status", "off", ";",
         "set-option", "-t", tmux_name, "set-titles", "on", ";",
         "set-option", "-t", tmux_name, "set-titles-string", "[cl] #{@cl_name}", ";",
         "set-option", "-t", tmux_name, "window-size", "latest", ";",
@@ -139,14 +140,17 @@ pub fn newSession(ctx: Ctx, opts: NewOptions) ![]const u8 {
     return tmux_name;
 }
 
-/// Ctrl-Q detaches any client attached to a cl_* session. Idempotent.
+/// Ctrl-Q detaches any client attached to a cl_* session. Ctrl-L there also
+/// fits the window back to this client (after the web page on a phone sized
+/// it) and repaints, then passes Ctrl-L on to Claude. Idempotent.
 pub fn ensureDetachBinding(ctx: Ctx) !void {
     try runQuiet(ctx, &.{
-        "bind-key", "-n", "C-q", "if-shell", "-F", "#{m:cl_*,#{session_name}}", "detach-client", "",
+        "bind-key", "-n", "C-q", "if-shell", "-F", "#{m:cl_*,#{session_name}}", "detach-client", "", ";",
+        "bind-key", "-n", "C-l", "if-shell", "-F", "#{m:cl_*,#{session_name}}", "resize-window -A ; set-option window-size latest ; refresh-client ; send-keys C-l", "send-keys C-l",
     });
 }
 
-const list_format = "#{session_name}\t#{@cl_name}\t#{@cl_dir}\t#{@cl_profile}\t#{@cl_created}\t#{pane_dead}\t#{session_activity}\t#{@cl_role}\t#{@cl_alert}\t#{pane_title}";
+const list_format = "#{session_name}\t#{@cl_name}\t#{@cl_dir}\t#{@cl_profile}\t#{@cl_created}\t#{pane_dead}\t#{session_activity}\t#{@cl_role}\t#{@cl_alert}\t#{@cl_hidden}\t#{pane_title}";
 
 /// List Claude sessions, oldest first, leaving out cl's own (operator, web).
 /// Caller owns the slice and its strings (use an arena).
@@ -190,6 +194,7 @@ fn listAll(ctx: Ctx, arena: std.mem.Allocator) ![]Session {
         const act_s = f.next() orelse continue;
         const role = f.next() orelse continue;
         const alert = f.next() orelse continue;
+        const hidden_s = f.next() orelse continue;
         const title = f.rest();
         try sessions.append(arena, .{
             .tmux_name = try arena.dupe(u8, tmux_name),
@@ -201,6 +206,7 @@ fn listAll(ctx: Ctx, arena: std.mem.Allocator) ![]Session {
             .activity = std.fmt.parseInt(i64, act_s, 10) catch 0,
             .role = try arena.dupe(u8, role),
             .alert = try arena.dupe(u8, alert),
+            .hidden = std.mem.eql(u8, hidden_s, "1"),
             .pane_title = try arena.dupe(u8, title),
         });
     }
@@ -228,6 +234,15 @@ pub fn kill(ctx: Ctx, tmux_name: []const u8) !void {
 /// Set (or with "" clear) the alert shown in the chooser's header.
 pub fn setAlert(ctx: Ctx, tmux_name: []const u8, text: []const u8) !void {
     try runQuiet(ctx, &.{ "set-option", "-t", tmux_name, "@cl_alert", text });
+}
+
+/// Hide a session from the chooser (it keeps running), or show it again.
+pub fn setHidden(ctx: Ctx, tmux_name: []const u8, hidden: bool) !void {
+    if (hidden) {
+        try runQuiet(ctx, &.{ "set-option", "-t", tmux_name, "@cl_hidden", "1" });
+    } else {
+        try runQuiet(ctx, &.{ "set-option", "-u", "-t", tmux_name, "@cl_hidden" });
+    }
 }
 
 pub fn rename(ctx: Ctx, tmux_name: []const u8, new_name: []const u8) !void {
