@@ -63,6 +63,9 @@ const Registry = struct {
     /// Set while Claude's agents view (Left at an empty prompt) is open: the
     /// conversation then runs as a background job and `status` says "shell".
     parkedJobId: ?[]const u8 = null,
+    /// Set for a conversation running in Claude's background daemon. It has no
+    /// `tmux`; a pane shows it by running `claude attach <jobId>`.
+    jobId: ?[]const u8 = null,
 };
 
 /// <config>/jobs/<id>/state.json, for a parked conversation.
@@ -100,6 +103,8 @@ pub const StatusMap = std.StringHashMapUnmanaged(Info);
 /// Read every profile's registry; keys are tmux session names. Strings live in `arena`.
 pub fn readStatuses(ctx: Ctx, arena: std.mem.Allocator, cfg: config.Config) !StatusMap {
     var map: StatusMap = .empty;
+    // Background-daemon conversations, by job id, to match to attached panes.
+    var jobs: std.StringHashMapUnmanaged(Info) = .empty;
     for (cfg.profiles) |p| {
         const config_dir = p.config_dir orelse try defaultConfigDir(ctx, arena);
         const dir_path = try std.fmt.allocPrint(arena, "{s}/sessions", .{config_dir});
@@ -110,11 +115,9 @@ pub fn readStatuses(ctx: Ctx, arena: std.mem.Allocator, cfg: config.Config) !Sta
             if (!std.mem.endsWith(u8, entry.name, ".json")) continue;
             const data = dir.readFileAlloc(ctx.io, entry.name, arena, .limited(64 * 1024)) catch continue;
             const reg = std.json.parseFromSliceLeaky(Registry, arena, data, .{ .ignore_unknown_fields = true }) catch continue;
-            const target = reg.tmux orelse continue;
-            if (!std.mem.startsWith(u8, target, tmux.prefix)) continue;
+            if (reg.tmux == null and reg.jobId == null) continue;
+            if (reg.tmux) |target| if (!std.mem.startsWith(u8, target, tmux.prefix)) continue;
             if (reg.pid) |pid| if (!pidAlive(pid)) continue;
-            const colon = std.mem.indexOfScalar(u8, target, ':') orelse target.len;
-            const key = try arena.dupe(u8, target[0..colon]);
             var st = parseStatus(reg.status orelse reg.state orelse "");
             var name = reg.name;
             var session_id = reg.sessionId;
@@ -124,17 +127,71 @@ pub fn readStatuses(ctx: Ctx, arena: std.mem.Allocator, cfg: config.Config) !Sta
                 name = job.name orelse name;
                 session_id = job.sessionId orelse session_id;
             }
-            try map.put(arena, key, .{
+            const info: Info = .{
                 .status = st,
                 .name = try arena.dupe(u8, name orelse ""),
                 .status_since_ms = reg.statusUpdatedAt orelse 0,
                 .updated_ms = reg.updatedAt orelse 0,
                 .summary = lastReply(ctx, arena, config_dir, reg.cwd, session_id) catch "",
                 .session_id = try arena.dupe(u8, session_id orelse ""),
-            });
+            };
+            if (reg.tmux) |target| {
+                const colon = std.mem.indexOfScalar(u8, target, ':') orelse target.len;
+                try map.put(arena, try arena.dupe(u8, target[0..colon]), info);
+            } else {
+                try jobs.put(arena, try arena.dupe(u8, reg.jobId.?), info);
+            }
         }
     }
+    if (jobs.count() > 0) try linkAttached(ctx, arena, &map, jobs);
     return map;
+}
+
+/// Resuming a conversation that lives in Claude's background daemon turns the
+/// pane into `claude attach <jobId>`, which writes no registry entry of its own.
+/// Find such panes in cl_* sessions and give them their job's status.
+fn linkAttached(ctx: Ctx, arena: std.mem.Allocator, map: *StatusMap, jobs: std.StringHashMapUnmanaged(Info)) !void {
+    const panes = tmux.run(ctx, &.{ "list-panes", "-a", "-F", "#{session_name}\t#{pane_pid}" }) catch return;
+    defer ctx.gpa.free(panes);
+    var by_pid: std.StringHashMapUnmanaged([]const u8) = .empty;
+    var pids: std.ArrayList(u8) = .empty;
+    var lines = std.mem.splitScalar(u8, panes, '\n');
+    while (lines.next()) |line| {
+        var f = std.mem.splitScalar(u8, line, '\t');
+        const session = f.next() orelse continue;
+        const pid = f.next() orelse continue;
+        if (!std.mem.startsWith(u8, session, tmux.prefix) or map.contains(session)) continue;
+        try by_pid.put(arena, try arena.dupe(u8, pid), try arena.dupe(u8, session));
+        if (pids.items.len > 0) try pids.append(arena, ',');
+        try pids.appendSlice(arena, pid);
+    }
+    if (pids.items.len == 0) return;
+    const res = std.process.run(arena, ctx.io, .{ .argv = &.{ "ps", "-o", "pid=,args=", "-p", pids.items } }) catch return;
+    var rows = std.mem.splitScalar(u8, res.stdout, '\n');
+    while (rows.next()) |row| {
+        var words = std.mem.tokenizeScalar(u8, row, ' ');
+        const pid = words.next() orelse continue;
+        const session = by_pid.get(pid) orelse continue;
+        const job = attachedJob(&words) orelse continue;
+        if (jobs.get(job)) |info| try map.put(arena, session, info);
+    }
+}
+
+/// The job id in a `claude attach <jobId>` command line, if that's what it is.
+fn attachedJob(words: *std.mem.TokenIterator(u8, .scalar)) ?[]const u8 {
+    const exe = words.next() orelse return null;
+    if (!std.mem.eql(u8, std.fs.path.basename(exe), "claude")) return null;
+    if (!std.mem.eql(u8, words.next() orelse return null, "attach")) return null;
+    return words.next();
+}
+
+test "attachedJob reads claude attach command lines" {
+    var a = std.mem.tokenizeScalar(u8, "/opt/claude-code/bin/claude attach 12ae4e26", ' ');
+    try std.testing.expectEqualStrings("12ae4e26", attachedJob(&a).?);
+    var b = std.mem.tokenizeScalar(u8, "claude --resume", ' ');
+    try std.testing.expect(attachedJob(&b) == null);
+    var c = std.mem.tokenizeScalar(u8, "vim attach x", ' ');
+    try std.testing.expect(attachedJob(&c) == null);
 }
 
 /// Claude stores transcripts under <config>/projects/<cwd with non-alphanumerics as '-'>/<sessionId>.jsonl.

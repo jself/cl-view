@@ -391,6 +391,14 @@ fn serveTerminal(state: *State, req: *std.http.Server.Request, key: []const u8) 
                 parseSize(msg.data[1..], &cols, &rows);
                 term.resize(cols, rows);
             },
+            // The page was hidden ("21") or shown ("20"). With window-size
+            // latest, a resize alone (the keyboard or address bar on a phone)
+            // makes this client the one that sizes the window, shrinking it on
+            // the desktop. While hidden, it doesn't count.
+            '2' => {
+                const flag = if (std.mem.eql(u8, msg.data[1..], "1")) "ignore-size" else "!ignore-size";
+                tmux.runQuiet(ctx, &.{ "refresh-client", "-t", term.tty, "-f", flag }) catch {};
+            },
             else => {},
         }
     }

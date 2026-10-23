@@ -21,7 +21,7 @@
                  touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
                  -webkit-tap-highlight-color: transparent; }
   #keys button.down { background: var(--key-down); }
-  #keys .back { font-weight: bold; }
+  #keys .back { font-weight: bold; font-size: 22px; }
   #overlay { position: fixed; inset: 0; display: none; place-items: center; background: rgba(0,0,0,.6);
              font: 16px ui-monospace, SFMono-Regular, Menlo, monospace; }
   #overlay.show { display: grid; }
@@ -31,7 +31,7 @@
 <body>
 <div id="term"></div>
 <div id="keys">
-  <button class="back" data-send="\x11" title="Back to the list (Ctrl-Q)">← Back</button>
+  <button class="back" data-send="\x11" title="Back to the list (Ctrl-Q)" aria-label="Back to the list">⇦</button>
   <button data-send="\x1b">Esc</button>
   <button data-send="\t">Tab</button>
   <button data-send="\x1b[A">↑</button>
@@ -39,8 +39,9 @@
   <button data-send="\x1b[D">←</button>
   <button data-send="\x1b[C">→</button>
   <button data-send="\r">Enter</button>
-  <button data-send="\n" title="New line in Claude's composer">Ctrl-J</button>
-  <button data-send="\x03">Ctrl-C</button>
+  <button data-send="\n" title="New line in Claude's composer (Ctrl-J)">C-j</button>
+  <button data-send="\x03" title="Interrupt (Ctrl-C)">C-c</button>
+  <button data-send="\x0c" data-fit title="Refit the terminal to this screen and redraw (Ctrl-L)">C-l</button>
 </div>
 <div id="overlay"><button id="reconnect">Reconnect</button></div>
 <script src="/xterm.js"></script>
@@ -81,6 +82,11 @@
   }
 
   term.onData((d) => send("0", d));
+  // While the page is hidden, its size shouldn't drive the session's window.
+  document.addEventListener("visibilitychange", () => {
+    send("2", document.hidden ? "1" : "0");
+    if (!document.hidden) sendSize();
+  });
   document.getElementById("reconnect").onclick = connect;
 
   // Keys fire on touchstart (phones) or click (mouse). preventDefault on
@@ -90,6 +96,9 @@
     const seq = JSON.parse('"' + b.dataset.send.replace(/\\x/g, "\\u00") + '"');
     const fire = () => {
       if (!ws || ws.readyState !== WebSocket.OPEN) { overlay.classList.add("show"); return; }
+      // C-l first refits the page's terminal (after a rotation, say) so the
+      // Ctrl-L that follows fits the session's window to the new size.
+      if ("fit" in b.dataset) sendSize();
       send("0", seq);
       b.classList.add("down");
       setTimeout(() => b.classList.remove("down"), 120);

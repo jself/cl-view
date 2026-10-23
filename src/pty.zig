@@ -10,6 +10,9 @@ const is_linux = builtin.os.tag == .linux;
 pub const Pty = struct {
     master: posix.fd_t,
     pid: posix.pid_t,
+    /// The terminal's device path, which is also the tmux client name of any
+    /// `tmux attach` running on it.
+    tty: []const u8,
 
     /// Read output from the child; 0 once it has exited.
     pub fn read(self: Pty, buf: []u8) usize {
@@ -72,7 +75,7 @@ pub fn spawn(arena: std.mem.Allocator, argv: []const []const u8, env: []const []
     // hold it open (which would keep `read` from seeing the hangup).
     defer _ = sys.close(fds.slave);
 
-    var pty: Pty = .{ .master = fds.master, .pid = 0 };
+    var pty: Pty = .{ .master = fds.master, .pid = 0, .tty = fds.tty };
     pty.resize(cols, rows);
 
     const pid_rc = sys.fork();
@@ -91,7 +94,7 @@ pub fn spawn(arena: std.mem.Allocator, argv: []const []const u8, env: []const []
     return pty;
 }
 
-const Pair = struct { master: posix.fd_t, slave: posix.fd_t };
+const Pair = struct { master: posix.fd_t, slave: posix.fd_t, tty: []const u8 };
 
 fn openPair(arena: std.mem.Allocator) Error!Pair {
     if (is_linux) {
@@ -106,14 +109,16 @@ fn openPair(arena: std.mem.Allocator) Error!Pair {
         const path = std.fmt.allocPrintSentinel(arena, "/dev/pts/{d}", .{n}, 0) catch return error.OutOfMemory;
         const src = linux.open(path, .{ .ACCMODE = .RDWR, .NOCTTY = true, .CLOEXEC = true }, 0);
         if (linux.errno(src) != .SUCCESS) return error.PtyFailed;
-        return .{ .master = master, .slave = @intCast(src) };
+        return .{ .master = master, .slave = @intCast(src), .tty = path };
     }
     var master: c_int = -1;
     var slave: c_int = -1;
-    if (openpty(&master, &slave, null, null, null) != 0) return error.PtyFailed;
+    var name: [128]u8 = @splat(0);
+    if (openpty(&master, &slave, &name, null, null) != 0) return error.PtyFailed;
     _ = std.c.fcntl(master, posix.F.SETFD, @as(c_int, posix.FD_CLOEXEC));
     _ = std.c.fcntl(slave, posix.F.SETFD, @as(c_int, posix.FD_CLOEXEC));
-    return .{ .master = master, .slave = slave };
+    const tty = arena.dupe(u8, std.mem.sliceTo(&name, 0)) catch return error.OutOfMemory;
+    return .{ .master = master, .slave = slave, .tty = tty };
 }
 
 /// Terminal ioctls. std's macOS table lacks these; values from <sys/ttycom.h>.
@@ -154,5 +159,6 @@ test "spawn runs a child on a terminal of the given size" {
         n += got;
     }
     term.close();
+    try std.testing.expect(std.mem.startsWith(u8, term.tty, "/dev/"));
     try std.testing.expectEqualStrings("hi 17 91", std.mem.trimEnd(u8, out[0..n], "\r\n"));
 }

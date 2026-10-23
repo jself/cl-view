@@ -150,9 +150,11 @@ setting. Its instructions come from the binary (`src/operator.zig`); put a
 
 `cl web` serves the chooser to a browser, for using it from a phone. Each page
 load runs its own `cl list` in a terminal (xterm.js, built into the binary), so
-everything works as on the desktop. A key bar along the bottom has **← Back**
-(sends `Ctrl-Q`, detaching from a session back to the list), Esc, Tab, arrows,
-Enter, **Ctrl-J** (a newline in Claude's composer), and Ctrl-C.
+everything works as on the desktop. A key bar along the bottom has **⇦**
+(back: sends `Ctrl-Q`, detaching from a session back to the list), Esc, Tab,
+arrows, Enter, **C-j** (a newline in Claude's composer), C-c, and **C-l**
+(refit the terminal to the screen, after a rotation say, fit the session's
+window to it, and redraw).
 
 ```
 web.autostart = true            # start it whenever cl launches, lists or attaches
