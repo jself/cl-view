@@ -1,6 +1,7 @@
-//! `cl web`: the chooser in a browser. Each page load gets its own `cl list`
-//! on a pseudo-terminal, bridged to xterm.js over a WebSocket. A password
-//! (argon2id hash in the config) guards everything but the static files.
+//! `cl web`: the chooser in a browser. Each page gets its own `cl list`
+//! on a pseudo-terminal, bridged to xterm.js over a WebSocket and kept for a
+//! while when the connection drops. A password (argon2id hash in the config)
+//! guards everything but the static files.
 const std = @import("std");
 const Ctx = @import("ctx.zig");
 const config = @import("config.zig");
@@ -28,6 +29,8 @@ const State = struct {
     mutex: std.Io.Mutex = .init,
     /// Unix seconds of recent failed logins, for rate limiting.
     failures: [8]i64 = @splat(0),
+    /// Live terminals, by page. Guarded by `mutex`.
+    terms: std.ArrayList(*Terminal) = .empty,
 };
 
 pub fn main(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void {
@@ -59,6 +62,7 @@ fn serve(ctx: Ctx, cfg: config.Config) !void {
         try threads.append(ctx.perm, try std.Thread.spawn(.{}, listenLoop, .{ &state, spec }));
     }
     if (threads.items.len == 0) fail("web.listen is empty", .{});
+    (try std.Thread.spawn(.{}, reapLoop, .{&state})).detach();
     for (threads.items) |t| t.join();
 }
 
@@ -349,22 +353,47 @@ test formValue {
     try std.testing.expect(formValue("x=1", "password", &buf) == null);
 }
 
-/// Bridge a WebSocket to a fresh `cl list` on a pseudo-terminal.
-/// Client messages: "0<input bytes>" or "1<cols>,<rows>". Server sends output as binary.
-fn serveTerminal(state: *State, req: *std.http.Server.Request, key: []const u8) !void {
+/// How long a terminal outlives its page's connection, so a phone that drops
+/// the socket in the background picks up where it left off.
+const detach_grace_s = 15 * 60;
+
+/// A page's `cl list` on a pseudo-terminal. It outlives the WebSocket that
+/// started it: a page that reconnects with the same id gets it back.
+const Terminal = struct {
+    id_buf: [32]u8,
+    id_len: usize,
+    pty: pty.Pty,
+    arena: std.heap.ArenaAllocator,
+    /// Guards `ws` and `detached_at`; held while writing to `ws`.
+    mutex: std.Io.Mutex = .init,
+    /// The connection output goes to; null while detached.
+    ws: ?*std.http.Server.WebSocket = null,
+    detached_at: i64 = 0,
+    /// The registry's reference (dropped when the child exits) plus one per
+    /// connection using it. Guarded by `State.mutex`.
+    refs: u32 = 1,
+
+    fn id(self: *const Terminal) []const u8 {
+        return self.id_buf[0..self.id_len];
+    }
+};
+
+/// Find the page's terminal (taking a reference) or start a new one.
+fn acquireTerminal(state: *State, term_id: []const u8, cols: u16, rows: u16) !*Terminal {
     const ctx = state.ctx;
-    var ws = try req.respondWebSocket(.{ .key = key });
-    try ws.flush();
+    state.mutex.lockUncancelable(ctx.io);
+    defer state.mutex.unlock(ctx.io);
+    if (term_id.len > 0) for (state.terms.items) |t| if (std.mem.eql(u8, t.id(), term_id)) {
+        t.refs += 1;
+        return t;
+    };
 
-    // The page sends its size first; start the chooser at that size.
-    var cols: u16 = 80;
-    var rows: u16 = 24;
-    const first = ws.readSmallMessage() catch return;
-    if (first.data.len > 0 and first.data[0] == '1') parseSize(first.data[1..], &cols, &rows);
-
-    var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
+    const t = try ctx.gpa.create(Terminal);
+    errdefer ctx.gpa.destroy(t);
+    t.* = .{ .id_buf = undefined, .id_len = term_id.len, .pty = undefined, .arena = .init(ctx.gpa), .refs = 2 };
+    errdefer t.arena.deinit();
+    @memcpy(t.id_buf[0..term_id.len], term_id);
+    const arena = t.arena.allocator();
     var env: std.ArrayList([]const u8) = .empty;
     var it = ctx.env.iterator();
     while (it.next()) |e| {
@@ -374,22 +403,101 @@ fn serveTerminal(state: *State, req: *std.http.Server.Request, key: []const u8) 
         try env.append(arena, try std.fmt.allocPrint(arena, "{s}={s}", .{ k, e.value_ptr.* }));
     }
     try env.appendSlice(arena, &.{ "TERM=xterm-256color", "COLORTERM=truecolor" });
-
-    const term = pty.spawn(arena, &.{ state.exe, "list" }, env.items, cols, rows) catch |err| {
+    t.pty = pty.spawn(arena, &.{ state.exe, "list" }, env.items, cols, rows) catch |err| {
         logf("pty: {s}", .{@errorName(err)});
-        return;
+        return err;
     };
+    errdefer t.pty.close();
+    try state.terms.append(ctx.gpa, t);
+    errdefer _ = state.terms.pop();
+    const pump = try std.Thread.spawn(.{}, pumpOutput, .{ state, t });
+    pump.detach();
     logf("terminal opened ({d}x{d})", .{ cols, rows });
-    const pump = try std.Thread.spawn(.{}, pumpOutput, .{ term, &ws });
+    return t;
+}
+
+fn releaseTerminal(state: *State, t: *Terminal) void {
+    state.mutex.lockUncancelable(state.ctx.io);
+    t.refs -= 1;
+    const last = t.refs == 0;
+    state.mutex.unlock(state.ctx.io);
+    if (!last) return;
+    t.pty.close();
+    t.arena.deinit();
+    state.ctx.gpa.destroy(t);
+    logf("terminal closed", .{});
+}
+
+/// Hang up terminals whose page has been gone longer than the grace period.
+fn reapLoop(state: *State) void {
+    const ctx = state.ctx;
+    while (true) {
+        ctx.sleepMs(30_000);
+        const now = ctx.nowSeconds();
+        state.mutex.lockUncancelable(ctx.io);
+        defer state.mutex.unlock(ctx.io);
+        for (state.terms.items) |t| {
+            t.mutex.lockUncancelable(ctx.io);
+            defer t.mutex.unlock(ctx.io);
+            if (t.ws == null and now - t.detached_at > detach_grace_s) {
+                // The chooser and any tmux client it started; the pump sees
+                // EOF once they are gone.
+                std.posix.kill(-t.pty.pid, .HUP) catch {};
+            }
+        }
+    }
+}
+
+/// Bridge a WebSocket to the page's terminal: its `cl list` on a
+/// pseudo-terminal, new or (when the page reconnects with the same id) kept
+/// from its last connection. Client messages: "0<input bytes>",
+/// "1<cols>,<rows>", "2<1 hidden | 0 shown>", "3" (are you there?). Server
+/// sends output as binary.
+fn serveTerminal(state: *State, req: *std.http.Server.Request, key: []const u8) !void {
+    const ctx = state.ctx;
+    // Copied: reading from the socket reuses the buffer the request is in.
+    var id_buf: [32]u8 = undefined;
+    const raw_id = termId(req.head.target);
+    @memcpy(id_buf[0..raw_id.len], raw_id);
+    const term_id = id_buf[0..raw_id.len];
+    var ws = try req.respondWebSocket(.{ .key = key });
+    try ws.flush();
+
+    // The page sends its size first; start the chooser at that size.
+    var cols: u16 = 80;
+    var rows: u16 = 24;
+    const first = ws.readSmallMessage() catch return;
+    if (first.data.len > 0 and first.data[0] == '1') parseSize(first.data[1..], &cols, &rows);
+
+    const t = acquireTerminal(state, term_id, cols, rows) catch return;
+    defer releaseTerminal(state, t);
+    const tty = t.pty.tty;
+    {
+        t.mutex.lockUncancelable(ctx.io);
+        defer t.mutex.unlock(ctx.io);
+        // Another connection still holds it (a duplicated tab, or a socket
+        // the phone dropped without a word): send that page away.
+        if (t.ws) |old| old.writeMessage("", .connection_close) catch {};
+        t.ws = &ws;
+    }
+    // Repaint for the new page: tmux redraws its client on request, and with
+    // no client on this tty the chooser is in front, which redraws on Ctrl-L.
+    t.pty.resize(cols, rows);
+    tmux.runQuiet(ctx, &.{ "refresh-client", "-t", tty }) catch t.pty.write("\x0c");
 
     while (true) {
         const msg = ws.readSmallMessage() catch break;
         if (msg.data.len == 0) continue;
+        t.mutex.lockUncancelable(ctx.io);
+        const current = t.ws == &ws;
+        if (current and msg.data[0] == '3') ws.writeMessage("", .binary) catch {};
+        t.mutex.unlock(ctx.io);
+        if (!current) break;
         switch (msg.data[0]) {
-            '0' => term.write(msg.data[1..]),
+            '0' => t.pty.write(msg.data[1..]),
             '1' => {
                 parseSize(msg.data[1..], &cols, &rows);
-                term.resize(cols, rows);
+                t.pty.resize(cols, rows);
             },
             // The page was hidden ("21") or shown ("20"). With window-size
             // latest, a resize alone (the keyboard or address bar on a phone)
@@ -397,28 +505,66 @@ fn serveTerminal(state: *State, req: *std.http.Server.Request, key: []const u8) 
             // the desktop. While hidden, it doesn't count.
             '2' => {
                 const flag = if (std.mem.eql(u8, msg.data[1..], "1")) "ignore-size" else "!ignore-size";
-                tmux.runQuiet(ctx, &.{ "refresh-client", "-t", term.tty, "-f", flag }) catch {};
+                tmux.runQuiet(ctx, &.{ "refresh-client", "-t", tty, "-f", flag }) catch {};
             },
             else => {},
         }
     }
-    // Hang up the whole session (the chooser and any tmux client it started);
-    // the pump sees EOF once they are gone.
-    std.posix.kill(-term.pid, .HUP) catch {};
-    pump.join();
-    term.close();
-    logf("terminal closed", .{});
+    t.mutex.lockUncancelable(ctx.io);
+    const was_current = t.ws == &ws;
+    if (was_current) {
+        t.ws = null;
+        t.detached_at = ctx.nowSeconds();
+    }
+    t.mutex.unlock(ctx.io);
+    // Detached, its size shouldn't drive the session's window either.
+    if (was_current) tmux.runQuiet(ctx, &.{ "refresh-client", "-t", tty, "-f", "ignore-size" }) catch {};
 }
 
-fn pumpOutput(term: pty.Pty, ws: *std.http.Server.WebSocket) void {
+/// The page's terminal id, from `/ws?t=<id>`: up to 32 letters and digits.
+fn termId(target: []const u8) []const u8 {
+    const q = std.mem.indexOf(u8, target, "?t=") orelse return "";
+    const v = target[q + 3 ..];
+    const v_end = std.mem.indexOfScalar(u8, v, '&') orelse v.len;
+    const val = v[0..v_end];
+    if (val.len > 32) return "";
+    for (val) |c| if (!std.ascii.isAlphanumeric(c)) return "";
+    return val;
+}
+
+test termId {
+    try std.testing.expectEqualStrings("ab12", termId("/ws?t=ab12"));
+    try std.testing.expectEqualStrings("ab12", termId("/ws?t=ab12&x=1"));
+    try std.testing.expectEqualStrings("", termId("/ws"));
+    try std.testing.expectEqualStrings("", termId("/ws?t=a/b"));
+}
+
+/// Copy the terminal's output to whichever page holds it, until the chooser
+/// exits (q, or hung up after the grace period).
+fn pumpOutput(state: *State, t: *Terminal) void {
+    const io = state.ctx.io;
     var buf: [16 * 1024]u8 = undefined;
     while (true) {
-        const n = term.read(&buf);
+        const n = t.pty.read(&buf);
         if (n == 0) break;
-        ws.writeMessage(buf[0..n], .binary) catch break;
+        t.mutex.lockUncancelable(io);
+        defer t.mutex.unlock(io);
+        // Output while detached is dropped; reattaching repaints.
+        if (t.ws) |ws| ws.writeMessage(buf[0..n], .binary) catch {};
     }
-    // The chooser exited (q) or was hung up: tell the page.
-    ws.writeMessage("", .connection_close) catch {};
+    state.mutex.lockUncancelable(io);
+    for (state.terms.items, 0..) |x, i| if (x == t) {
+        _ = state.terms.swapRemove(i);
+        break;
+    };
+    state.mutex.unlock(io);
+    {
+        // Tell the page it's over, and let no one else attach.
+        t.mutex.lockUncancelable(io);
+        defer t.mutex.unlock(io);
+        if (t.ws) |ws| ws.writeMessage("", .connection_close) catch {};
+    }
+    releaseTerminal(state, t);
 }
 
 fn parseSize(text: []const u8, cols: *u16, rows: *u16) void {

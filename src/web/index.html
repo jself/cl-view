@@ -71,23 +71,65 @@
     send("1", term.cols + "," + term.rows);
   }
 
+  // The server keeps this page's terminal for a while after the connection
+  // drops (a phone backgrounding the tab), so reconnecting resumes it.
+  const termId = (() => {
+    try {
+      let id = sessionStorage.getItem("cl-term");
+      if (!id) {
+        id = Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => b.toString(16).padStart(2, "0")).join("");
+        sessionStorage.setItem("cl-term", id);
+      }
+      return id;
+    } catch { return ""; }
+  })();
+  let retries = 0;
+  let retryTimer = 0;
+  let probeTimer = 0;
+
   function connect() {
+    clearTimeout(retryTimer);
     overlay.classList.remove("show");
-    term.reset();
-    ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
-    ws.binaryType = "arraybuffer";
-    ws.onopen = () => { sendSize(); term.focus(); };
-    ws.onmessage = (e) => term.write(new Uint8Array(e.data));
-    ws.onclose = () => overlay.classList.add("show");
+    if (ws) { ws.onclose = null; ws.close(); }
+    const sock = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws?t=" + termId);
+    ws = sock;
+    sock.binaryType = "arraybuffer";
+    sock.onopen = () => {
+      retries = 0;
+      term.reset();
+      sendSize();
+      send("2", document.hidden ? "1" : "0");
+      term.focus();
+    };
+    sock.onmessage = (e) => { clearTimeout(probeTimer); term.write(new Uint8Array(e.data)); };
+    sock.onclose = (e) => {
+      if (ws !== sock) return;
+      ws = null;
+      // A close frame from the server (1005) means the chooser quit or another
+      // tab took this terminal: stay closed. Anything else is a lost
+      // connection: retry while visible, or when shown again.
+      if (e.code === 1005 || retries >= 5) { overlay.classList.add("show"); return; }
+      if (!document.hidden) retryTimer = setTimeout(connect, 500 * 2 ** retries++);
+    };
   }
 
   term.onData((d) => send("0", d));
   // While the page is hidden, its size shouldn't drive the session's window.
   document.addEventListener("visibilitychange", () => {
-    send("2", document.hidden ? "1" : "0");
-    if (!document.hidden) sendSize();
+    if (document.hidden) { send("2", "1"); return; }
+    if (overlay.classList.contains("show")) return;
+    if (!ws) { retries = 0; connect(); return; }
+    send("2", "0");
+    sendSize();
+    // A socket can look open after the phone dropped it; ask, and reconnect
+    // if nothing comes back.
+    if (ws.readyState === WebSocket.OPEN) {
+      send("3", "");
+      clearTimeout(probeTimer);
+      probeTimer = setTimeout(() => { retries = 0; connect(); }, 2500);
+    }
   });
-  document.getElementById("reconnect").onclick = connect;
+  document.getElementById("reconnect").onclick = () => { retries = 0; connect(); };
 
   // Keys fire on touchstart (phones) or click (mouse). preventDefault on
   // touchstart/mousedown keeps focus, so the on-screen keyboard stays open;
@@ -95,7 +137,8 @@
   for (const b of document.querySelectorAll("#keys button")) {
     const seq = JSON.parse('"' + b.dataset.send.replace(/\\x/g, "\\u00") + '"');
     const fire = () => {
-      if (!ws || ws.readyState !== WebSocket.OPEN) { overlay.classList.add("show"); return; }
+      if (!ws) { retries = 0; connect(); return; }
+      if (ws.readyState !== WebSocket.OPEN) return;
       // C-l first refits the page's terminal (after a rotation, say) so the
       // Ctrl-L that follows fits the session's window to the new size.
       if ("fit" in b.dataset) sendSize();
