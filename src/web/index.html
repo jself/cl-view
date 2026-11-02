@@ -59,6 +59,34 @@
   term.loadAddon(fit);
   term.open(document.getElementById("term"));
 
+  // A swipe on a phone only scrolls xterm.js's own scrollback, and there is
+  // none: replay it as wheel events, which xterm.js hands to tmux (mouse on)
+  // or turns into arrow keys for the chooser.
+  {
+    const el = document.getElementById("term");
+    let lastY = null;
+    let moved = false;
+    el.addEventListener("touchstart", (e) => {
+      lastY = e.touches.length === 1 ? e.touches[0].clientY : null;
+      moved = false;
+    }, { passive: true });
+    el.addEventListener("touchmove", (e) => {
+      if (lastY === null || e.touches.length !== 1) return;
+      const t = e.touches[0];
+      const dy = lastY - t.clientY;
+      // Ignore the jitter of a tap.
+      if (!moved && Math.abs(dy) < 8) return;
+      moved = true;
+      lastY = t.clientY;
+      e.preventDefault();
+      (document.elementFromPoint(t.clientX, t.clientY) || term.element).dispatchEvent(new WheelEvent("wheel", {
+        deltaY: dy, deltaMode: WheelEvent.DOM_DELTA_PIXEL, clientX: t.clientX, clientY: t.clientY,
+        bubbles: true, cancelable: true,
+      }));
+    }, { passive: false });
+    el.addEventListener("touchend", () => { lastY = null; });
+  }
+
   const overlay = document.getElementById("overlay");
   let ws = null;
   const enc = new TextEncoder();
@@ -96,12 +124,17 @@
     sock.binaryType = "arraybuffer";
     sock.onopen = () => {
       retries = 0;
-      term.reset();
       sendSize();
       send("2", document.hidden ? "1" : "0");
       term.focus();
     };
-    sock.onmessage = (e) => { clearTimeout(probeTimer); term.write(new Uint8Array(e.data)); };
+    sock.onmessage = (e) => {
+      clearTimeout(probeTimer);
+      // "new" or "resumed": a resumed terminal keeps the modes its programs
+      // set (tmux's mouse reporting), which a reset would lose.
+      if (typeof e.data === "string") { if (e.data === "new") term.reset(); return; }
+      term.write(new Uint8Array(e.data));
+    };
     sock.onclose = (e) => {
       if (ws !== sock) return;
       ws = null;

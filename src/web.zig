@@ -379,13 +379,13 @@ const Terminal = struct {
 };
 
 /// Find the page's terminal (taking a reference) or start a new one.
-fn acquireTerminal(state: *State, term_id: []const u8, cols: u16, rows: u16) !*Terminal {
+fn acquireTerminal(state: *State, term_id: []const u8, cols: u16, rows: u16) !struct { *Terminal, bool } {
     const ctx = state.ctx;
     state.mutex.lockUncancelable(ctx.io);
     defer state.mutex.unlock(ctx.io);
     if (term_id.len > 0) for (state.terms.items) |t| if (std.mem.eql(u8, t.id(), term_id)) {
         t.refs += 1;
-        return t;
+        return .{ t, false };
     };
 
     const t = try ctx.gpa.create(Terminal);
@@ -413,7 +413,7 @@ fn acquireTerminal(state: *State, term_id: []const u8, cols: u16, rows: u16) !*T
     const pump = try std.Thread.spawn(.{}, pumpOutput, .{ state, t });
     pump.detach();
     logf("terminal opened ({d}x{d})", .{ cols, rows });
-    return t;
+    return .{ t, true };
 }
 
 fn releaseTerminal(state: *State, t: *Terminal) void {
@@ -452,7 +452,7 @@ fn reapLoop(state: *State) void {
 /// pseudo-terminal, new or (when the page reconnects with the same id) kept
 /// from its last connection. Client messages: "0<input bytes>",
 /// "1<cols>,<rows>", "2<1 hidden | 0 shown>", "3" (are you there?). Server
-/// sends output as binary.
+/// sends "new" or "resumed" as text first, then output as binary.
 fn serveTerminal(state: *State, req: *std.http.Server.Request, key: []const u8) !void {
     const ctx = state.ctx;
     // Copied: reading from the socket reuses the buffer the request is in.
@@ -469,7 +469,7 @@ fn serveTerminal(state: *State, req: *std.http.Server.Request, key: []const u8) 
     const first = ws.readSmallMessage() catch return;
     if (first.data.len > 0 and first.data[0] == '1') parseSize(first.data[1..], &cols, &rows);
 
-    const t = acquireTerminal(state, term_id, cols, rows) catch return;
+    const t, const fresh = acquireTerminal(state, term_id, cols, rows) catch return;
     defer releaseTerminal(state, t);
     const tty = t.pty.tty;
     {
@@ -479,6 +479,9 @@ fn serveTerminal(state: *State, req: *std.http.Server.Request, key: []const u8) 
         // the phone dropped without a word): send that page away.
         if (t.ws) |old| old.writeMessage("", .connection_close) catch {};
         t.ws = &ws;
+        // The page resets its terminal only for a new one: a resumed one
+        // keeps the modes (mouse reporting, say) its programs turned on.
+        ws.writeMessage(if (fresh) "new" else "resumed", .text) catch {};
     }
     // Repaint for the new page: tmux redraws its client on request, and with
     // no client on this tty the chooser is in front, which redraws on Ctrl-L.
