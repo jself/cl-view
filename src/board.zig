@@ -579,6 +579,22 @@ pub fn setSession(ctx: Ctx, db: Db, id: i64, tmux_name: []const u8, session_id: 
     try touch(ctx, db, id);
 }
 
+/// Sub-tickets of `key` that aren't Done yet; a ticket can't be Done while it has any.
+pub fn openSubtickets(db: Db, a: std.mem.Allocator, key: []const u8) Error![]Ticket {
+    return listTickets(db, a, .{ .parent = key, .done = false });
+}
+
+/// Make `key`'s unfinished sub-tickets tickets of their own, so it can be Done.
+pub fn spinOff(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8) Error!void {
+    const t = try getTicket(db, a, key);
+    for (try openSubtickets(db, a, key)) |c| {
+        try db.exec("UPDATE tickets SET parent = NULL WHERE id = ?1", .{c.id});
+        try logEvent(ctx, db, c.id, "spun off", t.key);
+        try logEvent(ctx, db, t.id, "spun off", c.key);
+        try touch(ctx, db, c.id);
+    }
+}
+
 /// Remove a ticket; refused while it has sub-tickets.
 pub fn removeTicket(db: Db, a: std.mem.Allocator, key: []const u8) Error!void {
     const t = try getTicket(db, a, key);
@@ -828,6 +844,10 @@ test "projects, tickets, flags, comments, done" {
     try testing.expectEqual(@as(usize, 1), (try listTickets(db, a, .{ .parent = k2 })).len);
     try testing.expectEqual(@as(usize, 2), (try listTickets(db, a, .{ .top = true })).len);
     try testing.expectError(error.Exists, removeTicket(db, a, k2));
+    try testing.expectEqual(@as(usize, 1), (try openSubtickets(db, a, k2)).len);
+    try spinOff(ctx, db, a, k2);
+    try testing.expectEqual(@as(usize, 0), (try openSubtickets(db, a, k2)).len);
+    try testing.expectEqualStrings("", (try getTicket(db, a, sub)).parent);
     try removeTicket(db, a, sub);
 
     try testing.expectError(error.Exists, removeProject(db, "qa-tool"));

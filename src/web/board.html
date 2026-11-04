@@ -170,6 +170,7 @@
 
 <dialog id="ticketDlg" aria-label="Ticket"><div class="dlg" id="ticketBody"></div></dialog>
 <dialog id="newDlg" aria-label="New ticket"><div class="dlg" id="newBody"></div></dialog>
+<dialog id="subsDlg" aria-label="Unfinished sub-tickets" style="width:min(520px, calc(100vw - 24px))"><div class="dlg" id="subsBody"></div></dialog>
 <div id="toast" role="status"></div>
 
 <script>
@@ -548,11 +549,35 @@ function endDrag(drop) {
   if (!d.ghost) return;
   dragDone = Date.now();
   const stage = drop && d.over?.dataset.drop;
-  const row = state.data.tickets.find((r) => r.ticket.key === d.key);
-  if (stage && row && row.ticket.stage !== stage) {
-    row.ticket.stage = stage; render();
-    act(d.key, "move", { stage }, `${d.key} to ${STAGE_NAME[stage]}`).catch(() => refresh());
-  } else render();
+  if (stage) moveTo(d.key, stage); else render();
+}
+
+// ---- moving to Done ----
+// A ticket can't be Done while it has unfinished sub-tickets: offer to spin
+// them off into tickets of their own first. Resolves to the extra request
+// fields ({} or { spin_off: true }), or null when cancelled.
+const openSubs = (key) => state.data.tickets.filter((r) => r.ticket.parent === key && r.ticket.stage !== "done");
+function confirmDone(key) {
+  const subs = openSubs(key);
+  if (!subs.length) return Promise.resolve({});
+  const dlg = document.getElementById("subsDlg");
+  document.getElementById("subsBody").innerHTML = `<h2 style="margin:0;font-size:17px">${esc(key)} can't be done yet</h2>
+    <p class="muted" style="margin:0">It has ${subs.length} sub-ticket${subs.length > 1 ? "s" : ""} that ${subs.length > 1 ? "aren't" : "isn't"} done:</p>
+    <div style="display:flex;flex-direction:column;gap:6px">${subs.map((r) => `<div><span class="mono muted">${esc(r.ticket.key)}</span> ${esc(r.ticket.title)}
+      <span class="muted">· ${STAGE_NAME[r.ticket.stage]}</span></div>`).join("")}</div>
+    <p class="muted" style="margin:0">Spinning them off makes them tickets of their own. They keep their stage and session, and ${esc(key)} goes to Done.</p>
+    <div class="actions"><button type="button" class="btn primary" id="spinOff">Spin off and finish</button><button type="button" class="btn" id="spinCancel">Cancel</button></div>`;
+  dlg.returnValue = ""; dlg.showModal();
+  return new Promise((res) => { dlg.onclose = () => res(dlg.returnValue === "spin" ? { spin_off: true } : null); });
+}
+async function moveTo(key, stage) {
+  const row = state.data.tickets.find((r) => r.ticket.key === key);
+  if (!row || row.ticket.stage === stage) return render();
+  const extra = stage === "done" ? await confirmDone(key) : {};
+  if (!extra) { render(); if (state.detail) renderDetail(); return; }
+  row.ticket.stage = stage; render();
+  const n = extra.spin_off ? openSubs(key).length : 0;
+  act(key, "move", { stage, ...extra }, `${key} to ${STAGE_NAME[stage]}${n ? ` · ${n} spun off` : ""}`).catch(() => refresh());
 }
 document.addEventListener("pointerdown", (e) => {
   const el = e.target.closest("[data-drag]");
@@ -576,7 +601,7 @@ document.addEventListener("touchmove", (e) => { if (drag?.ghost) e.preventDefaul
 document.addEventListener("contextmenu", (e) => { if (drag) e.preventDefault(); });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && drag) endDrag(false); });
 // A drop ends with a click on the card; don't let it open the ticket.
-document.addEventListener("click", (e) => { if (Date.now() - dragDone < 400) { e.stopPropagation(); e.preventDefault(); } }, true);
+document.addEventListener("click", (e) => { if (Date.now() - dragDone < 400 && e.target.closest("[data-drag]")) { e.stopPropagation(); e.preventDefault(); } }, true);
 
 // ---- events ----
 document.addEventListener("click", async (e) => {
@@ -589,6 +614,7 @@ document.addEventListener("click", async (e) => {
   if (el.id === "newBtn") return openNew(null);
   if (el.id === "closeNew") return document.getElementById("newDlg").close();
   if (el.id === "closeDlg") { document.getElementById("ticketDlg").close(); return; }
+  if (el.id === "spinOff" || el.id === "spinCancel") { document.getElementById("subsDlg").close(el.id === "spinOff" ? "spin" : ""); return; }
   if (ds.answer) { e.stopPropagation(); return act(ds.answer, "answer", { answers: [ds.n] }, "Answered"); }
   if (ds.approve) return act(ds.approve, "approve", {}, "Approved");
   if (ds.open) return openTicket(ds.open, ds.tab);
@@ -606,6 +632,10 @@ document.addEventListener("click", async (e) => {
     return;
   }
   if (ds.act === "start") return act(key, "start", {}, "Started");
+  if (ds.act === "approve" && state.detail?.ticket.stage === "testing") {
+    const extra = await confirmDone(key); if (!extra) return;
+    return act(key, "approve", extra, "Done");
+  }
   if (ds.act) return act(key, ds.act, {}, "Done");
   if (el.id === "sendAnswers") {
     const qs = flagDetail(state.detail.ticket.flags.find((f) => f.kind === "question"))?.questions || [];
@@ -624,7 +654,9 @@ document.addEventListener("click", async (e) => {
     const p = state.detail.test_plan;
     const checks = p.checks.map((text, i) => ({ text, pass: state.checks["c" + i]?.pass, note: state.checks["c" + i]?.note || "" }));
     if (checks.some((c) => c.pass === undefined)) return toast("Pass or fail every check first", true);
-    const r = await act(key, "test-results", { checks, note: document.getElementById("testNote").value });
+    const extra = checks.every((c) => c.pass) && state.detail.ticket.stage === "testing" ? await confirmDone(key) : {};
+    if (!extra) return;
+    const r = await act(key, "test-results", { checks, note: document.getElementById("testNote").value, ...extra });
     toast(r.passed ? "All passed: done" : "Sent the failures to Claude"); state.checks = {};
     return;
   }
@@ -643,7 +675,7 @@ document.addEventListener("input", (e) => {
 });
 document.addEventListener("change", (e) => {
   if (e.target.id === "projectSel") { state.project = e.target.value; render(); }
-  if (e.target.id === "stageSel" && state.open) act(state.open, "move", { stage: e.target.value }, "Moved");
+  if (e.target.id === "stageSel" && state.open) moveTo(state.open, e.target.value);
 });
 document.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && e.target.id === "msg") { e.preventDefault(); document.getElementById("sendMsg").click(); }

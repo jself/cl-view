@@ -28,10 +28,13 @@ pub const ticket_usage =
     \\  show <key>                  details, flags, sub-tickets, comments and activity
     \\  edit <key> [--title <t>] [-m <body>] [--project <p>] [--worktree | --queue]
     \\      [--target <session>] [--plan | --no-plan] [--skill <name>] [--profile <name>]
-    \\  move <key> <stage>          backlog planning queued running review testing done
+    \\  move <key> <stage> [--spin-off]
+    \\                              backlog planning queued running review testing done
+    \\                              (done also closes the ticket's session; it's refused while
+    \\                              sub-tickets are unfinished, --spin-off makes them top-level)
     \\  start <key> [--now]         start it now: a worktree and session, or typed into its
     \\                              queue session (--now even if that session is busy)
-    \\  approve <key>               plan → running (tells Claude), review → testing, testing → done
+    \\  approve <key> [--spin-off]  plan → running (tells Claude), review → testing, testing → done
     \\  answer <key> <answer>...    answer the question (one per question: an option number or
     \\                              your own words) or permission prompt (a number) it waits on
     \\  key <key> esc|interrupt|enter|up|down
@@ -136,6 +139,7 @@ fn boardFail(db: board.Db, err: anyerror, what: []const u8) noreturn {
         error.NotFound => fail("no such {s}", .{what}),
         error.Exists => fail("{s} already exists (or is still in use)", .{what}),
         error.BadInput => fail("invalid {s}", .{what}),
+        error.OpenSubtickets => fail("it has sub-tickets that aren't done yet; finish them, or make them tickets of their own with `cl ticket move <key> done --spin-off`", .{}),
         error.Sqlite => fail("board database: {s}", .{db.message()}),
         else => fail("{s}: {s}", .{ what, @errorName(err) }),
     }
@@ -326,9 +330,9 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         return;
     }
     if (std.mem.eql(u8, cmd, "move") or std.mem.eql(u8, cmd, "mv")) {
-        args.only(&.{}, ticket_usage);
-        if (pos.len != 2) fail("usage: cl ticket move <key> <stage>", .{});
-        board.move(ctx, db, a, pos[0], parseStage(pos[1])) catch |e| boardFail(db, e, "ticket");
+        args.only(&.{"--spin-off"}, ticket_usage);
+        if (pos.len != 2) fail("usage: cl ticket move <key> <stage> [--spin-off]", .{});
+        actions.move(ctx, db, a, pos[0], parseStage(pos[1]), args.has("--spin-off")) catch |e| boardFail(db, e, "ticket");
         return;
     }
     if (std.mem.eql(u8, cmd, "comment")) {
@@ -391,9 +395,9 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         }));
     }
     if (std.mem.eql(u8, cmd, "approve")) {
-        args.only(&.{}, ticket_usage);
+        args.only(&.{"--spin-off"}, ticket_usage);
         const key = keyArg(pos, 0, env_key, "cl ticket approve <key>");
-        _ = actions.approve(ctx, db, a, key) catch |e| switch (e) {
+        _ = actions.approve(ctx, db, a, key, args.has("--spin-off")) catch |e| switch (e) {
             error.BadInput => fail("only a ticket in planning, review or testing can be approved", .{}),
             else => boardFail(db, e, "ticket"),
         };
@@ -539,7 +543,7 @@ fn walkTest(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8) !void
         try checks.append(a, .{ .text = c, .pass = pass, .note = note });
     }
     const note = try ask.line(&in, a, "\nAnything else for Claude? (Enter to skip) ");
-    const passed = actions.testResults(ctx, db, a, key, checks.items, note) catch |e| boardFail(db, e, "ticket");
+    const passed = actions.testResults(ctx, db, a, key, checks.items, note, false) catch |e| boardFail(db, e, "ticket");
     try out(if (passed) "\nAll passed: the ticket is done.\n" else "\nSent the results to Claude; the ticket is back in running.\n");
 }
 

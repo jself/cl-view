@@ -15,6 +15,8 @@ pub const Error = error{
     BadAnswer,
     /// No review submitted in gutter yet.
     NoReview,
+    /// It has sub-tickets that aren't Done; spin them off to finish it.
+    OpenSubtickets,
 };
 
 fn liveSession(ctx: Ctx, t: board.Ticket) ?[]const u8 {
@@ -48,9 +50,41 @@ pub fn comment(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, au
     return r;
 }
 
-/// Approve; an approved plan also tells Claude to go ahead.
-pub fn approve(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8) !board.Stage {
+/// Before a ticket goes to Done: refuse while it has unfinished sub-tickets,
+/// unless `spin_off` makes them tickets of their own.
+fn readyForDone(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, spin_off: bool) !void {
+    if ((try board.openSubtickets(db, a, key)).len == 0) return;
+    if (!spin_off) return error.OpenSubtickets;
+    try board.spinOff(ctx, db, a, key);
+}
+
+/// Move a ticket; reaching Done also closes its session.
+pub fn move(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, stage: board.Stage, spin_off: bool) !void {
+    if (stage == .done) try readyForDone(ctx, db, a, key, spin_off);
+    try board.move(ctx, db, a, key, stage);
+    if (stage == .done) try closeSession(ctx, db, a, key);
+}
+
+/// A finished ticket lets go of its session, so the project's queue (or a
+/// worktree slot) is free for the next ticket: its gutter and test launch
+/// stop, and the tmux session is killed unless another unfinished ticket is
+/// still using it. A worktree stays until `cleanup`.
+fn closeSession(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8) !void {
+    review.stopGutter(ctx, a, key) catch {};
+    review.stopLaunch(ctx, a, key) catch {};
+    const t = try board.getTicket(db, a, key);
+    const s = liveSession(ctx, t) orelse return;
+    if ((try db.int("SELECT 1 FROM tickets WHERE tmux = ?1 AND id != ?2 AND stage != 'done'", .{ s, t.id })) != null) return;
+    try tmux.kill(ctx, s);
+    try board.logEvent(ctx, db, t.id, "session closed", s);
+}
+
+/// Approve; an approved plan also tells Claude to go ahead, and a tested
+/// ticket going on to Done closes its session.
+pub fn approve(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, spin_off: bool) !board.Stage {
+    if ((try board.getTicket(db, a, key)).stage == .testing) try readyForDone(ctx, db, a, key, spin_off);
     const from = try board.approve(ctx, db, a, key);
+    if (from == .testing) try closeSession(ctx, db, a, key);
     if (from == .planning) {
         const t = try board.getTicket(db, a, key);
         const go = "The plan is approved. Leave plan mode and build it.";
@@ -152,12 +186,13 @@ pub fn sendReview(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8)
 
 /// Record test results: all passed approves the ticket on to Done; any
 /// failure sends the results to Claude for another round.
-pub fn testResults(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, checks: []const review.Check, note: []const u8) !bool {
+pub fn testResults(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, checks: []const review.Check, note: []const u8, spin_off: bool) !bool {
     const res = try review.recordResults(a, checks, note);
     if (res.passed) {
-        _ = try board.addComment(ctx, db, a, key, "you", res.text, false);
         const t = try board.getTicket(db, a, key);
-        if (t.stage == .testing) _ = try board.approve(ctx, db, a, key);
+        if (t.stage == .testing) try readyForDone(ctx, db, a, key, spin_off);
+        _ = try board.addComment(ctx, db, a, key, "you", res.text, false);
+        if (t.stage == .testing) _ = try approve(ctx, db, a, key, spin_off);
     } else {
         const t = try board.getTicket(db, a, key);
         if (t.stage == .review) try board.move(ctx, db, a, key, .testing);
