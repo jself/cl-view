@@ -311,6 +311,26 @@ its other `web.listen` addresses (tailscale) and forwards it, while that
 ticket's gutter runs. Test results that all pass move the ticket to done; a
 failure sends them to Claude for another round.
 
+### Finishing
+
+Done closes the ticket's session. For a ticket with a branch of its own
+(worktree mode) you choose what happens to the branch first: the board asks
+when a card is dropped on Done (or Done is picked, or it is approved out of
+testing), and the CLI takes a flag:
+
+```
+cl t move QA-1 done --merge        Claude merges its branch into the main branch
+cl t move QA-1 done --pr           Claude pushes it and opens a PR
+cl t move QA-1 done [--close]      just close (the default; also approve and test)
+```
+
+With `--merge` or `--pr` the instruction is typed into the ticket's session
+and the ticket stays where it is with a Finishing pill; questions and
+conflicts come back through the board as usual. When Claude is through it
+runs `cl t done QA-1 --close [--pr-url <url>]`: the ticket moves to done, the
+PR link becomes a comment, and then the session closes. Queue tickets work
+in the project's own checkout, so they just close.
+
 ### The web board
 
 `/board` shows Board, Lanes (a row per project) and List views, with "Needs

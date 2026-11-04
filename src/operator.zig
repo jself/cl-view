@@ -133,6 +133,9 @@ const tickets_skill =
     \\                                     ticket's session, and a ticket in review or testing
     \\                                     goes back to running
     \\  cl ticket approve <key>            plan -> running, review -> testing, testing -> done
+    \\  Going to done (move or approve) closes the session. A worktree ticket takes
+    \\  --merge (Claude merges its branch first) or --pr (opens a PR first); ask the
+    \\  human which unless they said. --close, the default, just closes.
     \\  cl ticket answer <key> <answer>... answer its question (an option number or words)
     \\
     \\Approving, answering, sending comments into a session, moving to done and `rm` act for

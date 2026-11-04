@@ -28,13 +28,17 @@ pub const ticket_usage =
     \\  show <key>                  details, flags, sub-tickets, comments and activity
     \\  edit <key> [--title <t>] [-m <body>] [--project <p>] [--worktree | --queue]
     \\      [--target <session>] [--plan | --no-plan] [--skill <name>] [--profile <name>]
-    \\  move <key> <stage> [--spin-off]
+    \\  move <key> <stage> [--spin-off] [--merge | --pr | --close]
     \\                              backlog planning queued running review testing done
     \\                              (done also closes the ticket's session; it's refused while
-    \\                              sub-tickets are unfinished, --spin-off makes them top-level)
+    \\                              sub-tickets are unfinished, --spin-off makes them top-level;
+    \\                              --merge / --pr: Claude first merges the ticket's branch or
+    \\                              opens a PR, then it goes to done; --close, the default, and
+    \\                              tickets without a branch of their own go straight there)
     \\  start <key> [--now]         start it now: a worktree and session, or typed into its
     \\                              queue session (--now even if that session is busy)
-    \\  approve <key> [--spin-off]  plan → running (tells Claude), review → testing, testing → done
+    \\  approve <key> [--spin-off] [--merge | --pr | --close]
+    \\                              plan → running (tells Claude), review → testing, testing → done
     \\  answer <key> <answer>...    answer the question (one per question: an option number or
     \\                              your own words) or permission prompt (a number) it waits on
     \\  key <key> esc|interrupt|enter|up|down
@@ -54,6 +58,9 @@ pub const ticket_usage =
     \\  unflag <key> <kind>
     \\  done [<key>] [--summary <text>]
     \\                              Claude: finished, nothing more needed; moves to review
+    \\  done [<key>] --close [--pr-url <url>]
+    \\                              Claude: merged or opened the PR it was asked to; moves to
+    \\                              done (the PR link becomes a comment) and closes the session
     \\  rm <key>                    (refused while it has sub-tickets)
     \\
     \\  list, needs and show take --json. In a ticket's session ($CL_TICKET) the key
@@ -139,6 +146,7 @@ fn boardFail(db: board.Db, err: anyerror, what: []const u8) noreturn {
         error.NotFound => fail("no such {s}", .{what}),
         error.Exists => fail("{s} already exists (or is still in use)", .{what}),
         error.BadInput => fail("invalid {s}", .{what}),
+        error.NoSession => fail("its session isn't running, so Claude can't merge or open a PR; use --close", .{}),
         error.OpenSubtickets => fail("it has sub-tickets that aren't done yet; finish them, or make them tickets of their own with `cl ticket move <key> done --spin-off`", .{}),
         error.Sqlite => fail("board database: {s}", .{db.message()}),
         else => fail("{s}: {s}", .{ what, @errorName(err) }),
@@ -255,7 +263,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
     const a = arena_state.allocator();
     const cmd = argv[0];
     const args = try Args.parse(a, argv[1..], &.{
-        "--body", "--target", "--stage", "--profile", "--project", "--flag", "--search", "--title", "--as", "--summary", "--parent", "--skill",
+        "--body", "--target", "--stage", "--profile", "--project", "--flag", "--search", "--title", "--as", "--summary", "--parent", "--skill", "--pr-url",
     }, ticket_usage);
     const env_key = ctx.env.get("CL_TICKET");
     const db = openBoard(ctx, cfg);
@@ -330,10 +338,11 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         return;
     }
     if (std.mem.eql(u8, cmd, "move") or std.mem.eql(u8, cmd, "mv")) {
-        args.only(&.{"--spin-off"}, ticket_usage);
-        if (pos.len != 2) fail("usage: cl ticket move <key> <stage> [--spin-off]", .{});
-        actions.move(ctx, db, a, pos[0], parseStage(pos[1]), args.has("--spin-off")) catch |e| boardFail(db, e, "ticket");
-        return;
+        args.only(&.{ "--spin-off", "--merge", "--pr", "--close" }, ticket_usage);
+        if (pos.len != 2) fail("usage: cl ticket move <key> <stage> [--spin-off] [--merge | --pr | --close]", .{});
+        const finish = finishArg(args);
+        actions.move(ctx, db, a, pos[0], parseStage(pos[1]), args.has("--spin-off"), finish) catch |e| boardFail(db, e, "ticket");
+        return finishNote(db, a, pos[0]);
     }
     if (std.mem.eql(u8, cmd, "comment")) {
         args.only(&.{ "--send", "--as" }, ticket_usage);
@@ -361,8 +370,18 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         return;
     }
     if (std.mem.eql(u8, cmd, "done")) {
-        args.only(&.{"--summary"}, ticket_usage);
-        const key = keyArg(pos, 0, env_key, "cl ticket done [<key>] [--summary <text>]");
+        args.only(&.{ "--summary", "--close", "--pr-url" }, ticket_usage);
+        const key = keyArg(pos, 0, env_key, "cl ticket done [<key>] [--summary <text>] [--close [--pr-url <url>]]");
+        const t0 = board.getTicket(db, a, key) catch |e| boardFail(db, e, "ticket");
+        // While finishing, a plain `done` means the merge or PR is done too.
+        if (args.has("--close") or t0.finishing.len > 0) {
+            if (t0.finishing.len == 0) fail("{s} isn't finishing (--close is for after a merge or PR the board asked for); use done without it", .{t0.key});
+            // Printed first: closing kills the session this may be running in.
+            try out(try std.fmt.allocPrint(a, "{s}: done; its session closes now.\n", .{t0.key}));
+            actions.finished(ctx, db, a, key, args.get("--summary") orelse "", args.get("--pr-url") orelse "") catch |e| boardFail(db, e, "ticket");
+            return;
+        }
+        if (args.get("--pr-url") != null) fail("--pr-url goes with --close", .{});
         board.done(ctx, db, a, key, args.get("--summary") orelse "") catch |e| boardFail(db, e, "ticket");
         const t = board.getTicket(db, a, key) catch |e| boardFail(db, e, "ticket");
         return out(try std.fmt.allocPrint(a, "{s}: {s}. The board shows it to the human; nothing more to do.\n", .{
@@ -395,13 +414,13 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         }));
     }
     if (std.mem.eql(u8, cmd, "approve")) {
-        args.only(&.{"--spin-off"}, ticket_usage);
+        args.only(&.{ "--spin-off", "--merge", "--pr", "--close" }, ticket_usage);
         const key = keyArg(pos, 0, env_key, "cl ticket approve <key>");
-        _ = actions.approve(ctx, db, a, key, args.has("--spin-off")) catch |e| switch (e) {
+        _ = actions.approve(ctx, db, a, key, args.has("--spin-off"), finishArg(args)) catch |e| switch (e) {
             error.BadInput => fail("only a ticket in planning, review or testing can be approved", .{}),
             else => boardFail(db, e, "ticket"),
         };
-        return;
+        return finishNote(db, a, key);
     }
     if (std.mem.eql(u8, cmd, "answer")) {
         args.only(&.{}, ticket_usage);
@@ -543,8 +562,37 @@ fn walkTest(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8) !void
         try checks.append(a, .{ .text = c, .pass = pass, .note = note });
     }
     const note = try ask.line(&in, a, "\nAnything else for Claude? (Enter to skip) ");
-    const passed = actions.testResults(ctx, db, a, key, checks.items, note, false) catch |e| boardFail(db, e, "ticket");
-    try out(if (passed) "\nAll passed: the ticket is done.\n" else "\nSent the results to Claude; the ticket is back in running.\n");
+    var finish: actions.Finish = .close;
+    const cur = board.getTicket(db, a, key) catch |e| boardFail(db, e, "ticket");
+    for (checks.items) |c| {
+        if (!c.pass) break;
+    } else if (cur.stage == .testing and cur.branch.len > 0) {
+        const main = worktree.mainBranch(ctx, a, (board.getProject(db, a, cur.project) catch |e| boardFail(db, e, "project")).dir);
+        const ans = try ask.line(&in, a, try std.fmt.allocPrint(a, "\nAll passed. [m]erge {s} into {s}, open a [p]R, or just [c]lose? ", .{ cur.branch, main }));
+        if (ans.len > 0) finish = switch (std.ascii.toLower(ans[0])) {
+            'm' => .merge,
+            'p' => .pr,
+            else => .close,
+        };
+    }
+    const passed = actions.testResults(ctx, db, a, key, checks.items, note, false, finish) catch |e| boardFail(db, e, "ticket");
+    try out(if (!passed) "\nSent the results to Claude; the ticket is back in running.\n" else if (finish != .close) "\nAll passed: Claude is finishing it; it goes to done when that's through.\n" else "\nAll passed: the ticket is done.\n");
+}
+
+/// --merge, --pr or --close (the default).
+fn finishArg(args: Args) actions.Finish {
+    const n = @as(u8, @intFromBool(args.has("--merge"))) + @intFromBool(args.has("--pr")) + @intFromBool(args.has("--close"));
+    if (n > 1) fail("pick one of --merge, --pr and --close", .{});
+    return if (args.has("--merge")) .merge else if (args.has("--pr")) .pr else .close;
+}
+
+/// Say so when a move left the ticket finishing rather than done.
+fn finishNote(db: board.Db, a: std.mem.Allocator, key: []const u8) !void {
+    const t = board.getTicket(db, a, key) catch return;
+    if (t.finishing.len == 0) return;
+    try out(try std.fmt.allocPrint(a, "{s}: Claude is {s}; it moves to done when that's through.\n", .{
+        t.key, if (std.mem.eql(u8, t.finishing, "pr")) "opening a PR" else "merging its branch",
+    }));
 }
 
 fn logLine(text: []const u8) void {
@@ -598,6 +646,7 @@ fn showText(ctx: Ctx, a: std.mem.Allocator, t: board.Ticket, subs: []const board
     });
     if (t.parent.len > 0) try w.print("sub-ticket of: {s}\n", .{t.parent});
     if (t.tmux.len > 0) try w.print("session: {s}\n", .{t.tmux});
+    if (t.finishing.len > 0) try w.print("finishing: {s} (Claude is {s}; it goes to done after)\n", .{ t.finishing, if (std.mem.eql(u8, t.finishing, "pr")) "opening a PR" else "merging its branch" });
     if (t.worktree.len > 0) try w.print("worktree: {s}   branch: {s}\n", .{ try ctx.shortenHomeIn(a, t.worktree), t.branch });
     for (t.flags) |f| try w.print("flag: {s} ({s}, {s}){s}{s}\n", .{ f.kind, f.source, try stamp(a, f.at), if (f.detail.len > 0) ": " else "", f.detail });
     if (t.body.len > 0) try w.print("\n{s}\n", .{t.body});

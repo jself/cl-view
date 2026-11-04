@@ -68,6 +68,16 @@ pub fn baseRev(ctx: Ctx, a: std.mem.Allocator, dir: []const u8) []const u8 {
     return std.mem.trim(u8, outp, " \n");
 }
 
+/// What a ticket's branch merges into: the branch the project's own checkout
+/// is on (git), or trunk() (jj).
+pub fn mainBranch(ctx: Ctx, a: std.mem.Allocator, dir: []const u8) []const u8 {
+    const vcs = detect(ctx, a, dir) catch return "master";
+    if (vcs == .jj) return "trunk()";
+    const outp = run(ctx, a, &.{ "git", "-C", dir, "symbolic-ref", "--short", "HEAD" }) catch return "master";
+    const b = std.mem.trim(u8, outp, " \n");
+    return if (b.len > 0) b else "master";
+}
+
 /// gutter's -r for a ticket started at `base`: git diffs the working tree
 /// against it, jj takes the range up to the working copy.
 pub fn reviewRev(ctx: Ctx, a: std.mem.Allocator, dir: []const u8, base: []const u8) ![]const u8 {

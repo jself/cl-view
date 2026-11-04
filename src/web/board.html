@@ -11,7 +11,7 @@
     --fg: #ececec; --muted: #a0a3a8; --dim: #b4b6ba; --accent: #2a4f86; --accent-fg: #fff;
     --input: #ffc861; --input-bg: #3a2a0b; --question: #cdb8ff; --question-bg: #2c2440;
     --review: #9cc6ff; --review-bg: #11294a; --testing: #7ee6d6; --testing-bg: #0f3330;
-    --other: #d6d7da; --other-bg: #2c2e33;
+    --other: #d6d7da; --other-bg: #2c2e33; --finishing: #b6e3a0; --finishing-bg: #1b3317;
     --mono: ui-monospace, SFMono-Regular, Menlo, "DejaVu Sans Mono", monospace;
     --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
@@ -85,6 +85,7 @@
           background: var(--other-bg); color: var(--other); white-space: nowrap; }
   .f-input { background: var(--input-bg); color: var(--input); } .f-question { background: var(--question-bg); color: var(--question); }
   .f-review { background: var(--review-bg); color: var(--review); } .f-testing { background: var(--testing-bg); color: var(--testing); }
+  .f-finishing { background: var(--finishing-bg); color: var(--finishing); }
 
   .lanes { overflow-x: auto; }
   .lanes table { border-collapse: separate; border-spacing: 8px 0; min-width: 1100px; width: 100%; }
@@ -170,6 +171,7 @@
 
 <dialog id="ticketDlg" aria-label="Ticket"><div class="dlg" id="ticketBody"></div></dialog>
 <dialog id="newDlg" aria-label="New ticket"><div class="dlg" id="newBody"></div></dialog>
+<dialog id="finishDlg" aria-label="Finish the ticket" style="width:min(480px, calc(100vw - 24px))"><div class="dlg" id="finishBody"></div></dialog>
 <dialog id="subsDlg" aria-label="Unfinished sub-tickets" style="width:min(520px, calc(100vw - 24px))"><div class="dlg" id="subsBody"></div></dialog>
 <div id="toast" role="status"></div>
 
@@ -217,7 +219,9 @@ function askText(t, f) {
 }
 const flagLabel = (f) => f.kind === "review" && f.detail === "plan" ? "Plan ready" : (FLAG_NAME[f.kind] || f.kind);
 const flagClass = (k) => ["input", "question", "review", "testing"].includes(k) ? "f-" + k : "";
-const pills = (t) => t.flags.length ? `<span class="pills">${t.flags.map((f) => `<span class="pill ${flagClass(f.kind)}">${esc(flagLabel(f))}</span>`).join("")}</span>` : "";
+// Finishing: Claude is merging the branch or opening a PR before it goes to Done.
+const finishPill = (t) => t.finishing ? `<span class="pill f-finishing" title="${t.finishing === "pr" ? "Claude is opening a PR" : "Claude is merging its branch"}; it goes to Done after">Finishing</span>` : "";
+const pills = (t) => t.flags.length || t.finishing ? `<span class="pills">${finishPill(t)}${t.flags.map((f) => `<span class="pill ${flagClass(f.kind)}">${esc(flagLabel(f))}</span>`).join("")}</span>` : "";
 // "(starting)" is the dispatcher's claim while it opens the session.
 // A Backlog or Queued ticket whose session is gone hasn't ended: it's waiting to start.
 const statusOf = (row) => row.status || (row.ticket.tmux.startsWith("(") ? "starting" : row.ticket.tmux && !["backlog", "queued"].includes(row.ticket.stage) ? "gone" : "none");
@@ -369,7 +373,7 @@ function renderDetailInner() {
   if (!state.tab || !tabs.some(([k]) => k === state.tab)) state.tab = tabs[0][0];
   const liveSession = t.tmux && d.status && d.status !== "gone";
   const planReady = t.stage === "planning" && t.flags.some((f) => f.kind === "review");
-  const approve = planReady ? "Approve plan" : t.stage === "review" ? "Approve, to testing" : t.stage === "testing" ? "Tested, done" : "";
+  const approve = planReady ? "Approve plan" : t.stage === "review" ? "Approve, to testing" : t.stage === "testing" && !t.finishing ? "Tested, done" : "";
   const acts = [];
   if (liveSession) acts.push(`<a class="btn primary" href="/?attach=${encodeURIComponent(t.tmux)}">Open shell</a>`);
   if (!liveSession && t.stage !== "done") acts.push(`<button type="button" class="btn primary" data-act="start">${t.tmux ? "Start again" : "Start now"}</button>`);
@@ -570,11 +574,41 @@ function confirmDone(key) {
   dlg.returnValue = ""; dlg.showModal();
   return new Promise((res) => { dlg.onclose = () => res(dlg.returnValue === "spin" ? { spin_off: true } : null); });
 }
+// Then, for a ticket with a branch of its own, what finishing means: Claude
+// merges it or opens a PR first ("merge", "pr"), or it just closes.
+// Resolves to "close", "merge", "pr", or null when cancelled.
+async function chooseFinish(key) {
+  const t = state.data.tickets.find((r) => r.ticket.key === key)?.ticket || (state.detail?.ticket.key === key ? state.detail.ticket : null);
+  if (!t?.branch) return "close";
+  let main = state.detail?.ticket.key === key ? state.detail.main_branch : "";
+  if (!main) main = (await api(`ticket/${encodeURIComponent(key)}`).catch(() => ({}))).main_branch || "master";
+  const dlg = document.getElementById("finishDlg");
+  document.getElementById("finishBody").innerHTML = `<h2 style="margin:0;font-size:17px">Finish ${esc(key)}</h2>
+    <p class="muted" style="margin:0">Its work is on <span class="mono">${esc(t.branch)}</span>. What should happen to it?</p>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <button type="button" class="btn primary" data-finish="merge">Merge into ${esc(main)}</button>
+      <button type="button" class="btn" data-finish="pr">Open a PR</button>
+      <button type="button" class="btn" data-finish="close">Just close</button>
+      <button type="button" class="btn" data-finish="">Cancel</button></div>
+    <p class="muted" style="margin:0;font-size:12.5px">Merge and PR ask Claude to do it in the ticket's session. It stays where it is, marked Finishing, until Claude is through; then it goes to Done and the session closes.</p>`;
+  dlg.returnValue = ""; dlg.showModal();
+  return new Promise((res) => { dlg.onclose = () => res(dlg.returnValue || null); });
+}
+// Everything going to Done asks: sub-tickets first, then how to finish.
+// The extra request fields, or null when cancelled.
+async function doneExtras(key) {
+  const extra = await confirmDone(key); if (!extra) return null;
+  const finish = await chooseFinish(key); if (!finish) return null;
+  return { ...extra, finish };
+}
+const finishMsg = (key, x) => x.finish === "pr" ? `${key}: Claude is opening a PR` : x.finish === "merge" ? `${key}: Claude is merging it` : "";
 async function moveTo(key, stage) {
   const row = state.data.tickets.find((r) => r.ticket.key === key);
   if (!row || row.ticket.stage === stage) return render();
-  const extra = stage === "done" ? await confirmDone(key) : {};
+  const extra = stage === "done" ? await doneExtras(key) : {};
   if (!extra) { render(); if (state.detail) renderDetail(); return; }
+  // Merge or PR: it stays put (Finishing) until Claude is done.
+  if (finishMsg(key, extra)) { render(); return act(key, "move", { stage, ...extra }, finishMsg(key, extra)).catch(() => refresh()); }
   row.ticket.stage = stage; render();
   const n = extra.spin_off ? openSubs(key).length : 0;
   act(key, "move", { stage, ...extra }, `${key} to ${STAGE_NAME[stage]}${n ? ` · ${n} spun off` : ""}`).catch(() => refresh());
@@ -614,9 +648,14 @@ document.addEventListener("click", async (e) => {
   if (el.id === "newBtn") return openNew(null);
   if (el.id === "closeNew") return document.getElementById("newDlg").close();
   if (el.id === "closeDlg") { document.getElementById("ticketDlg").close(); return; }
+  if (ds.finish !== undefined) { document.getElementById("finishDlg").close(ds.finish); return; }
   if (el.id === "spinOff" || el.id === "spinCancel") { document.getElementById("subsDlg").close(el.id === "spinOff" ? "spin" : ""); return; }
   if (ds.answer) { e.stopPropagation(); return act(ds.answer, "answer", { answers: [ds.n] }, "Answered"); }
-  if (ds.approve) return act(ds.approve, "approve", {}, "Approved");
+  if (ds.approve) {
+    const extra = state.data.tickets.find((r) => r.ticket.key === ds.approve)?.ticket.stage === "testing" ? await doneExtras(ds.approve) : {};
+    if (!extra) return;
+    return act(ds.approve, "approve", extra, finishMsg(ds.approve, extra) || "Approved");
+  }
   if (ds.open) return openTicket(ds.open, ds.tab);
   const key = state.open; if (!key) return;
   if (ds.tab) { state.tab = ds.tab; renderDetail(); return; }
@@ -633,8 +672,8 @@ document.addEventListener("click", async (e) => {
   }
   if (ds.act === "start") return act(key, "start", {}, "Started");
   if (ds.act === "approve" && state.detail?.ticket.stage === "testing") {
-    const extra = await confirmDone(key); if (!extra) return;
-    return act(key, "approve", extra, "Done");
+    const extra = await doneExtras(key); if (!extra) return;
+    return act(key, "approve", extra, finishMsg(key, extra) || "Done");
   }
   if (ds.act) return act(key, ds.act, {}, "Done");
   if (el.id === "sendAnswers") {
@@ -654,10 +693,10 @@ document.addEventListener("click", async (e) => {
     const p = state.detail.test_plan;
     const checks = p.checks.map((text, i) => ({ text, pass: state.checks["c" + i]?.pass, note: state.checks["c" + i]?.note || "" }));
     if (checks.some((c) => c.pass === undefined)) return toast("Pass or fail every check first", true);
-    const extra = checks.every((c) => c.pass) && state.detail.ticket.stage === "testing" ? await confirmDone(key) : {};
+    const extra = checks.every((c) => c.pass) && state.detail.ticket.stage === "testing" ? await doneExtras(key) : {};
     if (!extra) return;
     const r = await act(key, "test-results", { checks, note: document.getElementById("testNote").value, ...extra });
-    toast(r.passed ? "All passed: done" : "Sent the failures to Claude"); state.checks = {};
+    toast(r.passed ? (finishMsg(key, extra) ? "All passed: " + finishMsg(key, extra) : "All passed: done") : "Sent the failures to Claude"); state.checks = {};
     return;
   }
   if (el.id === "deleteTicket") {
