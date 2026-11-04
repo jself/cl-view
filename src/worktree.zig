@@ -68,14 +68,36 @@ pub fn baseRev(ctx: Ctx, a: std.mem.Allocator, dir: []const u8) []const u8 {
     return std.mem.trim(u8, outp, " \n");
 }
 
-/// What a ticket's branch merges into: the branch the project's own checkout
-/// is on (git), or trunk() (jj).
+/// What a ticket's branch merges into (git): origin's default branch, else
+/// main or master, else the branch the project's checkout is on. The checkout
+/// itself may be on a ticket's branch, so that comes last. jj: trunk().
 pub fn mainBranch(ctx: Ctx, a: std.mem.Allocator, dir: []const u8) []const u8 {
     const vcs = detect(ctx, a, dir) catch return "master";
     if (vcs == .jj) return "trunk()";
+    if (run(ctx, a, &.{ "git", "-C", dir, "symbolic-ref", "--short", "refs/remotes/origin/HEAD" })) |outp| {
+        const b = std.mem.trim(u8, outp, " \n");
+        if (std.mem.startsWith(u8, b, "origin/") and b.len > "origin/".len) return b["origin/".len..];
+    } else |_| {}
+    for ([_][]const u8{ "main", "master" }) |b| {
+        if (run(ctx, a, &.{ "git", "-C", dir, "rev-parse", "--verify", "--quiet", std.fmt.allocPrint(a, "refs/heads/{s}", .{b}) catch continue })) |_| return b else |_| {}
+    }
     const outp = run(ctx, a, &.{ "git", "-C", dir, "symbolic-ref", "--short", "HEAD" }) catch return "master";
     const b = std.mem.trim(u8, outp, " \n");
     return if (b.len > 0) b else "master";
+}
+
+test "mainBranch prefers the default branch over the checked-out one" {
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp" };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const repo = try tmp.dir.realPathFileAlloc(ctx.io, ".", a);
+    _ = run(ctx, a, &.{ "git", "init", "-q", "-b", "master", repo }) catch return error.SkipZigTest;
+    _ = try run(ctx, a, &.{ "git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init" });
+    _ = try run(ctx, a, &.{ "git", "-C", repo, "checkout", "-q", "-b", "de-1-work" });
+    try std.testing.expectEqualStrings("master", mainBranch(ctx, a, repo));
 }
 
 /// gutter's -r for a ticket started at `base`: git diffs the working tree
