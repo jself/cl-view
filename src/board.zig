@@ -115,6 +115,9 @@ pub const Ticket = struct {
     parent: []const u8,
     /// Number of sub-tickets.
     children: i64,
+    /// On its way to Done: "merge" or "pr" while Claude merges its branch or
+    /// opens a PR (it moves to Done when Claude is finished), else "".
+    finishing: []const u8 = "",
     flags: []Flag = &.{},
 };
 
@@ -151,6 +154,7 @@ const schema =
     \\  parent INTEGER REFERENCES tickets(id),
     \\  skill TEXT NOT NULL DEFAULT '',
     \\  base TEXT NOT NULL DEFAULT '',
+    \\  finishing TEXT NOT NULL DEFAULT '',
     \\  created INTEGER NOT NULL,
     \\  updated INTEGER NOT NULL
     \\);
@@ -223,7 +227,7 @@ pub fn open(ctx: Ctx, cfg: config.Config) !Db {
     return db;
 }
 
-const version = 4;
+const version = 5;
 
 pub fn migrate(db: Db) !void {
     const have = (try db.int("PRAGMA user_version", .{})) orelse 0;
@@ -232,6 +236,7 @@ pub fn migrate(db: Db) !void {
     if (have >= 1 and have < 2) try db.execMulti("ALTER TABLE tickets ADD COLUMN parent INTEGER REFERENCES tickets(id)");
     if (have >= 1 and have < 3) try db.execMulti("ALTER TABLE tickets ADD COLUMN skill TEXT NOT NULL DEFAULT ''");
     if (have >= 1 and have < 4) try db.execMulti("ALTER TABLE tickets ADD COLUMN base TEXT NOT NULL DEFAULT ''");
+    if (have >= 1 and have < 5) try db.execMulti("ALTER TABLE tickets ADD COLUMN finishing TEXT NOT NULL DEFAULT ''");
     try db.execMulti(schema);
     try db.execMulti(std.fmt.comptimePrint("PRAGMA user_version = {d}", .{version}));
 }
@@ -415,7 +420,7 @@ pub fn createTicket(ctx: Ctx, db: Db, a: std.mem.Allocator, in: TicketInput) Err
 }
 
 const ticket_cols = "t.id, t.key, t.project, t.title, t.body, t.stage, t.mode, t.plan, t.target, t.worktree, t.branch, t.profile, t.tmux, t.session_id, t.summary, t.round, t.created, t.updated, " ++
-    "coalesce((SELECT p.key FROM tickets p WHERE p.id = t.parent), ''), (SELECT count(*) FROM tickets c WHERE c.parent = t.id), t.skill, t.base";
+    "coalesce((SELECT p.key FROM tickets p WHERE p.id = t.parent), ''), (SELECT count(*) FROM tickets c WHERE c.parent = t.id), t.skill, t.base, t.finishing";
 
 fn readTicket(st: sqlite.Stmt, a: std.mem.Allocator) !Ticket {
     return .{
@@ -441,6 +446,7 @@ fn readTicket(st: sqlite.Stmt, a: std.mem.Allocator) !Ticket {
         .children = st.int(19),
         .skill = try st.dupe(a, 20),
         .base = try st.dupe(a, 21),
+        .finishing = try st.dupe(a, 22),
     };
 }
 
@@ -579,6 +585,22 @@ pub fn setSession(ctx: Ctx, db: Db, id: i64, tmux_name: []const u8, session_id: 
     try touch(ctx, db, id);
 }
 
+/// Sub-tickets of `key` that aren't Done yet; a ticket can't be Done while it has any.
+pub fn openSubtickets(db: Db, a: std.mem.Allocator, key: []const u8) Error![]Ticket {
+    return listTickets(db, a, .{ .parent = key, .done = false });
+}
+
+/// Make `key`'s unfinished sub-tickets tickets of their own, so it can be Done.
+pub fn spinOff(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8) Error!void {
+    const t = try getTicket(db, a, key);
+    for (try openSubtickets(db, a, key)) |c| {
+        try db.exec("UPDATE tickets SET parent = NULL WHERE id = ?1", .{c.id});
+        try logEvent(ctx, db, c.id, "spun off", t.key);
+        try logEvent(ctx, db, t.id, "spun off", c.key);
+        try touch(ctx, db, c.id);
+    }
+}
+
 /// Remove a ticket; refused while it has sub-tickets.
 pub fn removeTicket(db: Db, a: std.mem.Allocator, key: []const u8) Error!void {
     const t = try getTicket(db, a, key);
@@ -596,6 +618,7 @@ pub fn logEvent(ctx: Ctx, db: Db, id: i64, kind: []const u8, detail: []const u8)
 
 /// Move a ticket to `stage`. Flags follow the workflow: entering Testing sets
 /// `testing`, leaving Review or Testing clears its flag, Done clears them all.
+/// Any move ends finishing.
 pub fn move(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, stage: Stage) Error!void {
     const t = try getTicket(db, a, key);
     if (t.stage == stage) return;
@@ -603,7 +626,7 @@ pub fn move(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, stage: Stag
 }
 
 fn moveId(ctx: Ctx, db: Db, id: i64, from: Stage, to: Stage) Error!void {
-    try db.exec("UPDATE tickets SET stage = ?2 WHERE id = ?1", .{ id, @as([]const u8, @tagName(to)) });
+    try db.exec("UPDATE tickets SET stage = ?2, finishing = '' WHERE id = ?1", .{ id, @as([]const u8, @tagName(to)) });
     var buf: [64]u8 = undefined;
     try logEvent(ctx, db, id, "moved", std.fmt.bufPrint(&buf, "{s} -> {s}", .{ @tagName(from), @tagName(to) }) catch "");
     if (from == .review) try clearFlagId(ctx, db, id, flag_review);
@@ -657,14 +680,15 @@ pub const CommentResult = struct {
 
 /// Add a comment. `sent` marks one typed into the session; a sent comment
 /// on a ticket Claude said was done is a request for more work, so the
-/// ticket goes back to Running for another round.
+/// ticket goes back to Running for another round (not while it is finishing:
+/// then it answers Claude's merge or PR).
 pub fn addComment(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, author: []const u8, body: []const u8, sent: bool) Error!CommentResult {
     if (body.len == 0) return error.BadInput;
     const t = try getTicket(db, a, key);
     try db.exec("INSERT INTO comments (ticket, author, body, sent, at) VALUES (?1, ?2, ?3, ?4, ?5)", .{ t.id, author, body, sent, now(ctx) });
     try touch(ctx, db, t.id);
     var r: CommentResult = .{};
-    if (sent and std.mem.eql(u8, author, "you") and (t.stage == .review or t.stage == .testing)) {
+    if (sent and std.mem.eql(u8, author, "you") and t.finishing.len == 0 and (t.stage == .review or t.stage == .testing)) {
         try db.exec("UPDATE tickets SET round = round + 1 WHERE id = ?1", .{t.id});
         try moveId(ctx, db, t.id, t.stage, .running);
         r.sent_back = true;
@@ -719,6 +743,14 @@ pub fn approve(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8) Error!St
     try moveId(ctx, db, t.id, t.stage, to);
     try logEvent(ctx, db, t.id, "approved", @tagName(t.stage));
     return t.stage;
+}
+
+/// Start finishing: Claude merges its branch or opens a PR ("merge" or "pr")
+/// and then moves it to Done; it stays in its stage until then.
+pub fn setFinishing(ctx: Ctx, db: Db, id: i64, how: []const u8) Error!void {
+    try db.exec("UPDATE tickets SET finishing = ?2 WHERE id = ?1", .{ id, how });
+    try logEvent(ctx, db, id, "finishing", how);
+    try touch(ctx, db, id);
 }
 
 /// Mark a ticket as being started, so two dispatchers never start it twice.
@@ -820,6 +852,14 @@ test "projects, tickets, flags, comments, done" {
     try testing.expectEqual(@as(usize, 0), (try getTicket(db, a, k1)).flags.len);
     try testing.expectEqual(@as(usize, 1), (try listTickets(db, a, .{ .done = false })).len);
 
+    // Finishing keeps it in place through sent comments; moving ends it.
+    try move(ctx, db, a, k1, .testing);
+    try setFinishing(ctx, db, (try getTicket(db, a, k1)).id, "merge");
+    try testing.expectEqualStrings("merge", (try getTicket(db, a, k1)).finishing);
+    try testing.expect(!(try addComment(ctx, db, a, k1, "you", "keep their version", true)).sent_back);
+    try move(ctx, db, a, k1, .done);
+    try testing.expectEqualStrings("", (try getTicket(db, a, k1)).finishing);
+
     // Sub-tickets: in the parent's project, hidden by `top`, listed by parent.
     const sub = try createTicket(ctx, db, a, .{ .parent = k2, .title = "CSV quoting rules" });
     try testing.expectEqualStrings("QA-3", sub);
@@ -828,6 +868,10 @@ test "projects, tickets, flags, comments, done" {
     try testing.expectEqual(@as(usize, 1), (try listTickets(db, a, .{ .parent = k2 })).len);
     try testing.expectEqual(@as(usize, 2), (try listTickets(db, a, .{ .top = true })).len);
     try testing.expectError(error.Exists, removeTicket(db, a, k2));
+    try testing.expectEqual(@as(usize, 1), (try openSubtickets(db, a, k2)).len);
+    try spinOff(ctx, db, a, k2);
+    try testing.expectEqual(@as(usize, 0), (try openSubtickets(db, a, k2)).len);
+    try testing.expectEqualStrings("", (try getTicket(db, a, sub)).parent);
     try removeTicket(db, a, sub);
 
     try testing.expectError(error.Exists, removeProject(db, "qa-tool"));

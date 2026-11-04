@@ -92,6 +92,7 @@ pub fn handle(ctx: Ctx, cfg: config.Config, req: *std.http.Server.Request, path:
             error.SessionFailed => .{ .internal_server_error, "the session didn't start" },
             error.GutterFailed => .{ .internal_server_error, "gutter didn't start (is it installed?)" },
             error.NoReview => .{ .conflict, "submit the review in gutter first" },
+            error.OpenSubtickets => .{ .conflict, "it has sub-tickets that aren't done yet; finish them or spin them off" },
             error.NoTestPlan => .{ .not_found, "no test plan (.claude/test-plan.md)" },
             error.NoLaunch => .{ .not_found, "the test plan has no launch command" },
             error.Sqlite => .{ .internal_server_error, db.message() },
@@ -129,7 +130,14 @@ const Body = struct {
     dir: ?[]const u8 = null,
     prefix: ?[]const u8 = null,
     slots: ?i64 = null,
+    spin_off: ?bool = null,
+    /// Going to Done: "merge", "pr" or "close" (the default).
+    finish: ?[]const u8 = null,
 };
+
+fn finishOf(b: Body) !actions.Finish {
+    return actions.Finish.parse(b.finish orelse "close") orelse error.BadInput;
+}
 
 fn readBody(req: *std.http.Server.Request, a: std.mem.Allocator) !Body {
     const len: usize = @intCast(@min(req.head.content_length orelse 0, 1024 * 1024));
@@ -229,7 +237,7 @@ fn ticketAction(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator
             .profile = b.profile,
         });
     } else if (eql(u8, action, "move")) {
-        try board.move(ctx, db, a, key, board.Stage.parse(b.stage orelse "") orelse return error.BadInput);
+        try actions.move(ctx, db, a, key, board.Stage.parse(b.stage orelse "") orelse return error.BadInput, b.spin_off orelse false, try finishOf(b));
     } else if (eql(u8, action, "comment")) {
         const r = try actions.comment(ctx, db, a, key, "you", b.text orelse return error.BadInput, b.send orelse false);
         return ok(req, a, r);
@@ -240,7 +248,7 @@ fn ticketAction(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator
     } else if (eql(u8, action, "done")) {
         try board.done(ctx, db, a, key, b.summary orelse "");
     } else if (eql(u8, action, "approve")) {
-        _ = try actions.approve(ctx, db, a, key);
+        _ = try actions.approve(ctx, db, a, key, b.spin_off orelse false, try finishOf(b));
     } else if (eql(u8, action, "start")) {
         const t = try board.getTicket(db, a, key);
         try dispatch.start(ctx, cfg, db, a, t, b.now orelse false);
@@ -272,7 +280,7 @@ fn ticketAction(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator
     } else if (eql(u8, action, "launch-stop")) {
         try review.stopLaunch(ctx, a, key);
     } else if (eql(u8, action, "test-results")) {
-        const passed = try actions.testResults(ctx, db, a, key, b.checks orelse return error.BadInput, b.note orelse "");
+        const passed = try actions.testResults(ctx, db, a, key, b.checks orelse return error.BadInput, b.note orelse "", b.spin_off orelse false, try finishOf(b));
         return ok(req, a, .{ .passed = passed });
     } else return error.NotFound;
     return ok(req, a, .{ .ok = true });
@@ -346,5 +354,6 @@ fn getTicket(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, r
         .test_plan = if (dir.len > 0) review.readTestPlan(ctx, a, dir) else null,
         .launch = try review.launchState(ctx, a, t.key),
         .gutter_port = try review.gutterPort(ctx, a, t.key),
+        .main_branch = if (t.branch.len > 0) worktree.mainBranch(ctx, a, (try board.getProject(db, a, t.project)).dir) else "",
     });
 }

@@ -129,7 +129,7 @@ applies to `cl -r <id>`.
 
 ## Operator
 
-`o` in the chooser (or `cl operator`) attaches to the operator: a Claude session
+`o` in the chooser (or `cl operator`, or **Chat** on the web board) attaches to the operator: a Claude session
 that manages the others for you through the `cl` CLI. Ask it to start sessions,
 say what everyone is doing, or keep an eye on things; it runs `cl watch` to hear
 about status changes. It is not started until you first press `o`, then keeps
@@ -139,6 +139,12 @@ running like any other session. It is hidden from the list and from `cl list`,
 When something needs you, the operator runs `cl alert "<text>"` and the chooser
 shows a ⚑ flag with that text in the top-right corner. Opening the operator
 clears it (or `cl alert --clear`).
+
+It continues its last conversation when it starts again, so the chat carries
+on across restarts (`/clear` in it starts a new one). For the board it has a
+`cl-tickets` skill (written to `~/.config/cl/operator/.claude/skills/` each
+time it is opened): ask it for a ticket and it picks the project, writes the
+ticket's first message, and creates it.
 
 The operator keeps notes in `~/.config/cl/operator/notes/` (an `index.md` plus
 a file per topic), reads them when it starts, and updates them as it goes, so
@@ -304,6 +310,26 @@ gutter diffs against the revision the ticket started from. It only listens on
 its other `web.listen` addresses (tailscale) and forwards it, while that
 ticket's gutter runs. Test results that all pass move the ticket to done; a
 failure sends them to Claude for another round.
+
+### Finishing
+
+Done closes the ticket's session. For a ticket with a branch of its own
+(worktree mode) you choose what happens to the branch first: the board asks
+when a card is dropped on Done (or Done is picked, or it is approved out of
+testing), and the CLI takes a flag:
+
+```
+cl t move QA-1 done --merge        Claude merges its branch into the main branch
+cl t move QA-1 done --pr           Claude pushes it and opens a PR
+cl t move QA-1 done [--close]      just close (the default; also approve and test)
+```
+
+With `--merge` or `--pr` the instruction is typed into the ticket's session
+and the ticket stays where it is with a Finishing pill; questions and
+conflicts come back through the board as usual. When Claude is through it
+runs `cl t done QA-1 --close [--pr-url <url>]`: the ticket moves to done, the
+PR link becomes a comment, and then the session closes. Queue tickets work
+in the project's own checkout, so they just close.
 
 ### The web board
 
