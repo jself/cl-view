@@ -513,7 +513,11 @@ fn acquireTerminal(state: *State, term_id: []const u8, attach: []const u8, cols:
         try env.append(arena, try std.fmt.allocPrint(arena, "{s}={s}", .{ k, e.value_ptr.* }));
     }
     try env.appendSlice(arena, &.{ "TERM=xterm-256color", "COLORTERM=truecolor" });
-    const argv: []const []const u8 = if (attach.len > 0) &.{ state.exe, "attach", try arena.dupe(u8, attach) } else &.{ state.exe, "list" };
+    // "operator" (the board's Chat button) starts the operator if it isn't
+    // running; tmux names all start with "cl", so it can't be a session's.
+    const argv: []const []const u8 = if (std.mem.eql(u8, attach, operator_target))
+        &.{ state.exe, "operator" }
+    else if (attach.len > 0) &.{ state.exe, "attach", try arena.dupe(u8, attach) } else &.{ state.exe, "list" };
     t.pty = pty.spawn(arena, argv, env.items, cols, rows) catch |err| {
         logf("pty: {s}", .{@errorName(err)});
         return err;
@@ -649,6 +653,9 @@ fn termId(target: []const u8) []const u8 {
     for (val) |c| if (!std.ascii.isAlphanumeric(c)) return "";
     return val;
 }
+
+/// `/ws?a=operator` opens the operator, creating it if needed.
+const operator_target = "operator";
 
 /// The session to open, from `/ws?t=<id>&a=<tmux name>`: letters, digits, - and _.
 fn attachTarget(target: []const u8) []const u8 {

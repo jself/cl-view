@@ -129,7 +129,7 @@ applies to `cl -r <id>`.
 
 ## Operator
 
-`o` in the chooser (or `cl operator`) attaches to the operator: a Claude session
+`o` in the chooser (or `cl operator`, or **Chat** on the web board) attaches to the operator: a Claude session
 that manages the others for you through the `cl` CLI. Ask it to start sessions,
 say what everyone is doing, or keep an eye on things; it runs `cl watch` to hear
 about status changes. It is not started until you first press `o`, then keeps
@@ -139,6 +139,12 @@ running like any other session. It is hidden from the list and from `cl list`,
 When something needs you, the operator runs `cl alert "<text>"` and the chooser
 shows a ⚑ flag with that text in the top-right corner. Opening the operator
 clears it (or `cl alert --clear`).
+
+It continues its last conversation when it starts again, so the chat carries
+on across restarts (`/clear` in it starts a new one). For the board it has a
+`cl-tickets` skill (written to `~/.config/cl/operator/.claude/skills/` each
+time it is opened): ask it for a ticket and it picks the project, writes the
+ticket's first message, and creates it.
 
 The operator keeps notes in `~/.config/cl/operator/notes/` (an `index.md` plus
 a file per topic), reads them when it starts, and updates them as it goes, so
