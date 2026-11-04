@@ -474,9 +474,14 @@ function detailsTab(d) {
 }
 
 // ---- new ticket ----
+// The new-ticket form starts from the settings of the last ticket created here.
+const NEW_KEEP = ["when", "mode", "target", "skill", "profile"];
+const lastNew = () => { try { return JSON.parse(store("cl-new") || "{}") || {}; } catch { return {}; } };
 function openNew(parentKey) {
   const d = state.data; const parent = parentKey ? d.tickets.find((r) => r.ticket.key === parentKey)?.ticket : null;
-  const proj = parent?.project || state.project || d.projects[0]?.name || "";
+  const last = lastNew();
+  const lastProj = d.projects.some((x) => x.name === last.project) ? last.project : "";
+  const proj = parent?.project || state.project || lastProj || d.projects[0]?.name || "";
   const p = d.projects.find((x) => x.name === proj);
   document.getElementById("newBody").innerHTML = `
     <div class="head"><h1 style="flex:1">${parent ? "New sub-ticket of " + esc(parent.key) : "New ticket"}</h1><button type="button" class="btn" id="closeNew">Close</button></div>
@@ -493,6 +498,14 @@ function openNew(parentKey) {
       <div class="row2"><label>Profile<select name="profile"><option value="">Project's</option>${d.profiles.map((x) => `<option>${esc(x)}</option>`).join("")}</select></label>
         <label>Sub-ticket of<select name="parent"><option value="">None</option>${d.tickets.filter((r) => r.ticket.stage !== "done").map((r) => `<option value="${esc(r.ticket.key)}" ${r.ticket.key === parentKey ? "selected" : ""}>${esc(r.ticket.key)} ${esc(r.ticket.title)}</option>`).join("")}</select></label></div>
       <div class="actions"><button type="submit" class="btn primary">Create</button></div></form>`;
+  const form = document.getElementById("newForm");
+  for (const k of NEW_KEEP) {
+    const el = form.elements[k], v = last[k];
+    // The queue session belongs to the last ticket's project; don't carry it to another.
+    if (!el || v == null || (k === "target" && proj !== last.project)) continue;
+    if (el.tagName === "SELECT" && ![...el.options].some((o) => o.value === v)) continue;
+    el.value = v;
+  }
   document.getElementById("newDlg").showModal();
 }
 async function submitNew(form) {
@@ -501,6 +514,7 @@ async function submitNew(form) {
     if (f.pname) { await api("project", { name: f.pname, dir: f.pdir, mode: f.mode }); f.project = f.pname; }
     const r = await api("ticket", { project: f.project, title: f.title, body: f.body, mode: f.mode, target: f.target || undefined,
       stage: f.when, plan: f.when === "planning", skill: f.skill || undefined, profile: f.profile || undefined, parent: f.parent || undefined });
+    store("cl-new", JSON.stringify({ project: f.project, ...Object.fromEntries(NEW_KEEP.map((k) => [k, f[k] ?? ""])) }));
     document.getElementById("newDlg").close(); toast(`${r.key} created`); await refresh();
   } catch (e) { toast(e.message, true); }
 }
