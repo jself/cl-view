@@ -16,6 +16,8 @@
   /* Wraps to fit the screen; buttons stretch to fill each row. */
   #keys { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
           background: var(--bar); flex-shrink: 0; }
+  #keys a { display: flex; align-items: center; justify-content: center; flex: 1 1 auto; min-width: 44px; height: 40px; padding: 0 8px;
+             border-radius: 8px; background: var(--key); color: var(--fg); font: 15px ui-monospace, SFMono-Regular, Menlo, monospace; text-decoration: none; }
   #keys button { flex: 1 1 auto; min-width: 44px; height: 40px; padding: 0 8px; border: 0; border-radius: 8px;
                  background: var(--key); color: var(--fg); font: 15px ui-monospace, SFMono-Regular, Menlo, monospace;
                  touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
@@ -31,6 +33,7 @@
 <body>
 <div id="term"></div>
 <div id="keys">
+  <a href="/board" title="The ticket board">Board</a>
   <button class="back" data-send="\x11" title="Back to the list (Ctrl-Q)" aria-label="Back to the list">⇦</button>
   <button data-send="\x1b">Esc</button>
   <button data-send="\t">Tab</button>
@@ -101,12 +104,15 @@
 
   // The server keeps this page's terminal for a while after the connection
   // drops (a phone backgrounding the tab), so reconnecting resumes it.
+  // ?attach=<tmux name> (from the board) opens that session instead of the chooser.
+  const attach = (new URLSearchParams(location.search).get("attach") || "").replace(/[^A-Za-z0-9_-]/g, "");
   const termId = (() => {
     try {
-      let id = sessionStorage.getItem("cl-term");
+      const slot = "cl-term" + (attach ? "-" + attach : "");
+      let id = sessionStorage.getItem(slot);
       if (!id) {
         id = Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => b.toString(16).padStart(2, "0")).join("");
-        sessionStorage.setItem("cl-term", id);
+        sessionStorage.setItem(slot, id);
       }
       return id;
     } catch { return ""; }
@@ -119,7 +125,7 @@
     clearTimeout(retryTimer);
     overlay.classList.remove("show");
     if (ws) { ws.onclose = null; ws.close(); }
-    const sock = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws?t=" + termId);
+    const sock = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws?t=" + termId + (attach ? "&a=" + attach : ""));
     ws = sock;
     sock.binaryType = "arraybuffer";
     sock.onopen = () => {

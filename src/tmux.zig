@@ -55,6 +55,26 @@ pub fn runQuiet(ctx: Ctx, argv: []const []const u8) !void {
     ctx.gpa.free(out);
 }
 
+/// Replace the program in a session's first pane with `command`, in `dir`.
+/// The session, its name and its other windows stay; the session's
+/// environment (profile, config dir) carries over, plus `env`.
+pub fn respawn(ctx: Ctx, tmux_name: []const u8, dir: []const u8, env: []const []const u8, command: []const []const u8) !void {
+    const target = try std.fmt.allocPrint(ctx.gpa, "={s}", .{tmux_name});
+    defer ctx.gpa.free(target);
+    const panes = try run(ctx, &.{ "list-panes", "-s", "-t", target, "-F", "#{pane_id}" });
+    defer ctx.gpa.free(panes);
+    const pane = std.mem.sliceTo(panes, '\n');
+    if (pane.len == 0) return error.TmuxFailed;
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(ctx.gpa);
+    try argv.appendSlice(ctx.gpa, &.{ "respawn-pane", "-k", "-t", pane, "-c", dir });
+    for (env) |e| try argv.appendSlice(ctx.gpa, &.{ "-e", e });
+    try argv.append(ctx.gpa, "--");
+    try argv.appendSlice(ctx.gpa, command);
+    try runQuiet(ctx, argv.items);
+    try runQuiet(ctx, &.{ "clear-history", "-t", pane });
+}
+
 pub fn hasSession(ctx: Ctx, tmux_name: []const u8) bool {
     runQuiet(ctx, &.{ "has-session", "-t", tmux_name }) catch return false;
     return true;
@@ -84,6 +104,8 @@ pub const NewOptions = struct {
     role: []const u8 = "",
     /// Command to run as the pane's initial process.
     command: []const []const u8,
+    /// Extra "KEY=value" environment for the session (CL_TICKET, say).
+    env: []const []const u8 = &.{},
 };
 
 /// Create a detached session running `command`. Returns the tmux session name.
@@ -112,6 +134,7 @@ pub fn newSession(ctx: Ctx, opts: NewOptions) ![]const u8 {
         cfg_env = try std.fmt.allocPrint(ctx.gpa, "CLAUDE_CONFIG_DIR={s}", .{cd});
         try argv.appendSlice(ctx.gpa, &.{ "-e", cfg_env.? });
     }
+    for (opts.env) |e| try argv.appendSlice(ctx.gpa, &.{ "-e", e });
     try argv.append(ctx.gpa, "--");
     try argv.appendSlice(ctx.gpa, opts.command);
     try runQuiet(ctx, argv.items);

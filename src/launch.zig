@@ -21,6 +21,10 @@ pub const Options = struct {
     /// fresh session was started instead.
     started_fresh: ?*bool = null,
     extra: []const []const u8 = &.{},
+    /// Extra "KEY=value" environment for the session.
+    env: []const []const u8 = &.{},
+    /// Say yes to Claude's folder-trust dialog before sending `message`.
+    accept_trust: bool = false,
 };
 
 pub const Error = error{ NoSuchDir, NoSuchProfile, PromptTimeout };
@@ -77,6 +81,7 @@ pub fn create(ctx: Ctx, cfg: config.Config, o: Options) ![]const u8 {
         .config_dir = profile.config_dir,
         .role = o.role,
         .command = cmd.items,
+        .env = o.env,
     });
 
     if (o.role.len == 0) {
@@ -84,7 +89,7 @@ pub fn create(ctx: Ctx, cfg: config.Config, o: Options) ![]const u8 {
     }
 
     if (o.message) |m| {
-        if (m.len > 0) try claude.sendInitialMessage(ctx, tmux_name, m);
+        if (m.len > 0) try claude.sendInitialMessage(ctx, tmux_name, m, o.accept_trust);
     }
     return tmux_name;
 }

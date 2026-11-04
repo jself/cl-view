@@ -9,6 +9,11 @@
 //!   web.listen = 127.0.0.1:8421, tailscale:8421
 //!   web.password = $argon2id$...      (from `cl web hash`)
 //!
+//!   board.dir = ~/.local/state/cl       (where board.db lives)
+//!   board.worktrees = ~/.local/share/cl/worktrees
+//!   board.dispatch = true                (cl web starts queued tickets)
+//!   board.trust_worktrees = true         (yes to Claude's folder-trust dialog in ticket worktrees)
+//!
 //! `default`, `operator` and dotted keys are settings; every other key is a
 //! profile. `operator` picks the operator's profile and falls back to `default`.
 //!
@@ -30,6 +35,7 @@ pub const Config = struct {
     /// Profile for the operator session. Not affected by CLAUDE_CONFIG_DIR.
     operator: []const u8,
     web: Web = .{},
+    board: Board = .{},
 
     pub fn find(self: Config, name: []const u8) ?Profile {
         for (self.profiles) |p| if (std.mem.eql(u8, p.name, name)) return p;
@@ -50,6 +56,18 @@ pub const Web = struct {
     password: []const u8 = "",
 };
 
+pub const Board = struct {
+    /// Directory holding board.db; "" means ~/.local/state/cl.
+    dir: []const u8 = "",
+    /// Where ticket worktrees go, as <worktrees>/<project>/<key>; "" means
+    /// ~/.local/share/cl/worktrees.
+    worktrees: []const u8 = "",
+    /// `cl web` starts queued tickets (the dispatcher).
+    dispatch: bool = true,
+    /// Say yes to Claude's folder-trust dialog in new ticket worktrees.
+    trust_worktrees: bool = true,
+};
+
 pub fn load(ctx: Ctx) !Config {
     const path = try std.fmt.allocPrint(ctx.perm, "{s}/.config/cl/config", .{ctx.home});
     const data = std.Io.Dir.cwd().readFileAlloc(ctx.io, path, ctx.perm, .limited(64 * 1024)) catch |err| switch (err) {
@@ -61,6 +79,7 @@ pub fn load(ctx: Ctx) !Config {
     var default: ?[]const u8 = null;
     var operator: ?[]const u8 = null;
     var web: Web = .{};
+    var board: Board = .{};
     var lines = std.mem.splitScalar(u8, data, '\n');
     while (lines.next()) |raw| {
         const line = std.mem.trim(u8, raw, " \t\r");
@@ -78,6 +97,14 @@ pub fn load(ctx: Ctx) !Config {
             web.listen = val;
         } else if (std.mem.eql(u8, key, "web.password")) {
             web.password = val;
+        } else if (std.mem.eql(u8, key, "board.dir")) {
+            board.dir = try expandHomePerm(ctx, val);
+        } else if (std.mem.eql(u8, key, "board.worktrees")) {
+            board.worktrees = try expandHomePerm(ctx, val);
+        } else if (std.mem.eql(u8, key, "board.trust_worktrees")) {
+            board.trust_worktrees = !(std.mem.eql(u8, val, "false") or std.mem.eql(u8, val, "no") or std.mem.eql(u8, val, "off"));
+        } else if (std.mem.eql(u8, key, "board.dispatch")) {
+            board.dispatch = !(std.mem.eql(u8, val, "false") or std.mem.eql(u8, val, "no") or std.mem.eql(u8, val, "off"));
         } else if (std.mem.indexOfScalar(u8, key, '.') != null) {
             continue; // unknown setting
         } else {
@@ -87,6 +114,7 @@ pub fn load(ctx: Ctx) !Config {
     if (profiles.items.len == 0) {
         var c = try fallback(ctx);
         c.web = web;
+        c.board = board;
         return c;
     }
     const operator_profile = operator orelse default orelse profiles.items[0].name;
@@ -98,6 +126,7 @@ pub fn load(ctx: Ctx) !Config {
         .default = default orelse profiles.items[0].name,
         .operator = operator_profile,
         .web = web,
+        .board = board,
     };
 }
 

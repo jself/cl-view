@@ -1,0 +1,665 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
+<meta name="color-scheme" content="dark">
+<title>cl board</title>
+<style>
+  :root {
+    --bg: #111214; --panel: #16171a; --card: #1f2024; --line: #2c2e33; --line2: #24262a;
+    --fg: #ececec; --muted: #a0a3a8; --dim: #b4b6ba; --accent: #2a4f86; --accent-fg: #fff;
+    --input: #ffc861; --input-bg: #3a2a0b; --question: #cdb8ff; --question-bg: #2c2440;
+    --review: #9cc6ff; --review-bg: #11294a; --testing: #7ee6d6; --testing-bg: #0f3330;
+    --other: #d6d7da; --other-bg: #2c2e33;
+    --mono: ui-monospace, SFMono-Regular, Menlo, "DejaVu Sans Mono", monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.4 var(--sans); }
+  button, input, select, textarea { font: inherit; color: inherit; }
+  a { color: #8fbcff; }
+  .mono { font-family: var(--mono); }
+  .muted { color: var(--muted); }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--line2); }
+  header .title { font: 500 17px var(--mono); }
+  header .grow { flex: 1 1 40px; }
+  .btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 36px; padding: 0 12px;
+         border-radius: 8px; border: 1px solid var(--line); background: #26282d; color: #e6e7e9; cursor: pointer; text-decoration: none; white-space: nowrap; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+  .btn.danger { border-color: #6b2b2b; color: #ffb4b4; }
+  .btn:disabled { opacity: .5; cursor: default; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .seg button { min-height: 36px; padding: 0 12px; border: 0; background: #18191c; color: #c4c6ca; cursor: pointer; }
+  .seg button.on { background: var(--line); color: #fff; }
+  input[type=search], input[type=text], select, textarea {
+    min-height: 36px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px; background: #18191c; }
+  textarea { width: 100%; resize: vertical; }
+  #search { min-width: 0; flex: 1 1 180px; max-width: 320px; }
+
+  #needs { margin: 12px 16px 0; border: 1px solid #3a2f1a; background: #17150f; border-radius: 14px; }
+  #needs > button { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 46px; padding: 0 14px; border: 0;
+                    background: transparent; cursor: pointer; text-align: left; font-weight: 600; font-size: 15px; }
+  #needs .count { font-family: var(--mono); color: var(--input); }
+  #needs > button > span:first-child { white-space: nowrap; }
+  #needs .sum { font-weight: 400; font-size: 13px; color: #b9ad94; }
+  #needs .strip { display: flex; gap: 12px; overflow-x: auto; padding: 0 14px 14px; scroll-snap-type: x mandatory; }
+  #needs.closed .strip { display: none; }
+  .ask { flex: none; width: 300px; max-width: 85vw; scroll-snap-align: start; background: #1a1b1e; border: 1px solid var(--line);
+         border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+  .ask .what { font-size: 12.5px; color: var(--dim); line-height: 1.45; overflow-wrap: anywhere; }
+  .ask .acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: auto; }
+
+  nav#filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px 16px; }
+  .chip { display: inline-flex; align-items: center; gap: 7px; min-height: 34px; padding: 0 12px; border-radius: 17px;
+          border: 1px solid var(--line); background: #18191c; color: #d6d7da; cursor: pointer; white-space: nowrap; flex: none; }
+  .chip.on { background: #ececec; color: #111214; border-color: #ececec; }
+  .chip .n { font: 12px var(--mono); opacity: .8; }
+
+  main { padding: 0 16px 32px; }
+  .cols { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(230px, 1fr); gap: 12px; overflow-x: auto;
+          align-items: start; scroll-snap-type: x mandatory; padding-bottom: 8px; }
+  .col { background: var(--panel); border: 1px solid #222428; border-radius: 12px; padding: 10px; display: flex; flex-direction: column;
+         gap: 8px; min-height: 160px; scroll-snap-align: start; }
+  .col h2 { margin: 0; font-size: 13px; font-weight: 600; display: flex; gap: 8px; align-items: center; padding: 2px 4px; }
+  .col h2 .n { font: 12px var(--mono); color: var(--muted); }
+  .card { width: 100%; text-align: left; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 11px;
+          display: flex; flex-direction: column; gap: 6px; cursor: pointer; color: var(--fg); }
+  .card.hot { border-color: #f5a524; }
+  .card .top { display: flex; gap: 8px; font: 11.5px var(--mono); color: var(--muted); }
+  .card .top .grow { flex: 1; }
+  .card .t { font-size: 14px; font-weight: 500; line-height: 1.35; }
+  .card .meta { font: 11.5px var(--mono); color: var(--dim); overflow-wrap: anywhere; }
+  .card .sub { font: 11.5px var(--mono); color: var(--question); }
+  .card[data-drag] { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+  .card.lifted { opacity: .35; }
+  #ghost { position: fixed; z-index: 20; pointer-events: none; margin: 0; box-shadow: 0 12px 32px rgba(0,0,0,.55); transform: rotate(1.5deg); opacity: .95; }
+  .drop-on { outline: 2px dashed #60a5fa; outline-offset: -2px; background: #16202e; }
+  .lanes td.drop-on { border-radius: 10px; }
+  .status { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; color: #d6d7da; }
+  .dot { width: 8px; height: 8px; border-radius: 4px; flex: none; display: inline-block; background: #5d6168; }
+  .s-busy { background: #60a5fa; } .s-waiting, .s-blocked { background: #f5a524; } .s-idle { background: #a0a3a8; }
+  .s-shell { background: #2dd4bf; } .s-gone { background: #f87171; } .s-starting { background: #a78bfa; } .s-none { background: transparent; border: 1px solid #5d6168; }
+  .pills { display: flex; flex-wrap: wrap; gap: 5px; }
+  .pill { display: inline-flex; align-items: center; height: 22px; padding: 0 8px; border-radius: 11px; font-size: 11.5px;
+          background: var(--other-bg); color: var(--other); white-space: nowrap; }
+  .f-input { background: var(--input-bg); color: var(--input); } .f-question { background: var(--question-bg); color: var(--question); }
+  .f-review { background: var(--review-bg); color: var(--review); } .f-testing { background: var(--testing-bg); color: var(--testing); }
+
+  .lanes { overflow-x: auto; }
+  .lanes table { border-collapse: separate; border-spacing: 8px 0; min-width: 1100px; width: 100%; }
+  .lanes th { text-align: left; font-size: 11.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); padding: 4px 0; }
+  .lanes td { vertical-align: top; padding: 10px 0; border-top: 1px solid var(--line2); }
+  .lanes td.lane { width: 150px; }
+  .lanes td > div { display: flex; flex-direction: column; gap: 6px; }
+
+  .list { overflow-x: auto; border: 1px solid var(--line2); border-radius: 12px; }
+  .list table { border-collapse: collapse; width: 100%; min-width: 900px; }
+  .list th { text-align: left; font-size: 11.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted);
+             background: #18191c; padding: 9px 12px; }
+  .list td { padding: 9px 12px; border-top: 1px solid var(--line2); vertical-align: top; }
+  .list tr.row { cursor: pointer; }
+  .list tr.row:hover td { background: #17181b; }
+
+  dialog { padding: 0; border: 1px solid var(--line); border-radius: 16px; background: #17181b; color: var(--fg);
+           width: min(900px, calc(100vw - 24px)); max-height: calc(100dvh - 40px); }
+  dialog::backdrop { background: rgba(5, 5, 6, .66); }
+  .dlg { padding: 18px 20px 20px; display: flex; flex-direction: column; gap: 12px; }
+  .dlg .head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+  .dlg h1 { margin: 0; font-size: 21px; font-weight: 600; overflow-wrap: anywhere; }
+  .dlg .facts { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 13px; color: var(--dim); }
+  .dlg .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+  .tabs { display: flex; gap: 18px; border-bottom: 1px solid var(--line); overflow-x: auto; }
+  .tabs button { min-height: 40px; padding: 0 2px; border: 0; border-bottom: 2px solid transparent; background: none; color: var(--muted); cursor: pointer; white-space: nowrap; }
+  .tabs button.on { color: #fff; border-bottom-color: #7fb2ff; }
+  pre.term { margin: 0; background: #0b0b0c; border: 1px solid var(--line2); border-radius: 10px; padding: 10px 12px; font: 12px/1.5 var(--mono);
+             white-space: pre-wrap; overflow-wrap: anywhere; max-height: 50vh; overflow-y: auto; }
+  .opts { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 8px; }
+  .opt { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 10px 12px; border: 1px solid var(--line);
+         border-radius: 10px; background: var(--card); cursor: pointer; text-align: left; }
+  .opt.on { border-color: #a78bfa; background: #231f33; }
+  .opt small { color: var(--muted); }
+  .q { display: flex; flex-direction: column; gap: 8px; padding-bottom: 10px; }
+  .q + .q { border-top: 1px solid var(--line2); padding-top: 12px; }
+  .comment { padding: 9px 12px; border-radius: 10px; background: var(--card); }
+  .comment .who { font-size: 12px; color: var(--muted); }
+  .comment .body { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .comment.claude { background: #1b1f27; }
+  .form { display: grid; gap: 12px; }
+  .form label { display: flex; flex-direction: column; gap: 5px; font-size: 12.5px; color: var(--muted); }
+  .form .row2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+  .check { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; }
+  .check .pf { display: flex; gap: 6px; }
+  .check .pf .on.pass { background: #14532d; border-color: #14532d; }
+  .check .pf .on.fail { background: #7f1d1d; border-color: #7f1d1d; }
+  #toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); background: #2c2e33; color: #fff; padding: 10px 16px;
+           border-radius: 10px; display: none; max-width: calc(100vw - 32px); z-index: 10; }
+  #toast.err { background: #7f1d1d; }
+  .empty { color: var(--muted); padding: 24px 4px; }
+  @media (max-width: 640px) {
+    header { padding: 10px 12px; } main { padding: 0 12px 24px; } nav#filters { padding: 10px 12px; flex-wrap: nowrap; overflow-x: auto; }
+    #needs { margin: 10px 12px 0; } #needs .sum#needsSum { display: none; } #search { max-width: none; }
+    .cols { grid-auto-columns: 86vw; }
+    dialog { width: 100vw; max-width: 100vw; height: 100dvh; max-height: 100dvh; border-radius: 0; margin: 0; }
+    .dlg { padding: 14px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <span class="title">cl board</span>
+  <span id="summary" class="muted"></span>
+  <span class="grow"></span>
+  <input id="search" type="search" placeholder="Search tickets" aria-label="Search tickets">
+  <div class="seg" role="group" aria-label="View">
+    <button type="button" data-view="board">Board</button><button type="button" data-view="lanes">Lanes</button><button type="button" data-view="list">List</button>
+  </div>
+  <a class="btn" href="/">Terminal</a>
+  <button type="button" class="btn primary" id="newBtn">New ticket</button>
+</header>
+
+<section id="needs" aria-label="Needs you">
+  <button type="button" id="needsToggle" aria-expanded="true"><span>Needs you</span><span class="count" id="needsCount">0</span>
+    <span class="sum" id="needsSum"></span><span style="flex:1"></span><span class="sum" id="needsHint">Collapse</span></button>
+  <div class="strip" id="needsStrip"></div>
+</section>
+
+<nav id="filters" aria-label="Filters"></nav>
+<main id="main"></main>
+
+<dialog id="ticketDlg" aria-label="Ticket"><div class="dlg" id="ticketBody"></div></dialog>
+<dialog id="newDlg" aria-label="New ticket"><div class="dlg" id="newBody"></div></dialog>
+<div id="toast" role="status"></div>
+
+<script>
+"use strict";
+const STAGES = ["backlog", "planning", "queued", "running", "review", "testing", "done"];
+const STAGE_NAME = { backlog: "Backlog", planning: "Planning", queued: "Queued", running: "Running", review: "Review", testing: "Testing", done: "Done" };
+const FLAG_NAME = { input: "Needs input", question: "Question", review: "Ready for review", testing: "Needs testing", ended: "Session ended", "start-failed": "Didn't start" };
+const STATUS_NAME = { busy: "Working", waiting: "Waiting on you", blocked: "Waiting on you", idle: "Idle", shell: "Idle · background task", starting: "Starting", gone: "Session ended", unknown: "Unknown" };
+
+const store = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch { return null; } };
+const state = {
+  data: null, view: store("cl-view") || "board", filter: "all", project: "", subs: store("cl-subs") === "1",
+  search: "", needsOpen: store("cl-needs") !== "0", open: null, detail: null, tab: null, picks: {}, other: {}, checks: {},
+};
+
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const ago = (t) => { if (!t) return ""; const d = Math.max(0, (state.data?.now || Date.now() / 1000) - t);
+  return d < 60 ? "now" : d < 3600 ? Math.floor(d / 60) + "m" : d < 86400 ? Math.floor(d / 3600) + "h" : Math.floor(d / 86400) + "d"; };
+const toast = (msg, err) => { const el = document.getElementById("toast"); el.textContent = msg; el.className = err ? "err" : ""; el.style.display = "block";
+  clearTimeout(toast.t); toast.t = setTimeout(() => (el.style.display = "none"), 3500); };
+
+async function api(path, body) {
+  const opts = body === undefined ? {} : { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) };
+  const r = await fetch("/api/" + path, opts);
+  if (r.status === 401) { location.href = "/"; throw new Error("log in"); }
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+async function act(key, action, body, msg) {
+  try { const r = await api(`ticket/${encodeURIComponent(key)}/${action}`, body || {}); if (msg) toast(msg); await refresh(); return r; }
+  catch (e) { toast(e.message, true); throw e; }
+}
+
+const flagDetail = (f) => { try { return JSON.parse(f.detail); } catch { return null; } };
+const asks = (t) => t.flags.filter((f) => f.kind !== "testing" || t.stage === "testing");
+function askText(t, f) {
+  const d = flagDetail(f);
+  if (f.kind === "question") return d?.questions?.map((q) => q.question).join(" · ") || "Claude asked something";
+  if (f.kind === "input") return d ? `${d.tool || "Permission"}: ${d.summary || "wants permission"}` : (f.detail || "Waiting on a prompt");
+  if (f.kind === "review") return (d === null && f.detail === "plan") || f.detail === "plan" ? "The plan is ready for approval" : (t.summary || "Claude says it's done");
+  if (f.kind === "testing") return "Ready to try";
+  return f.detail || FLAG_NAME[f.kind] || f.kind;
+}
+const flagLabel = (f) => f.kind === "review" && f.detail === "plan" ? "Plan ready" : (FLAG_NAME[f.kind] || f.kind);
+const flagClass = (k) => ["input", "question", "review", "testing"].includes(k) ? "f-" + k : "";
+const pills = (t) => t.flags.length ? `<span class="pills">${t.flags.map((f) => `<span class="pill ${flagClass(f.kind)}">${esc(flagLabel(f))}</span>`).join("")}</span>` : "";
+// "(starting)" is the dispatcher's claim while it opens the session.
+// A Backlog or Queued ticket whose session is gone hasn't ended: it's waiting to start.
+const statusOf = (row) => row.status || (row.ticket.tmux.startsWith("(") ? "starting" : row.ticket.tmux && !["backlog", "queued"].includes(row.ticket.stage) ? "gone" : "none");
+const statusHtml = (row) => { const s = statusOf(row); const label = s === "none" ? (row.ticket.stage === "queued" ? "Waiting for a slot" : "Not started") : (STATUS_NAME[s] || s);
+  return `<span class="status"><span class="dot s-${esc(s)}"></span>${esc(label)}</span>`; };
+const where = (t) => t.worktree ? t.branch : t.mode === "worktree" ? "worktree on start" : t.target ? "queue: " + t.target : "queue";
+
+// ---- board data ----
+async function refresh() {
+  try { state.data = await api("board"); } catch (e) { if (e.message !== "log in") toast(e.message, true); return; }
+  if (!drag) render();
+  if (state.open) loadDetail(state.open, true);
+}
+function visible() {
+  const q = state.search.toLowerCase();
+  return state.data.tickets.filter((row) => {
+    const t = row.ticket;
+    if (!state.subs && t.parent) return false;
+    if (state.project && t.project !== state.project) return false;
+    if (q && !(t.key + " " + t.title + " " + t.body).toLowerCase().includes(q)) return false;
+    const f = state.filter;
+    if (f === "all") return true;
+    if (f === "me") return t.flags.length > 0;
+    if (f === "working") return row.status === "busy";
+    return t.flags.some((x) => x.kind === f);
+  });
+}
+
+function render() {
+  const d = state.data; if (!d) return;
+  const live = d.tickets.filter((r) => r.status && r.status !== "gone").length;
+  document.getElementById("summary").textContent = `${d.tickets.length} tickets · ${live} sessions live`;
+  for (const b of document.querySelectorAll("[data-view]")) b.classList.toggle("on", b.dataset.view === state.view);
+  renderNeeds(); renderFilters();
+  const main = document.getElementById("main");
+  if (!d.projects.length) {
+    main.innerHTML = `<p class="empty">No projects yet. Add one with <span class="mono">cl project add &lt;name&gt; &lt;dir&gt;</span>, or with New ticket.</p>`; return;
+  }
+  const rows = visible();
+  main.innerHTML = state.view === "lanes" ? lanesHtml(rows) : state.view === "list" ? listHtml(rows) : boardHtml(rows);
+}
+
+function renderNeeds() {
+  const rows = state.data.tickets.filter((r) => r.ticket.flags.length && r.ticket.stage !== "done");
+  rows.sort((a, b) => Math.min(...a.ticket.flags.map((f) => f.at)) - Math.min(...b.ticket.flags.map((f) => f.at)));
+  const box = document.getElementById("needs");
+  box.style.display = rows.length ? "" : "none";
+  box.classList.toggle("closed", !state.needsOpen);
+  document.getElementById("needsToggle").setAttribute("aria-expanded", state.needsOpen);
+  document.getElementById("needsHint").textContent = state.needsOpen ? "Collapse" : "Expand";
+  document.getElementById("needsCount").textContent = rows.length;
+  const counts = {}; for (const r of rows) for (const f of r.ticket.flags) counts[f.kind] = (counts[f.kind] || 0) + 1;
+  document.getElementById("needsSum").textContent = Object.entries(counts).map(([k, n]) => `${n} ${(FLAG_NAME[k] || k).toLowerCase()}`).join(" · ");
+  document.getElementById("needsStrip").innerHTML = rows.map((r) => {
+    const t = r.ticket; const f = t.flags[0]; const d = flagDetail(f);
+    let quick = "";
+    if (f.kind === "question" && d?.questions?.length === 1)
+      quick = (d.questions[0].options || []).slice(0, 3).map((o, i) => `<button type="button" class="btn" data-answer="${esc(t.key)}" data-n="${i + 1}">${esc(o.label)}</button>`).join("");
+    if (f.kind === "input" && d?.options?.length)
+      quick = d.options.slice(0, 2).map((o) => `<button type="button" class="btn" data-answer="${esc(t.key)}" data-n="${o.n}">${esc(o.label)}</button>`).join("");
+    const main = f.kind === "review" && f.detail === "plan" ? `<button type="button" class="btn primary" data-approve="${esc(t.key)}">Approve plan</button>`
+      : f.kind === "review" ? `<button type="button" class="btn primary" data-open="${esc(t.key)}" data-tab="review">Review</button>`
+      : f.kind === "testing" ? `<button type="button" class="btn primary" data-open="${esc(t.key)}" data-tab="test">Test it</button>`
+      : `<button type="button" class="btn primary" data-open="${esc(t.key)}" data-tab="needs">Open</button>`;
+    const shell = t.tmux && r.status && r.status !== "gone" ? `<a class="btn" href="/?attach=${encodeURIComponent(t.tmux)}">Shell</a>` : "";
+    return `<div class="ask"><div class="pills"><span class="pill ${flagClass(f.kind)}">${esc(flagLabel(f))}</span><span class="mono muted" style="font-size:11.5px">${esc(t.key)} · ${ago(f.at)}</span></div>
+      <div style="font-weight:500">${esc(t.title)}</div><div class="what">${esc(askText(t, f))}</div>
+      ${quick ? `<div class="acts">${quick}</div>` : ""}<div class="acts">${main}${shell}</div></div>`;
+  }).join("");
+}
+
+function renderFilters() {
+  const d = state.data; const all = d.tickets.filter((r) => state.subs || !r.ticket.parent);
+  const n = (f) => all.filter((r) => f === "all" || (f === "me" ? r.ticket.flags.length : f === "working" ? r.status === "busy" : r.ticket.flags.some((x) => x.kind === f))).length;
+  const chips = [["all", "All"], ["me", "Needs me"], ["input", "Needs input"], ["question", "Questions"], ["review", "Review"], ["testing", "Testing"], ["working", "Working"]];
+  document.getElementById("filters").innerHTML = chips.map(([k, l]) =>
+      `<button type="button" class="chip ${state.filter === k ? "on" : ""}" data-filter="${k}" aria-pressed="${state.filter === k}">${l}<span class="n">${n(k)}</span></button>`).join("")
+    + `<select id="projectSel" aria-label="Project"><option value="">All projects</option>${d.projects.map((p) => `<option ${p.name === state.project ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select>`
+    + `<button type="button" class="chip ${state.subs ? "on" : ""}" id="subsBtn" aria-pressed="${state.subs}">Sub-tickets<span class="n">${state.subs ? "shown" : "hidden"}</span></button>`;
+}
+
+function cardHtml(row, compact) {
+  const t = row.ticket; const hot = t.flags.some((f) => f.kind === "input" || f.kind === "question");
+  return `<button type="button" class="card ${hot ? "hot" : ""}" data-open="${esc(t.key)}" data-drag="${esc(t.key)}">
+    <span class="top"><span>${esc(t.key)}</span><span class="grow"></span><span>${ago(t.updated)}</span></span>
+    <span class="t">${esc(t.title)}</span>
+    ${t.parent ? `<span class="sub">sub-ticket of ${esc(t.parent)}</span>` : ""}
+    ${compact ? "" : `<span class="meta">${esc(t.project)} · ${esc(where(t))}</span>`}
+    ${t.children ? `<span class="meta">${t.children} sub-ticket${t.children > 1 ? "s" : ""}</span>` : ""}
+    ${statusHtml(row)}${pills(t)}</button>`;
+}
+function boardHtml(rows) {
+  return `<div class="cols">${STAGES.map((s) => { const cs = rows.filter((r) => r.ticket.stage === s);
+    return `<section class="col" data-drop="${s}"><h2>${STAGE_NAME[s]}<span class="n">${cs.length}</span></h2>${cs.map((r) => cardHtml(r)).join("")}</section>`; }).join("")}</div>`;
+}
+function lanesHtml(rows) {
+  const projects = state.data.projects.filter((p) => !state.project || p.name === state.project);
+  return `<div class="lanes"><table><thead><tr><th></th>${STAGES.map((s) => `<th>${STAGE_NAME[s]}</th>`).join("")}</tr></thead><tbody>
+    ${projects.map((p) => { const mine = rows.filter((r) => r.ticket.project === p.name);
+      const running = mine.filter((r) => ["running", "planning"].includes(r.ticket.stage) && r.status && r.status !== "gone").length;
+      return `<tr><td class="lane"><div><strong>${esc(p.name)}</strong><span class="mono muted" style="font-size:11.5px">${p.mode === "worktree" ? `${running} of ${p.slots} running` : "queue"}</span></div></td>
+        ${STAGES.map((s) => `<td data-drop="${s}" data-project="${esc(p.name)}"><div>${mine.filter((r) => r.ticket.stage === s).map((r) => cardHtml(r, true)).join("")}</div></td>`).join("")}</tr>`; }).join("")}
+  </tbody></table></div>`;
+}
+function listHtml(rows) {
+  if (!rows.length) return `<p class="empty">Nothing matches.</p>`;
+  return `<div class="list"><table><thead><tr><th>Key</th><th>Ticket</th><th>Stage</th><th>Session</th><th>Flags</th><th>Workspace</th><th>Updated</th></tr></thead><tbody>
+    ${rows.map((r) => { const t = r.ticket; return `<tr class="row" data-open="${esc(t.key)}"><td class="mono muted">${esc(t.key)}</td>
+      <td><div style="font-weight:500">${esc(t.title)}</div><div class="muted" style="font-size:12px">${esc(t.project)}${t.parent ? " · sub-ticket of " + esc(t.parent) : ""}</div></td>
+      <td>${STAGE_NAME[t.stage]}</td><td>${statusHtml(r)}</td><td>${pills(t)}</td><td class="mono" style="font-size:12px">${esc(where(t))}</td><td class="muted">${ago(t.updated)}</td></tr>`; }).join("")}
+  </tbody></table></div>`;
+}
+
+// ---- ticket popup ----
+async function openTicket(key, tab) {
+  state.open = key; state.tab = tab || null; state.picks = {}; state.other = {}; state.checks = {};
+  document.getElementById("ticketBody").innerHTML = `<p class="muted">Loading ${esc(key)}…</p>`;
+  const dlg = document.getElementById("ticketDlg"); if (!dlg.open) dlg.showModal();
+  await loadDetail(key);
+}
+async function loadDetail(key, quiet) {
+  try { state.detail = await api("ticket/" + encodeURIComponent(key)); }
+  catch (e) { if (!quiet) toast(e.message, true); return; }
+  // Keep what's being typed: only redraw when nothing in the popup has focus.
+  const focused = document.activeElement && document.getElementById("ticketDlg").contains(document.activeElement) && /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName);
+  if (quiet && focused) { const pre = document.querySelector("#ticketBody pre.term"); if (pre && state.tab === "session") pre.textContent = state.detail.tail || "(no session)"; return; }
+  renderDetail();
+}
+function tabsFor(d) {
+  const t = d.ticket; const tabs = [];
+  if (t.flags.some((f) => f.kind === "question" || f.kind === "input")) tabs.push(["needs", "Needs you"]);
+  if (t.stage === "review" || d.guide || d.review) tabs.push(["review", "Review"]);
+  if (d.test_plan) tabs.push(["test", "Test"]);
+  tabs.push(["comments", `Comments${d.comments.length ? " " + d.comments.length : ""}`]);
+  tabs.push(["session", "Session"]);
+  if (d.subtickets.length) tabs.push(["subs", `Sub-tickets ${d.subtickets.length}`]);
+  tabs.push(["activity", "Activity"], ["details", "Details"]);
+  return tabs;
+}
+function renderDetail() {
+  // Typed but unsent text survives the redraw.
+  const kept = {};
+  for (const id of ["commentText", "msg", "backText", "testNote"]) { const el = document.getElementById(id); if (el) kept[id] = el.value; }
+  renderDetailInner();
+  for (const [id, v] of Object.entries(kept)) { const el = document.getElementById(id); if (el && v) el.value = v; }
+}
+function renderDetailInner() {
+  const d = state.detail; const t = d.ticket; const tabs = tabsFor(d);
+  if (!state.tab || !tabs.some(([k]) => k === state.tab)) state.tab = tabs[0][0];
+  const liveSession = t.tmux && d.status && d.status !== "gone";
+  const planReady = t.stage === "planning" && t.flags.some((f) => f.kind === "review");
+  const approve = planReady ? "Approve plan" : t.stage === "review" ? "Approve, to testing" : t.stage === "testing" ? "Tested, done" : "";
+  const acts = [];
+  if (liveSession) acts.push(`<a class="btn primary" href="/?attach=${encodeURIComponent(t.tmux)}">Open shell</a>`);
+  if (!liveSession && t.stage !== "done") acts.push(`<button type="button" class="btn primary" data-act="start">${t.tmux ? "Start again" : "Start now"}</button>`);
+  if (d.guide || t.worktree) acts.push(`<button type="button" class="btn" data-act="gutter">Open in gutter</button>`);
+  if (approve) acts.push(`<button type="button" class="btn" data-act="approve">${approve}</button>`);
+  if (liveSession) acts.push(`<button type="button" class="btn" data-key="esc">Esc</button><button type="button" class="btn" data-key="interrupt">Interrupt</button>`);
+  if (t.stage === "backlog") acts.push(`<button type="button" class="btn" data-move="queued">Queue it</button>`);
+  const parent = t.parent ? `<button type="button" class="btn" data-open="${esc(t.parent)}">Parent ${esc(t.parent)}</button>` : "";
+  document.getElementById("ticketBody").innerHTML = `
+    <div class="head"><span class="mono muted">${esc(t.key)} · ${esc(t.project)}</span>${pills(t)}<span style="flex:1"></span>
+      <label class="muted" style="display:flex;gap:6px;align-items:center;font-size:13px">Stage
+        <select id="stageSel">${STAGES.map((s) => `<option value="${s}" ${s === t.stage ? "selected" : ""}>${STAGE_NAME[s]}</option>`).join("")}</select></label>
+      <button type="button" class="btn" id="closeDlg">Close</button></div>
+    <h1>${esc(t.title)}</h1>
+    <div class="facts">${statusHtml({ ticket: t, status: d.status })}<span class="mono">${esc(where(t))}</span>${t.tmux ? `<span class="mono">${esc(t.tmux)}</span>` : ""}
+      ${t.round > 1 ? `<span>round ${t.round}</span>` : ""}${t.plan ? `<span>plan first${t.skill ? " · " + esc(t.skill) : ""}</span>` : ""}${parent}</div>
+    <div class="actions">${acts.join("")}</div>
+    <div class="tabs" role="tablist">${tabs.map(([k, l]) => `<button type="button" role="tab" class="${state.tab === k ? "on" : ""}" aria-selected="${state.tab === k}" data-tab="${k}">${esc(l)}</button>`).join("")}</div>
+    <div id="tabBody">${tabHtml(d)}</div>`;
+}
+function tabHtml(d) {
+  const t = d.ticket;
+  switch (state.tab) {
+    case "needs": return needsTab(d);
+    case "review": return reviewTab(d);
+    case "test": return testTab(d);
+    case "comments": return commentsTab(d);
+    case "session": return `<pre class="term">${esc(d.tail || (t.tmux ? "(the session is gone)" : "(not started yet)"))}</pre>
+      ${t.tmux ? `<div style="display:flex;gap:8px;margin-top:10px"><input type="text" id="msg" placeholder="Message Claude" style="flex:1;min-width:0"><button type="button" class="btn primary" id="sendMsg">Send</button></div>` : ""}`;
+    case "subs": return `<div style="display:flex;flex-direction:column;gap:8px">${d.subtickets.map((r) => cardHtml(r)).join("")}</div>`;
+    case "activity": return `<ol class="muted" style="margin:0;padding-left:20px;display:flex;flex-direction:column;gap:4px">${d.events.map((e) =>
+      `<li>${esc(e.kind)}${e.detail ? " · " + esc(e.detail) : ""} <span class="mono" style="font-size:11.5px">${new Date(e.at * 1000).toLocaleString()}</span></li>`).join("")}</ol>`;
+    case "details": return detailsTab(d);
+  }
+  return "";
+}
+function needsTab(d) {
+  const t = d.ticket; const f = t.flags.find((x) => x.kind === "question") || t.flags.find((x) => x.kind === "input"); const det = flagDetail(f) || {};
+  const shell = `<a class="btn" href="/?attach=${encodeURIComponent(t.tmux)}">Answer in the shell</a>`;
+  if (f.kind === "question" && det.questions?.length) {
+    return det.questions.map((q, qi) => `<div class="q"><span class="muted" style="font-size:12px">${esc(q.header || "Question")}${q.multiSelect ? " · pick in the shell for several" : ""}</span>
+        <div style="font-size:15px">${esc(q.question)}</div>
+        <div class="opts">${(q.options || []).map((o, oi) => `<button type="button" class="opt ${state.picks[qi] === String(oi + 1) ? "on" : ""}" data-pick="${qi}" data-n="${oi + 1}">
+          <span>${esc(o.label)}</span>${o.description ? `<small>${esc(o.description)}</small>` : ""}</button>`).join("")}</div>
+        <input type="text" data-other="${qi}" placeholder="Or your own answer" value="${esc(state.other[qi] || "")}"></div>`).join("")
+      + `<div class="actions"><button type="button" class="btn primary" id="sendAnswers">Send ${det.questions.length > 1 ? "answers" : "answer"}</button>${shell}</div>`;
+  }
+  return `<div class="q"><span class="muted" style="font-size:12px">${esc(det.tool || "Permission prompt")}</span>
+      ${det.summary ? `<pre class="term">${esc(det.summary)}</pre>` : ""}
+      <div class="opts">${(det.options || []).map((o) => `<button type="button" class="opt" data-perm="${o.n}"><span>${o.n}. ${esc(o.label)}</span></button>`).join("")}</div>
+      ${det.options?.length ? "" : `<p class="muted">The options aren't on screen; answer it in the shell.</p>`}</div><div class="actions">${shell}</div>`;
+}
+function reviewTab(d) {
+  const t = d.ticket;
+  return `<div style="display:flex;flex-direction:column;gap:10px">
+    ${t.summary ? `<div class="comment claude"><div class="who">Claude's summary</div><div class="body">${esc(t.summary)}</div></div>` : ""}
+    <p class="muted" style="margin:0">${d.guide ? "Claude wrote a review guide for gutter." : "No review guide yet; gutter still shows the diff."}
+      ${d.gutter_port ? ` gutter is running on port ${d.gutter_port}.` : ""}</p>
+    <div class="actions"><button type="button" class="btn primary" data-act="gutter">Open in gutter</button>
+      ${d.review ? `<button type="button" class="btn" data-act="send-review">Send my gutter review to Claude</button>` : ""}
+      ${t.stage === "review" ? `<button type="button" class="btn" data-act="approve">Approve, to testing</button>` : ""}
+      ${d.gutter_port ? `<button type="button" class="btn" data-act="gutter-stop">Stop gutter</button>` : ""}</div>
+    <label class="muted" style="display:flex;flex-direction:column;gap:5px;font-size:12.5px">Or say what to change (sends it back for another round)
+      <textarea id="backText" rows="3"></textarea></label>
+    <div class="actions"><button type="button" class="btn" id="sendBack">Send back to Claude</button></div></div>`;
+}
+function testTab(d) {
+  const p = d.test_plan; const l = d.launch;
+  return `<div style="display:flex;flex-direction:column;gap:12px">
+    ${p.setup.length ? `<div><strong>Setup</strong><ol style="margin:6px 0 0;padding-left:20px">${p.setup.map((s, i) =>
+      `<li><label style="display:flex;gap:8px;align-items:flex-start"><input type="checkbox" data-setup="${i}" ${state.checks["s" + i] ? "checked" : ""}> ${esc(s)}</label></li>`).join("")}</ol></div>` : ""}
+    ${p.launch ? `<div><strong>Launch</strong><pre class="term" style="margin-top:6px">${esc(p.launch)}</pre>${p.open ? `<p style="margin:6px 0">${esc(p.open)}</p>` : ""}
+      <div class="actions"><button type="button" class="btn primary" data-act="launch">${l ? "Restart" : "Launch"}</button>${l ? `<button type="button" class="btn" data-act="launch-stop">Stop</button>` : ""}</div>
+      ${l ? `<p class="muted" style="margin:8px 0 4px">${l.running ? "Running" : "Exited"}</p><pre class="term">${esc(l.output || "(no output yet)")}</pre>` : ""}</div>` : ""}
+    <div><strong>Checks</strong><div style="display:flex;flex-direction:column;gap:8px;margin-top:6px">${p.checks.map((c, i) => { const r = state.checks["c" + i] || {};
+      return `<div class="check"><span>${esc(c)}</span><div class="pf"><button type="button" class="btn pass ${r.pass === true ? "on" : ""}" data-check="${i}" data-pass="1">Pass</button>
+        <button type="button" class="btn fail ${r.pass === false ? "on" : ""}" data-check="${i}" data-pass="0">Fail</button></div>
+        ${r.pass === false ? `<input type="text" data-note="${i}" placeholder="What happened?" value="${esc(r.note || "")}">` : ""}</div>`; }).join("")}</div></div>
+    <label class="muted" style="display:flex;flex-direction:column;gap:5px;font-size:12.5px">Anything else for Claude<textarea id="testNote" rows="2">${esc(state.checks.note || "")}</textarea></label>
+    <div class="actions"><button type="button" class="btn primary" id="sendResults">Submit results</button></div></div>`;
+}
+function commentsTab(d) {
+  const t = d.ticket; const back = t.stage === "review" || t.stage === "testing";
+  return `<div style="display:flex;flex-direction:column;gap:8px">${d.comments.map((c) =>
+      `<div class="comment ${c.author === "claude" ? "claude" : ""}"><div class="who">${c.author === "claude" ? "Claude" : "You"} · ${ago(c.at)}${c.sent ? " · sent" : ""}</div><div class="body">${esc(c.body)}</div></div>`).join("")}
+    <textarea id="commentText" rows="3" aria-label="Comment" placeholder="Comment"></textarea>
+    <div class="actions"><button type="button" class="btn" id="saveNote">Save note</button>
+      <button type="button" class="btn primary" id="saveSend" ${t.tmux ? "" : "disabled"}>${back ? "Send back to Claude" : "Save and send to Claude"}</button></div>
+    ${back ? `<p class="muted" style="margin:0;font-size:12.5px">Sending a comment now starts another round: the ticket goes back to Running.</p>` : ""}</div>`;
+}
+function detailsTab(d) {
+  const t = d.ticket; const sessions = state.data.sessions;
+  return `<form class="form" id="editForm">
+    <label>Title<input type="text" name="title" value="${esc(t.title)}"></label>
+    <label>Description<textarea name="body" rows="5">${esc(t.body)}</textarea></label>
+    <div class="row2"><label>Project<select name="project">${state.data.projects.map((p) => `<option ${p.name === t.project ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select></label>
+      <label>Runs as<select name="mode"><option value="queue" ${t.mode === "queue" ? "selected" : ""}>Queue in a session</option><option value="worktree" ${t.mode === "worktree" ? "selected" : ""}>Its own worktree</option></select></label>
+      <label>Queue session<select name="target"><option value="">Project default / parent's</option>${sessions.map((s) => `<option value="${esc(s.tmux)}" ${s.tmux === t.target ? "selected" : ""}>${esc(s.name)} (${esc(s.status)})</option>`).join("")}</select></label></div>
+    <div class="row2"><label>Plan first<select name="plan"><option value="0">No</option><option value="1" ${t.plan ? "selected" : ""}>Yes</option></select></label>
+      <label>Planning skill<input type="text" name="skill" value="${esc(t.skill)}" placeholder="grilling, wayfinder"></label></div>
+    <div class="actions"><button type="submit" class="btn primary">Save</button>
+      ${t.worktree && t.stage === "done" ? `<button type="button" class="btn" data-act="cleanup">Remove worktree</button>` : ""}
+      <button type="button" class="btn danger" id="deleteTicket">Delete ticket</button></div></form>`;
+}
+
+// ---- new ticket ----
+function openNew(parentKey) {
+  const d = state.data; const parent = parentKey ? d.tickets.find((r) => r.ticket.key === parentKey)?.ticket : null;
+  const proj = parent?.project || state.project || d.projects[0]?.name || "";
+  const p = d.projects.find((x) => x.name === proj);
+  document.getElementById("newBody").innerHTML = `
+    <div class="head"><h1 style="flex:1">${parent ? "New sub-ticket of " + esc(parent.key) : "New ticket"}</h1><button type="button" class="btn" id="closeNew">Close</button></div>
+    ${d.projects.length ? "" : `<p class="muted">Add a project first: give it a name and its directory.</p>`}
+    <form class="form" id="newForm">
+      ${d.projects.length ? `<label>Project<select name="project">${d.projects.map((x) => `<option ${x.name === proj ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select></label>` :
+        `<div class="row2"><label>Project name<input type="text" name="pname" required></label><label>Directory<input type="text" name="pdir" placeholder="~/devel/project" required></label></div>`}
+      <label>Title<input type="text" name="title" required></label>
+      <label>What should happen<textarea name="body" rows="4"></textarea></label>
+      <div class="row2"><label>When<select name="when"><option value="queued">Start when there's room</option><option value="backlog">Backlog for now</option><option value="planning">Plan first</option></select></label>
+        <label>Runs as<select name="mode"><option value="queue" ${p?.mode !== "worktree" ? "selected" : ""}>Queue in a session</option><option value="worktree" ${p?.mode === "worktree" ? "selected" : ""}>Its own worktree</option></select></label></div>
+      <div class="row2"><label>Queue session<select name="target"><option value="">Project default / parent's</option>${d.sessions.map((s) => `<option value="${esc(s.tmux)}">${esc(s.name)} (${esc(s.status)})</option>`).join("")}</select></label>
+        <label>Planning skill (plan first)<input type="text" name="skill" placeholder="grilling, wayfinder"></label></div>
+      <div class="row2"><label>Profile<select name="profile"><option value="">Project's</option>${d.profiles.map((x) => `<option>${esc(x)}</option>`).join("")}</select></label>
+        <label>Sub-ticket of<select name="parent"><option value="">None</option>${d.tickets.filter((r) => r.ticket.stage !== "done").map((r) => `<option value="${esc(r.ticket.key)}" ${r.ticket.key === parentKey ? "selected" : ""}>${esc(r.ticket.key)} ${esc(r.ticket.title)}</option>`).join("")}</select></label></div>
+      <div class="actions"><button type="submit" class="btn primary">Create</button></div></form>`;
+  document.getElementById("newDlg").showModal();
+}
+async function submitNew(form) {
+  const f = Object.fromEntries(new FormData(form));
+  try {
+    if (f.pname) { await api("project", { name: f.pname, dir: f.pdir, mode: f.mode }); f.project = f.pname; }
+    const r = await api("ticket", { project: f.project, title: f.title, body: f.body, mode: f.mode, target: f.target || undefined,
+      stage: f.when, plan: f.when === "planning", skill: f.skill || undefined, profile: f.profile || undefined, parent: f.parent || undefined });
+    document.getElementById("newDlg").close(); toast(`${r.key} created`); await refresh();
+  } catch (e) { toast(e.message, true); }
+}
+
+// ---- drag a card to another column ----
+// Pointer events rather than HTML5 drag and drop, so it works on touch and on
+// <button> cards. A mouse picks a card up once it moves; a finger has to hold
+// still for a moment first, so a swipe still scrolls the board.
+let drag = null, dragDone = 0;
+function dropAt(x, y) {
+  const el = document.elementFromPoint(x, y)?.closest("[data-drop]");
+  if (!el || (el.dataset.project && el.dataset.project !== drag.project)) return null;
+  return el;
+}
+function liftCard() {
+  const r = drag.el.getBoundingClientRect();
+  const g = drag.el.cloneNode(true); g.id = "ghost"; g.removeAttribute("data-drag");
+  Object.assign(g.style, { width: r.width + "px", left: r.left + "px", top: r.top + "px" });
+  document.body.appendChild(g);
+  drag.ghost = g; drag.dx = drag.x - r.left; drag.dy = drag.y - r.top;
+  drag.el.classList.add("lifted");
+  drag.scroller = drag.el.closest(".cols, .lanes");
+  navigator.vibrate?.(10);
+}
+function dragMove(x, y) {
+  drag.lx = x; drag.ly = y;
+  drag.ghost.style.left = x - drag.dx + "px"; drag.ghost.style.top = y - drag.dy + "px";
+  const el = dropAt(x, y);
+  if (el !== drag.over) { drag.over?.classList.remove("drop-on"); el?.classList.add("drop-on"); drag.over = el; }
+}
+function autoScroll() {
+  if (!drag?.ghost) return;
+  const sc = drag.scroller, edge = 48;
+  if (sc) { const r = sc.getBoundingClientRect();
+    if (drag.lx < r.left + edge) sc.scrollLeft -= 14; else if (drag.lx > r.right - edge) sc.scrollLeft += 14; }
+  if (drag.ly < edge) scrollBy(0, -14); else if (drag.ly > innerHeight - edge) scrollBy(0, 14);
+  dragMove(drag.lx, drag.ly);
+  drag.raf = requestAnimationFrame(autoScroll);
+}
+function endDrag(drop) {
+  const d = drag; drag = null; if (!d) return;
+  clearTimeout(d.hold); cancelAnimationFrame(d.raf);
+  d.ghost?.remove(); d.over?.classList.remove("drop-on"); d.el.classList.remove("lifted");
+  if (!d.ghost) return;
+  dragDone = Date.now();
+  const stage = drop && d.over?.dataset.drop;
+  const row = state.data.tickets.find((r) => r.ticket.key === d.key);
+  if (stage && row && row.ticket.stage !== stage) {
+    row.ticket.stage = stage; render();
+    act(d.key, "move", { stage }, `${d.key} to ${STAGE_NAME[stage]}`).catch(() => refresh());
+  } else render();
+}
+document.addEventListener("pointerdown", (e) => {
+  const el = e.target.closest("[data-drag]");
+  if (!el || !el.closest("#main") || drag || (e.pointerType === "mouse" && e.button !== 0)) return;
+  const row = state.data?.tickets.find((r) => r.ticket.key === el.dataset.drag);
+  drag = { el, key: el.dataset.drag, project: row?.ticket.project, id: e.pointerId, touch: e.pointerType !== "mouse", x: e.clientX, y: e.clientY };
+  if (drag.touch) drag.hold = setTimeout(() => { if (drag && !drag.ghost) { liftCard(); dragMove(drag.x, drag.y); autoScroll(); } }, 350);
+});
+document.addEventListener("pointermove", (e) => {
+  if (!drag || e.pointerId !== drag.id) return;
+  if (drag.ghost) { e.preventDefault(); dragMove(e.clientX, e.clientY); return; }
+  const far = Math.hypot(e.clientX - drag.x, e.clientY - drag.y) > (drag.touch ? 10 : 6);
+  if (!far) return;
+  if (drag.touch) { endDrag(false); return; } // moved before the hold: it's a scroll
+  liftCard(); dragMove(e.clientX, e.clientY); autoScroll();
+});
+document.addEventListener("pointerup", (e) => { if (drag && e.pointerId === drag.id) endDrag(true); });
+document.addEventListener("pointercancel", (e) => { if (drag && e.pointerId === drag.id) endDrag(false); });
+// Once a finger has picked a card up, keep the page from scrolling under it.
+document.addEventListener("touchmove", (e) => { if (drag?.ghost) e.preventDefault(); }, { passive: false });
+document.addEventListener("contextmenu", (e) => { if (drag) e.preventDefault(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && drag) endDrag(false); });
+// A drop ends with a click on the card; don't let it open the ticket.
+document.addEventListener("click", (e) => { if (Date.now() - dragDone < 400) { e.stopPropagation(); e.preventDefault(); } }, true);
+
+// ---- events ----
+document.addEventListener("click", async (e) => {
+  const el = e.target.closest("button, a, tr.row"); if (!el) return;
+  const ds = el.dataset;
+  if (ds.view) { state.view = ds.view; store("cl-view", ds.view); render(); return; }
+  if (ds.filter) { state.filter = ds.filter; render(); return; }
+  if (el.id === "subsBtn") { state.subs = !state.subs; store("cl-subs", state.subs ? "1" : "0"); render(); return; }
+  if (el.id === "needsToggle") { state.needsOpen = !state.needsOpen; store("cl-needs", state.needsOpen ? "1" : "0"); renderNeeds(); return; }
+  if (el.id === "newBtn") return openNew(null);
+  if (el.id === "closeNew") return document.getElementById("newDlg").close();
+  if (el.id === "closeDlg") { document.getElementById("ticketDlg").close(); return; }
+  if (ds.answer) { e.stopPropagation(); return act(ds.answer, "answer", { answers: [ds.n] }, "Answered"); }
+  if (ds.approve) return act(ds.approve, "approve", {}, "Approved");
+  if (ds.open) return openTicket(ds.open, ds.tab);
+  const key = state.open; if (!key) return;
+  if (ds.tab) { state.tab = ds.tab; renderDetail(); return; }
+  if (ds.key) return act(key, "key", { key: ds.key });
+  if (ds.move) return act(key, "move", { stage: ds.move }, "Moved");
+  if (ds.pick !== undefined) { state.picks[ds.pick] = ds.n; state.other[ds.pick] = ""; renderDetail(); return; }
+  if (ds.perm) return act(key, "answer", { answers: [ds.perm] }, "Answered");
+  if (ds.check !== undefined) { const c = state.checks["c" + ds.check] || {}; c.pass = ds.pass === "1"; state.checks["c" + ds.check] = c; renderDetail(); return; }
+  if (ds.act === "gutter") {
+    const w = window.open("", "_blank");
+    try { const r = await act(key, "gutter"); const url = `http://${location.hostname}:${r.port}/`; if (w) w.location = url; else location.href = url; }
+    catch { if (w) w.close(); }
+    return;
+  }
+  if (ds.act === "start") return act(key, "start", {}, "Started");
+  if (ds.act) return act(key, ds.act, {}, "Done");
+  if (el.id === "sendAnswers") {
+    const qs = flagDetail(state.detail.ticket.flags.find((f) => f.kind === "question"))?.questions || [];
+    const answers = qs.map((_, i) => (state.other[i] || "").trim() || state.picks[i]);
+    if (answers.some((x) => !x)) return toast("Answer every question first", true);
+    return act(key, "answer", { answers }, "Answered");
+  }
+  if (el.id === "sendMsg" || el.id === "saveNote" || el.id === "saveSend" || el.id === "sendBack") {
+    const box = document.getElementById(el.id === "sendMsg" ? "msg" : el.id === "sendBack" ? "backText" : "commentText");
+    const text = box.value.trim(); if (!text) return;
+    const r = await act(key, "comment", { text, send: el.id !== "saveNote" });
+    box.value = ""; toast(r.sent_back ? `Back to Claude: round ${r.round}` : r.sent ? "Sent" : r.unsent ? "Saved (no session yet)" : "Saved");
+    return;
+  }
+  if (el.id === "sendResults") {
+    const p = state.detail.test_plan;
+    const checks = p.checks.map((text, i) => ({ text, pass: state.checks["c" + i]?.pass, note: state.checks["c" + i]?.note || "" }));
+    if (checks.some((c) => c.pass === undefined)) return toast("Pass or fail every check first", true);
+    const r = await act(key, "test-results", { checks, note: document.getElementById("testNote").value });
+    toast(r.passed ? "All passed: done" : "Sent the failures to Claude"); state.checks = {};
+    return;
+  }
+  if (el.id === "deleteTicket") {
+    if (el.dataset.sure !== "1") { el.dataset.sure = "1"; el.textContent = "Really delete?"; return; }
+    await act(key, "rm", {}, "Deleted"); document.getElementById("ticketDlg").close(); return;
+  }
+});
+document.addEventListener("input", (e) => {
+  const ds = e.target.dataset;
+  if (ds.other !== undefined) { state.other[ds.other] = e.target.value; }
+  if (ds.note !== undefined) { const c = state.checks["c" + ds.note] || {}; c.note = e.target.value; state.checks["c" + ds.note] = c; }
+  if (ds.setup !== undefined) state.checks["s" + ds.setup] = e.target.checked;
+  if (e.target.id === "testNote") state.checks.note = e.target.value;
+  if (e.target.id === "search") { state.search = e.target.value; render(); }
+});
+document.addEventListener("change", (e) => {
+  if (e.target.id === "projectSel") { state.project = e.target.value; render(); }
+  if (e.target.id === "stageSel" && state.open) act(state.open, "move", { stage: e.target.value }, "Moved");
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && e.target.id === "msg") { e.preventDefault(); document.getElementById("sendMsg").click(); }
+});
+document.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (e.target.id === "newForm") return submitNew(e.target);
+  if (e.target.id === "editForm") {
+    const f = Object.fromEntries(new FormData(e.target));
+    await act(state.open, "edit", { title: f.title, body: f.body, project: f.project, mode: f.mode, target: f.target, plan: f.plan === "1", skill: f.skill }, "Saved");
+  }
+});
+document.getElementById("ticketDlg").addEventListener("close", () => { state.open = null; state.detail = null; });
+
+refresh();
+setInterval(() => { if (!document.hidden) refresh(); }, 3000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+</script>
+</body>
+</html>

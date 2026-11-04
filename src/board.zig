@@ -1,0 +1,837 @@
+//! The ticket board: projects, tickets, comments, flags and an event log in
+//! SQLite (<board.dir>/board.db). Everything the CLI and the web board do to
+//! tickets goes through here, so both behave the same.
+//!
+//! Stages are the workflow (columns). Flags say what needs the human and are
+//! independent of the stage: several can be set at once, and each is set by
+//! hand or automatically (by `done`, moves, or the session's state).
+//!
+//! A ticket can have sub-tickets (one level or more): full tickets with their
+//! own key, stage, flags and comments, linked to a parent. The ticket's agent
+//! creates them for pieces of its work; the board can hide them.
+const std = @import("std");
+const Ctx = @import("ctx.zig");
+const config = @import("config.zig");
+const sqlite = @import("db.zig");
+
+pub const Db = sqlite.Db;
+
+pub const Stage = enum {
+    backlog,
+    planning,
+    queued,
+    running,
+    review,
+    testing,
+    done,
+
+    pub fn parse(s: []const u8) ?Stage {
+        return std.meta.stringToEnum(Stage, s);
+    }
+};
+
+/// How a ticket gets a session: wait its turn in a chosen session (queue), or
+/// get its own worktree and session, in parallel up to the project's slots.
+pub const Mode = enum {
+    queue,
+    worktree,
+
+    pub fn parse(s: []const u8) ?Mode {
+        return std.meta.stringToEnum(Mode, s);
+    }
+};
+
+/// The flags the board knows. Others are allowed (set by hand).
+pub const flag_input = "input"; // blocked on a permission prompt
+pub const flag_question = "question"; // Claude asked something
+pub const flag_review = "review"; // Claude said done; review it
+pub const flag_testing = "testing"; // try it out
+
+pub const Project = struct {
+    name: []const u8,
+    dir: []const u8,
+    prefix: []const u8,
+    /// Worktree tickets that may run at once.
+    slots: i64,
+    /// Default mode for new tickets.
+    mode: Mode,
+    /// cl profile for new sessions; "" means the default.
+    profile: []const u8,
+};
+
+pub const Flag = struct {
+    kind: []const u8,
+    /// "auto" or "manual".
+    source: []const u8,
+    detail: []const u8,
+    at: i64,
+};
+
+pub const Comment = struct {
+    /// "you" or "claude".
+    author: []const u8,
+    body: []const u8,
+    /// Typed into the ticket's session.
+    sent: bool,
+    at: i64,
+};
+
+pub const Event = struct {
+    kind: []const u8,
+    detail: []const u8,
+    at: i64,
+};
+
+pub const Ticket = struct {
+    id: i64,
+    key: []const u8,
+    project: []const u8,
+    title: []const u8,
+    body: []const u8,
+    stage: Stage,
+    mode: Mode,
+    /// Starts with a planning step.
+    plan: bool,
+    /// A skill to plan with (grilling, wayfinder, ...), "" for none.
+    skill: []const u8,
+    /// The revision it started from (git commit, jj commit id): what gutter
+    /// diffs against.
+    base: []const u8 = "",
+    /// Queue mode: the tmux session it runs in.
+    target: []const u8,
+    worktree: []const u8,
+    branch: []const u8,
+    profile: []const u8,
+    /// The tmux session working on it, once started.
+    tmux: []const u8,
+    session_id: []const u8,
+    /// Claude's summary from `done`.
+    summary: []const u8,
+    /// 1, then +1 each time it is sent back after Claude said done.
+    round: i64,
+    created: i64,
+    updated: i64,
+    /// Key of the parent ticket, "" for a top-level one.
+    parent: []const u8,
+    /// Number of sub-tickets.
+    children: i64,
+    flags: []Flag = &.{},
+};
+
+pub const Error = error{ Sqlite, NotFound, Exists, BadInput, OutOfMemory };
+
+const schema =
+    \\PRAGMA journal_mode = WAL;
+    \\CREATE TABLE IF NOT EXISTS projects (
+    \\  name TEXT PRIMARY KEY,
+    \\  dir TEXT NOT NULL,
+    \\  prefix TEXT NOT NULL UNIQUE,
+    \\  slots INTEGER NOT NULL DEFAULT 1,
+    \\  mode TEXT NOT NULL DEFAULT 'queue',
+    \\  profile TEXT NOT NULL DEFAULT '',
+    \\  next_num INTEGER NOT NULL DEFAULT 1
+    \\);
+    \\CREATE TABLE IF NOT EXISTS tickets (
+    \\  id INTEGER PRIMARY KEY,
+    \\  key TEXT NOT NULL UNIQUE,
+    \\  project TEXT NOT NULL REFERENCES projects(name) ON UPDATE CASCADE,
+    \\  title TEXT NOT NULL,
+    \\  body TEXT NOT NULL DEFAULT '',
+    \\  stage TEXT NOT NULL DEFAULT 'backlog',
+    \\  mode TEXT NOT NULL DEFAULT 'queue',
+    \\  plan INTEGER NOT NULL DEFAULT 0,
+    \\  target TEXT NOT NULL DEFAULT '',
+    \\  worktree TEXT NOT NULL DEFAULT '',
+    \\  branch TEXT NOT NULL DEFAULT '',
+    \\  profile TEXT NOT NULL DEFAULT '',
+    \\  tmux TEXT NOT NULL DEFAULT '',
+    \\  session_id TEXT NOT NULL DEFAULT '',
+    \\  summary TEXT NOT NULL DEFAULT '',
+    \\  round INTEGER NOT NULL DEFAULT 1,
+    \\  parent INTEGER REFERENCES tickets(id),
+    \\  skill TEXT NOT NULL DEFAULT '',
+    \\  base TEXT NOT NULL DEFAULT '',
+    \\  created INTEGER NOT NULL,
+    \\  updated INTEGER NOT NULL
+    \\);
+    \\CREATE INDEX IF NOT EXISTS tickets_stage ON tickets(stage);
+    \\CREATE TABLE IF NOT EXISTS comments (
+    \\  id INTEGER PRIMARY KEY,
+    \\  ticket INTEGER NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+    \\  author TEXT NOT NULL,
+    \\  body TEXT NOT NULL,
+    \\  sent INTEGER NOT NULL DEFAULT 0,
+    \\  at INTEGER NOT NULL
+    \\);
+    \\CREATE INDEX IF NOT EXISTS comments_ticket ON comments(ticket);
+    \\CREATE TABLE IF NOT EXISTS flags (
+    \\  id INTEGER PRIMARY KEY,
+    \\  ticket INTEGER NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+    \\  kind TEXT NOT NULL,
+    \\  source TEXT NOT NULL,
+    \\  detail TEXT NOT NULL DEFAULT '',
+    \\  at INTEGER NOT NULL,
+    \\  cleared INTEGER
+    \\);
+    \\CREATE UNIQUE INDEX IF NOT EXISTS flags_active ON flags(ticket, kind) WHERE cleared IS NULL;
+    \\CREATE TABLE IF NOT EXISTS events (
+    \\  id INTEGER PRIMARY KEY,
+    \\  ticket INTEGER NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+    \\  kind TEXT NOT NULL,
+    \\  detail TEXT NOT NULL DEFAULT '',
+    \\  at INTEGER NOT NULL
+    \\);
+    \\CREATE INDEX IF NOT EXISTS events_ticket ON events(ticket);
+    \\CREATE VIRTUAL TABLE IF NOT EXISTS tickets_fts USING fts5(key, title, body, content='tickets', content_rowid='id');
+    \\CREATE TRIGGER IF NOT EXISTS tickets_ai AFTER INSERT ON tickets BEGIN
+    \\  INSERT INTO tickets_fts(rowid, key, title, body) VALUES (new.id, new.key, new.title, new.body);
+    \\END;
+    \\CREATE TRIGGER IF NOT EXISTS tickets_ad AFTER DELETE ON tickets BEGIN
+    \\  INSERT INTO tickets_fts(tickets_fts, rowid, key, title, body) VALUES ('delete', old.id, old.key, old.title, old.body);
+    \\END;
+    \\CREATE TRIGGER IF NOT EXISTS tickets_au AFTER UPDATE OF key, title, body ON tickets BEGIN
+    \\  INSERT INTO tickets_fts(tickets_fts, rowid, key, title, body) VALUES ('delete', old.id, old.key, old.title, old.body);
+    \\  INSERT INTO tickets_fts(rowid, key, title, body) VALUES (new.id, new.key, new.title, new.body);
+    \\END;
+    \\CREATE VIRTUAL TABLE IF NOT EXISTS comments_fts USING fts5(body, content='comments', content_rowid='id');
+    \\CREATE TRIGGER IF NOT EXISTS comments_ai AFTER INSERT ON comments BEGIN
+    \\  INSERT INTO comments_fts(rowid, body) VALUES (new.id, new.body);
+    \\END;
+    \\CREATE TRIGGER IF NOT EXISTS comments_ad AFTER DELETE ON comments BEGIN
+    \\  INSERT INTO comments_fts(comments_fts, rowid, body) VALUES ('delete', old.id, old.body);
+    \\END;
+    \\CREATE INDEX IF NOT EXISTS tickets_parent ON tickets(parent);
+;
+
+/// `board.dir`, or ~/.local/state/cl; created if missing.
+pub fn dirPath(ctx: Ctx, a: std.mem.Allocator, cfg: config.Config) ![]const u8 {
+    const dir = if (cfg.board.dir.len > 0) cfg.board.dir else try std.fmt.allocPrint(a, "{s}/.local/state/cl", .{ctx.home});
+    std.Io.Dir.cwd().createDirPath(ctx.io, dir) catch {};
+    return dir;
+}
+
+/// Open (creating if needed) the board in `board.dir`.
+pub fn open(ctx: Ctx, cfg: config.Config) !Db {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buf);
+    const dir = try dirPath(ctx, fba.allocator(), cfg);
+    var path_buf: [std.fs.max_path_bytes + 16]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&path_buf, "{s}/board.db", .{dir});
+    const db = try Db.open(path);
+    errdefer db.close();
+    try migrate(db);
+    return db;
+}
+
+const version = 4;
+
+pub fn migrate(db: Db) !void {
+    const have = (try db.int("PRAGMA user_version", .{})) orelse 0;
+    if (have >= version) return;
+    // Version 1 had no sub-tickets, version 2 no planning skill.
+    if (have >= 1 and have < 2) try db.execMulti("ALTER TABLE tickets ADD COLUMN parent INTEGER REFERENCES tickets(id)");
+    if (have >= 1 and have < 3) try db.execMulti("ALTER TABLE tickets ADD COLUMN skill TEXT NOT NULL DEFAULT ''");
+    if (have >= 1 and have < 4) try db.execMulti("ALTER TABLE tickets ADD COLUMN base TEXT NOT NULL DEFAULT ''");
+    try db.execMulti(schema);
+    try db.execMulti(std.fmt.comptimePrint("PRAGMA user_version = {d}", .{version}));
+}
+
+fn now(ctx: Ctx) i64 {
+    return ctx.nowSeconds();
+}
+
+// ---- projects ----
+
+pub const ProjectInput = struct {
+    name: []const u8,
+    dir: []const u8,
+    prefix: ?[]const u8 = null,
+    slots: ?i64 = null,
+    mode: ?Mode = null,
+    profile: ?[]const u8 = null,
+};
+
+/// A key prefix from a project name: a short first word as is (`qa-tool` →
+/// QA, `cl-wrapper` → CL), else the initials of its words
+/// (`epoch-website-astro` → EWA), else its first two letters (`boats` → BO).
+pub fn defaultPrefix(buf: *[8]u8, name: []const u8) []const u8 {
+    var n: usize = 0;
+    var words_buf: [8][]const u8 = undefined;
+    var words: usize = 0;
+    var it = std.mem.tokenizeAny(u8, name, "-_ .");
+    while (it.next()) |w| {
+        if (words == words_buf.len) break;
+        words_buf[words] = w;
+        words += 1;
+    }
+    const ws = words_buf[0..words];
+    if (ws.len >= 2 and ws[0].len >= 2 and ws[0].len <= 3) {
+        for (ws[0]) |ch| if (std.ascii.isAlphanumeric(ch)) {
+            buf[n] = std.ascii.toUpper(ch);
+            n += 1;
+        };
+        return buf[0..n];
+    }
+    if (ws.len >= 2) {
+        for (ws) |w| if (std.ascii.isAlphanumeric(w[0])) {
+            buf[n] = std.ascii.toUpper(w[0]);
+            n += 1;
+        };
+        return buf[0..n];
+    }
+    for (name) |ch| {
+        if (n == 2) break;
+        if (!std.ascii.isAlphanumeric(ch)) continue;
+        buf[n] = std.ascii.toUpper(ch);
+        n += 1;
+    }
+    return buf[0..n];
+}
+
+test defaultPrefix {
+    var buf: [8]u8 = undefined;
+    try std.testing.expectEqualStrings("QA", defaultPrefix(&buf, "qa-tool"));
+    try std.testing.expectEqualStrings("SOV", defaultPrefix(&buf, "sov_escape"));
+    try std.testing.expectEqualStrings("CL", defaultPrefix(&buf, "cl-wrapper"));
+    try std.testing.expectEqualStrings("NV", defaultPrefix(&buf, "nvim"));
+    try std.testing.expectEqualStrings("BO", defaultPrefix(&buf, "boats"));
+    try std.testing.expectEqualStrings("EWA", defaultPrefix(&buf, "epoch-website-astro"));
+}
+
+fn validPrefix(p: []const u8) bool {
+    if (p.len == 0 or p.len > 8) return false;
+    for (p) |ch| if (!std.ascii.isUpper(ch) and !std.ascii.isDigit(ch)) return false;
+    return true;
+}
+
+pub fn addProject(db: Db, in: ProjectInput) Error!void {
+    if (in.name.len == 0 or in.dir.len == 0) return error.BadInput;
+    var buf: [8]u8 = undefined;
+    const prefix = in.prefix orelse defaultPrefix(&buf, in.name);
+    if (!validPrefix(prefix)) return error.BadInput;
+    if (try db.int("SELECT 1 FROM projects WHERE name = ?1 OR prefix = ?2", .{ in.name, prefix }) != null) return error.Exists;
+    try db.exec("INSERT INTO projects (name, dir, prefix, slots, mode, profile) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", .{
+        in.name, in.dir, prefix, in.slots orelse 1, @tagName(in.mode orelse .queue), in.profile orelse "",
+    });
+}
+
+/// Change the given fields of a project.
+pub fn updateProject(db: Db, name: []const u8, in: ProjectInput) Error!void {
+    if (try db.int("SELECT 1 FROM projects WHERE name = ?1", .{name}) == null) return error.NotFound;
+    if (in.prefix) |p| {
+        if (!validPrefix(p)) return error.BadInput;
+        if (try db.int("SELECT 1 FROM projects WHERE prefix = ?1 AND name != ?2", .{ p, name }) != null) return error.Exists;
+        try db.exec("UPDATE projects SET prefix = ?2 WHERE name = ?1", .{ name, p });
+    }
+    if (in.dir.len > 0) try db.exec("UPDATE projects SET dir = ?2 WHERE name = ?1", .{ name, in.dir });
+    if (in.slots) |s| try db.exec("UPDATE projects SET slots = ?2 WHERE name = ?1", .{ name, s });
+    if (in.mode) |m| try db.exec("UPDATE projects SET mode = ?2 WHERE name = ?1", .{ name, @tagName(m) });
+    if (in.profile) |p| try db.exec("UPDATE projects SET profile = ?2 WHERE name = ?1", .{ name, p });
+    // Renaming last, so the lookups above still match.
+    if (in.name.len > 0 and !std.mem.eql(u8, in.name, name)) {
+        if (try db.int("SELECT 1 FROM projects WHERE name = ?1", .{in.name}) != null) return error.Exists;
+        try db.exec("UPDATE projects SET name = ?2 WHERE name = ?1", .{ name, in.name });
+    }
+}
+
+/// Remove a project; refused while it has tickets.
+pub fn removeProject(db: Db, name: []const u8) Error!void {
+    if (try db.int("SELECT 1 FROM projects WHERE name = ?1", .{name}) == null) return error.NotFound;
+    if (try db.int("SELECT 1 FROM tickets WHERE project = ?1", .{name}) != null) return error.Exists;
+    try db.exec("DELETE FROM projects WHERE name = ?1", .{name});
+}
+
+const project_cols = "name, dir, prefix, slots, mode, profile";
+
+fn readProject(st: sqlite.Stmt, a: std.mem.Allocator) !Project {
+    return .{
+        .name = try st.dupe(a, 0),
+        .dir = try st.dupe(a, 1),
+        .prefix = try st.dupe(a, 2),
+        .slots = st.int(3),
+        .mode = Mode.parse(st.text(4)) orelse .queue,
+        .profile = try st.dupe(a, 5),
+    };
+}
+
+pub fn listProjects(db: Db, a: std.mem.Allocator) Error![]Project {
+    var st = try db.query("SELECT " ++ project_cols ++ " FROM projects ORDER BY name", .{});
+    defer st.finalize();
+    var out: std.ArrayList(Project) = .empty;
+    while (try st.step()) try out.append(a, try readProject(st, a));
+    return out.toOwnedSlice(a);
+}
+
+pub fn getProject(db: Db, a: std.mem.Allocator, name: []const u8) Error!Project {
+    var st = try db.query("SELECT " ++ project_cols ++ " FROM projects WHERE name = ?1", .{name});
+    defer st.finalize();
+    if (!try st.step()) return error.NotFound;
+    return readProject(st, a);
+}
+
+// ---- tickets ----
+
+pub const TicketInput = struct {
+    project: []const u8 = "",
+    title: ?[]const u8 = null,
+    body: ?[]const u8 = null,
+    stage: ?Stage = null,
+    mode: ?Mode = null,
+    plan: ?bool = null,
+    target: ?[]const u8 = null,
+    profile: ?[]const u8 = null,
+    /// Key of the parent ticket, for a sub-ticket.
+    parent: ?[]const u8 = null,
+    /// Planning skill.
+    skill: ?[]const u8 = null,
+};
+
+/// Create a ticket and return its key (e.g. QA-12). Mode and profile default
+/// to the project's; a planning ticket starts in Planning unless a stage is given.
+pub fn createTicket(ctx: Ctx, db: Db, a: std.mem.Allocator, in: TicketInput) Error![]const u8 {
+    const title = in.title orelse return error.BadInput;
+    if (title.len == 0) return error.BadInput;
+    // A sub-ticket lives in its parent's project unless told otherwise.
+    const parent: ?Ticket = if (in.parent) |k| try getTicket(db, a, k) else null;
+    const project = if (in.project.len > 0) in.project else if (parent) |pt| pt.project else return error.BadInput;
+    const p = try getProject(db, a, project);
+    const plan = in.plan orelse false;
+    const stage = in.stage orelse (if (plan) Stage.planning else Stage.backlog);
+    try db.execMulti("BEGIN IMMEDIATE");
+    errdefer db.execMulti("ROLLBACK") catch {};
+    const num = (try db.int("SELECT next_num FROM projects WHERE name = ?1", .{p.name})) orelse return error.NotFound;
+    try db.exec("UPDATE projects SET next_num = next_num + 1 WHERE name = ?1", .{p.name});
+    const key = try std.fmt.allocPrint(a, "{s}-{d}", .{ p.prefix, num });
+    const t = now(ctx);
+    try db.exec(
+        \\INSERT INTO tickets (key, project, title, body, stage, mode, plan, target, profile, parent, skill, created, updated)
+        \\VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)
+    , .{ key, p.name, title, in.body orelse "", @tagName(stage), @tagName(in.mode orelse p.mode), plan, in.target orelse "", in.profile orelse p.profile, if (parent) |pt| pt.id else null, in.skill orelse "", t });
+    const id = db.lastId();
+    try logEvent(ctx, db, id, "created", @tagName(stage));
+    if (parent) |pt| try logEvent(ctx, db, pt.id, "sub-ticket", key);
+    try db.execMulti("COMMIT");
+    return key;
+}
+
+const ticket_cols = "t.id, t.key, t.project, t.title, t.body, t.stage, t.mode, t.plan, t.target, t.worktree, t.branch, t.profile, t.tmux, t.session_id, t.summary, t.round, t.created, t.updated, " ++
+    "coalesce((SELECT p.key FROM tickets p WHERE p.id = t.parent), ''), (SELECT count(*) FROM tickets c WHERE c.parent = t.id), t.skill, t.base";
+
+fn readTicket(st: sqlite.Stmt, a: std.mem.Allocator) !Ticket {
+    return .{
+        .id = st.int(0),
+        .key = try st.dupe(a, 1),
+        .project = try st.dupe(a, 2),
+        .title = try st.dupe(a, 3),
+        .body = try st.dupe(a, 4),
+        .stage = Stage.parse(st.text(5)) orelse .backlog,
+        .mode = Mode.parse(st.text(6)) orelse .queue,
+        .plan = st.int(7) != 0,
+        .target = try st.dupe(a, 8),
+        .worktree = try st.dupe(a, 9),
+        .branch = try st.dupe(a, 10),
+        .profile = try st.dupe(a, 11),
+        .tmux = try st.dupe(a, 12),
+        .session_id = try st.dupe(a, 13),
+        .summary = try st.dupe(a, 14),
+        .round = st.int(15),
+        .created = st.int(16),
+        .updated = st.int(17),
+        .parent = try st.dupe(a, 18),
+        .children = st.int(19),
+        .skill = try st.dupe(a, 20),
+        .base = try st.dupe(a, 21),
+    };
+}
+
+fn activeFlags(db: Db, a: std.mem.Allocator, id: i64) Error![]Flag {
+    var st = try db.query("SELECT kind, source, detail, at FROM flags WHERE ticket = ?1 AND cleared IS NULL ORDER BY at, id", .{id});
+    defer st.finalize();
+    var out: std.ArrayList(Flag) = .empty;
+    while (try st.step()) try out.append(a, .{ .kind = try st.dupe(a, 0), .source = try st.dupe(a, 1), .detail = try st.dupe(a, 2), .at = st.int(3) });
+    return out.toOwnedSlice(a);
+}
+
+/// A ticket by key (case-insensitive), with its active flags.
+pub fn getTicket(db: Db, a: std.mem.Allocator, key: []const u8) Error!Ticket {
+    var st = try db.query("SELECT " ++ ticket_cols ++ " FROM tickets t WHERE t.key = ?1 COLLATE NOCASE", .{key});
+    defer st.finalize();
+    if (!try st.step()) return error.NotFound;
+    var t = try readTicket(st, a);
+    t.flags = try activeFlags(db, a, t.id);
+    return t;
+}
+
+pub fn comments(db: Db, a: std.mem.Allocator, id: i64) Error![]Comment {
+    var st = try db.query("SELECT author, body, sent, at FROM comments WHERE ticket = ?1 ORDER BY at, id", .{id});
+    defer st.finalize();
+    var out: std.ArrayList(Comment) = .empty;
+    while (try st.step()) try out.append(a, .{ .author = try st.dupe(a, 0), .body = try st.dupe(a, 1), .sent = st.int(2) != 0, .at = st.int(3) });
+    return out.toOwnedSlice(a);
+}
+
+pub fn events(db: Db, a: std.mem.Allocator, id: i64) Error![]Event {
+    var st = try db.query("SELECT kind, detail, at FROM events WHERE ticket = ?1 ORDER BY at, id", .{id});
+    defer st.finalize();
+    var out: std.ArrayList(Event) = .empty;
+    while (try st.step()) try out.append(a, .{ .kind = try st.dupe(a, 0), .detail = try st.dupe(a, 1), .at = st.int(2) });
+    return out.toOwnedSlice(a);
+}
+
+pub const Filter = struct {
+    stage: ?Stage = null,
+    project: ?[]const u8 = null,
+    /// Only tickets with this active flag.
+    flag: ?[]const u8 = null,
+    /// Only tickets with any active flag (the inbox), oldest ask first.
+    needs: bool = false,
+    /// Full-text search over keys, titles, bodies and comments.
+    search: ?[]const u8 = null,
+    /// Include Done tickets (always included when filtering by stage).
+    done: bool = true,
+    /// Leave out sub-tickets.
+    top: bool = false,
+    /// Only the sub-tickets of this ticket (by key).
+    parent: ?[]const u8 = null,
+};
+
+/// Words of `q` as FTS5 prefix terms ("foo" bar → "foo"* "bar"*), so user
+/// input never trips FTS5's query syntax.
+fn ftsQuery(a: std.mem.Allocator, q: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var it = std.mem.tokenizeAny(u8, q, " \t\n\"");
+    while (it.next()) |w| {
+        if (out.items.len > 0) try out.append(a, ' ');
+        try out.append(a, '"');
+        try out.appendSlice(a, w);
+        try out.appendSlice(a, "\"*");
+    }
+    return out.toOwnedSlice(a);
+}
+
+test ftsQuery {
+    const a = std.testing.allocator;
+    const q = try ftsQuery(a, "flaky  login-spec");
+    defer a.free(q);
+    try std.testing.expectEqualStrings("\"flaky\"* \"login-spec\"*", q);
+}
+
+pub fn listTickets(db: Db, a: std.mem.Allocator, f: Filter) Error![]Ticket {
+    var sql: std.ArrayList(u8) = .empty;
+    defer sql.deinit(a);
+    try sql.appendSlice(a, "SELECT " ++ ticket_cols ++ " FROM tickets t WHERE 1");
+    if (f.stage != null) try sql.appendSlice(a, " AND t.stage = ?1");
+    if (f.stage == null and !f.done) try sql.appendSlice(a, " AND t.stage != 'done'");
+    if (f.project != null) try sql.appendSlice(a, " AND t.project = ?2");
+    if (f.top) try sql.appendSlice(a, " AND t.parent IS NULL");
+    if (f.parent != null) try sql.appendSlice(a, " AND t.parent = (SELECT id FROM tickets WHERE key = ?5 COLLATE NOCASE)");
+    if (f.flag != null) try sql.appendSlice(a, " AND EXISTS (SELECT 1 FROM flags g WHERE g.ticket = t.id AND g.cleared IS NULL AND g.kind = ?3)");
+    if (f.needs) try sql.appendSlice(a, " AND EXISTS (SELECT 1 FROM flags g WHERE g.ticket = t.id AND g.cleared IS NULL)");
+    const fts = if (f.search) |q| try ftsQuery(a, q) else "";
+    if (fts.len > 0) try sql.appendSlice(a,
+        \\ AND (t.id IN (SELECT rowid FROM tickets_fts WHERE tickets_fts MATCH ?4)
+        \\  OR t.id IN (SELECT c.ticket FROM comments c JOIN comments_fts s ON s.rowid = c.id WHERE comments_fts MATCH ?4))
+    );
+    if (f.needs) {
+        try sql.appendSlice(a, " ORDER BY (SELECT min(at) FROM flags g WHERE g.ticket = t.id AND g.cleared IS NULL), t.id");
+    } else if (f.parent != null) {
+        try sql.appendSlice(a, " ORDER BY t.id");
+    } else {
+        try sql.appendSlice(a, " ORDER BY t.updated DESC, t.id DESC");
+    }
+    var st = try db.prepare(sql.items);
+    defer st.finalize();
+    if (f.stage) |s| try st.bind(1, @as([]const u8, @tagName(s)));
+    if (f.project) |p| try st.bind(2, p);
+    if (f.flag) |g| try st.bind(3, g);
+    if (fts.len > 0) try st.bind(4, fts);
+    if (f.parent) |k| try st.bind(5, k);
+    var out: std.ArrayList(Ticket) = .empty;
+    while (try st.step()) try out.append(a, try readTicket(st, a));
+    for (out.items) |*t| t.flags = try activeFlags(db, a, t.id);
+    return out.toOwnedSlice(a);
+}
+
+/// Change the given fields of a ticket.
+pub fn updateTicket(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, in: TicketInput) Error!void {
+    const t = try getTicket(db, a, key);
+    if (in.title) |v| {
+        if (v.len == 0) return error.BadInput;
+        try db.exec("UPDATE tickets SET title = ?2 WHERE id = ?1", .{ t.id, v });
+    }
+    if (in.body) |v| try db.exec("UPDATE tickets SET body = ?2 WHERE id = ?1", .{ t.id, v });
+    if (in.mode) |v| try db.exec("UPDATE tickets SET mode = ?2 WHERE id = ?1", .{ t.id, @as([]const u8, @tagName(v)) });
+    if (in.plan) |v| try db.exec("UPDATE tickets SET plan = ?2 WHERE id = ?1", .{ t.id, v });
+    if (in.target) |v| try db.exec("UPDATE tickets SET target = ?2 WHERE id = ?1", .{ t.id, v });
+    if (in.profile) |v| try db.exec("UPDATE tickets SET profile = ?2 WHERE id = ?1", .{ t.id, v });
+    if (in.skill) |v| try db.exec("UPDATE tickets SET skill = ?2 WHERE id = ?1", .{ t.id, v });
+    if (in.project.len > 0 and !std.mem.eql(u8, in.project, t.project)) {
+        _ = try getProject(db, a, in.project);
+        try db.exec("UPDATE tickets SET project = ?2 WHERE id = ?1", .{ t.id, in.project });
+    }
+    try touch(ctx, db, t.id);
+    try logEvent(ctx, db, t.id, "edited", "");
+}
+
+/// Record what a session did for a ticket (set when the dispatcher starts it).
+pub fn setSession(ctx: Ctx, db: Db, id: i64, tmux_name: []const u8, session_id: []const u8, worktree: []const u8, branch: []const u8) Error!void {
+    try db.exec("UPDATE tickets SET tmux = ?2, session_id = ?3, worktree = ?4, branch = ?5 WHERE id = ?1", .{ id, tmux_name, session_id, worktree, branch });
+    try touch(ctx, db, id);
+}
+
+/// Remove a ticket; refused while it has sub-tickets.
+pub fn removeTicket(db: Db, a: std.mem.Allocator, key: []const u8) Error!void {
+    const t = try getTicket(db, a, key);
+    if (t.children > 0) return error.Exists;
+    try db.exec("DELETE FROM tickets WHERE id = ?1", .{t.id});
+}
+
+fn touch(ctx: Ctx, db: Db, id: i64) Error!void {
+    try db.exec("UPDATE tickets SET updated = ?2 WHERE id = ?1", .{ id, now(ctx) });
+}
+
+pub fn logEvent(ctx: Ctx, db: Db, id: i64, kind: []const u8, detail: []const u8) Error!void {
+    try db.exec("INSERT INTO events (ticket, kind, detail, at) VALUES (?1, ?2, ?3, ?4)", .{ id, kind, detail, now(ctx) });
+}
+
+/// Move a ticket to `stage`. Flags follow the workflow: entering Testing sets
+/// `testing`, leaving Review or Testing clears its flag, Done clears them all.
+pub fn move(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, stage: Stage) Error!void {
+    const t = try getTicket(db, a, key);
+    if (t.stage == stage) return;
+    try moveId(ctx, db, t.id, t.stage, stage);
+}
+
+fn moveId(ctx: Ctx, db: Db, id: i64, from: Stage, to: Stage) Error!void {
+    try db.exec("UPDATE tickets SET stage = ?2 WHERE id = ?1", .{ id, @as([]const u8, @tagName(to)) });
+    var buf: [64]u8 = undefined;
+    try logEvent(ctx, db, id, "moved", std.fmt.bufPrint(&buf, "{s} -> {s}", .{ @tagName(from), @tagName(to) }) catch "");
+    if (from == .review) try clearFlagId(ctx, db, id, flag_review);
+    if (from == .testing) try clearFlagId(ctx, db, id, flag_testing);
+    if (to == .testing) try setFlagId(ctx, db, id, flag_testing, "auto", "");
+    if (to == .done) try db.exec("UPDATE flags SET cleared = ?2 WHERE ticket = ?1 AND cleared IS NULL", .{ id, now(ctx) });
+    try touch(ctx, db, id);
+}
+
+/// Set a flag (a no-op if it is already set).
+pub fn setFlag(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, kind: []const u8, source: []const u8, detail: []const u8) Error!void {
+    if (!validFlag(kind)) return error.BadInput;
+    const t = try getTicket(db, a, key);
+    try setFlagId(ctx, db, t.id, kind, source, detail);
+}
+
+fn validFlag(kind: []const u8) bool {
+    if (kind.len == 0 or kind.len > 32) return false;
+    for (kind) |ch| if (!std.ascii.isLower(ch) and !std.ascii.isDigit(ch) and ch != '-') return false;
+    return true;
+}
+
+pub fn setFlagId(ctx: Ctx, db: Db, id: i64, kind: []const u8, source: []const u8, detail: []const u8) Error!void {
+    if (try db.int("SELECT id FROM flags WHERE ticket = ?1 AND kind = ?2 AND cleared IS NULL", .{ id, kind })) |fid| {
+        // Keep its age (the inbox orders by it); refresh what it says.
+        try db.exec("UPDATE flags SET detail = ?2 WHERE id = ?1", .{ fid, detail });
+        return;
+    }
+    try db.exec("INSERT INTO flags (ticket, kind, source, detail, at) VALUES (?1, ?2, ?3, ?4, ?5)", .{ id, kind, source, detail, now(ctx) });
+    try touch(ctx, db, id);
+    try logEvent(ctx, db, id, "flagged", kind);
+}
+
+pub fn clearFlag(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, kind: []const u8) Error!void {
+    const t = try getTicket(db, a, key);
+    try clearFlagId(ctx, db, t.id, kind);
+}
+
+pub fn clearFlagId(ctx: Ctx, db: Db, id: i64, kind: []const u8) Error!void {
+    try db.exec("UPDATE flags SET cleared = ?3 WHERE ticket = ?1 AND kind = ?2 AND cleared IS NULL", .{ id, kind, now(ctx) });
+    if (db.changes() > 0) {
+        try touch(ctx, db, id);
+        try logEvent(ctx, db, id, "unflagged", kind);
+    }
+}
+
+pub const CommentResult = struct {
+    /// The ticket was in Review or Testing and went back to Running.
+    sent_back: bool = false,
+};
+
+/// Add a comment. `sent` marks one typed into the session; a sent comment
+/// on a ticket Claude said was done is a request for more work, so the
+/// ticket goes back to Running for another round.
+pub fn addComment(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, author: []const u8, body: []const u8, sent: bool) Error!CommentResult {
+    if (body.len == 0) return error.BadInput;
+    const t = try getTicket(db, a, key);
+    try db.exec("INSERT INTO comments (ticket, author, body, sent, at) VALUES (?1, ?2, ?3, ?4, ?5)", .{ t.id, author, body, sent, now(ctx) });
+    try touch(ctx, db, t.id);
+    var r: CommentResult = .{};
+    if (sent and std.mem.eql(u8, author, "you") and (t.stage == .review or t.stage == .testing)) {
+        try db.exec("UPDATE tickets SET round = round + 1 WHERE id = ?1", .{t.id});
+        try moveId(ctx, db, t.id, t.stage, .running);
+        r.sent_back = true;
+    }
+    // An answer typed into the session settles what Claude was waiting on.
+    if (sent and std.mem.eql(u8, author, "you")) {
+        try clearFlagId(ctx, db, t.id, flag_question);
+        try clearFlagId(ctx, db, t.id, flag_input);
+    }
+    return r;
+}
+
+/// Claude says the ticket is finished and needs nothing more: it moves to
+/// Review with the `review` flag, and the summary is kept as its comment.
+/// During Planning it means the plan is ready: the ticket stays in Planning
+/// with `review` (detail "plan") until the plan is approved.
+pub fn done(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, summary: []const u8) Error!void {
+    const t = try getTicket(db, a, key);
+    if (t.stage == .planning) {
+        if (summary.len > 0) try db.exec("INSERT INTO comments (ticket, author, body, sent, at) VALUES (?1, 'claude', ?2, 0, ?3)", .{ t.id, summary, now(ctx) });
+        try clearFlagId(ctx, db, t.id, flag_question);
+        try clearFlagId(ctx, db, t.id, flag_input);
+        try setFlagId(ctx, db, t.id, flag_review, "auto", "plan");
+        try logEvent(ctx, db, t.id, "plan ready", "");
+        return;
+    }
+    try db.exec("UPDATE tickets SET summary = ?2 WHERE id = ?1", .{ t.id, summary });
+    if (summary.len > 0) try db.exec("INSERT INTO comments (ticket, author, body, sent, at) VALUES (?1, 'claude', ?2, 0, ?3)", .{ t.id, summary, now(ctx) });
+    try clearFlagId(ctx, db, t.id, flag_question);
+    try clearFlagId(ctx, db, t.id, flag_input);
+    if (t.stage != .review) try moveId(ctx, db, t.id, t.stage, .review);
+    try setFlagId(ctx, db, t.id, flag_review, "auto", "");
+    try logEvent(ctx, db, t.id, "done", "");
+}
+
+/// The stage `approve` moves a ticket to: an approved plan goes to Running,
+/// a reviewed ticket to Testing, a tested one to Done.
+pub fn approvedStage(stage: Stage) ?Stage {
+    return switch (stage) {
+        .planning => .running,
+        .review => .testing,
+        .testing => .done,
+        else => null,
+    };
+}
+
+/// Approve what the ticket is waiting on; returns the stage it moved from.
+pub fn approve(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8) Error!Stage {
+    const t = try getTicket(db, a, key);
+    const to = approvedStage(t.stage) orelse return error.BadInput;
+    if (t.stage == .planning) try clearFlagId(ctx, db, t.id, flag_review);
+    try moveId(ctx, db, t.id, t.stage, to);
+    try logEvent(ctx, db, t.id, "approved", @tagName(t.stage));
+    return t.stage;
+}
+
+/// Mark a ticket as being started, so two dispatchers never start it twice.
+/// False when it already has a session (or another start claimed it).
+pub fn claimStart(db: Db, id: i64) Error!bool {
+    try db.exec("UPDATE tickets SET tmux = '(starting)' WHERE id = ?1 AND tmux = ''", .{id});
+    return db.changes() == 1;
+}
+
+/// Undo claimStart after a failed start.
+pub fn releaseStart(db: Db, id: i64) Error!void {
+    try db.exec("UPDATE tickets SET tmux = '' WHERE id = ?1 AND tmux = '(starting)'", .{id});
+}
+
+/// Move without the key lookup (the dispatcher has the ticket already).
+pub fn moveTicket(ctx: Ctx, db: Db, t: Ticket, stage: Stage) Error!void {
+    if (t.stage != stage) try moveId(ctx, db, t.id, t.stage, stage);
+}
+
+pub fn setBase(db: Db, id: i64, base: []const u8) Error!void {
+    try db.exec("UPDATE tickets SET base = ?2 WHERE id = ?1", .{ id, base });
+}
+
+/// Set the queue-mode target (once the dispatcher made a session for it).
+pub fn setTarget(db: Db, id: i64, target: []const u8) Error!void {
+    try db.exec("UPDATE tickets SET target = ?2 WHERE id = ?1", .{ id, target });
+}
+
+/// Unsent notes from you, oldest first: they go along with the first prompt.
+pub fn unsentNotes(db: Db, a: std.mem.Allocator, id: i64) Error![]Comment {
+    var st = try db.query("SELECT author, body, sent, at FROM comments WHERE ticket = ?1 AND author = 'you' AND sent = 0 ORDER BY at, id", .{id});
+    defer st.finalize();
+    var out: std.ArrayList(Comment) = .empty;
+    while (try st.step()) try out.append(a, .{ .author = try st.dupe(a, 0), .body = try st.dupe(a, 1), .sent = false, .at = st.int(3) });
+    return out.toOwnedSlice(a);
+}
+
+pub fn markNotesSent(db: Db, id: i64) Error!void {
+    try db.exec("UPDATE comments SET sent = 1 WHERE ticket = ?1 AND author = 'you' AND sent = 0", .{id});
+}
+
+// ---- tests ----
+
+const testing = std.testing;
+
+fn testCtx() Ctx {
+    return .{ .io = testing.io, .gpa = testing.allocator, .perm = testing.allocator, .env = undefined, .home = "/tmp" };
+}
+
+test "projects, tickets, flags, comments, done" {
+    const ctx = testCtx();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try Db.open(":memory:");
+    defer db.close();
+    try migrate(db);
+
+    try addProject(db, .{ .name = "qa-tool", .dir = "/x/qa-tool", .slots = 2 });
+    try testing.expectError(error.Exists, addProject(db, .{ .name = "qa-thing", .dir = "/x", .prefix = "QA" }));
+
+    const k1 = try createTicket(ctx, db, a, .{ .project = "qa-tool", .title = "Flaky login spec", .body = "fails on CI" });
+    const k2 = try createTicket(ctx, db, a, .{ .project = "qa-tool", .title = "CSV export", .plan = true });
+    try testing.expectEqualStrings("QA-1", k1);
+    try testing.expectEqualStrings("QA-2", k2);
+    try testing.expectEqual(Stage.planning, (try getTicket(db, a, "qa-2")).stage);
+
+    try setFlag(ctx, db, a, k1, flag_question, "auto", "{\"q\":\"which?\"}");
+    try setFlag(ctx, db, a, k1, flag_question, "auto", "again");
+    const t1 = try getTicket(db, a, k1);
+    try testing.expectEqual(@as(usize, 1), t1.flags.len);
+    try testing.expectEqualStrings("again", t1.flags[0].detail);
+    try testing.expectEqual(@as(usize, 1), (try listTickets(db, a, .{ .needs = true })).len);
+
+    // Answering clears it; done moves to Review with the review flag.
+    _ = try addComment(ctx, db, a, k1, "you", "use the staging DB", true);
+    try testing.expectEqual(@as(usize, 0), (try getTicket(db, a, k1)).flags.len);
+    try done(ctx, db, a, k1, "Fixed the race in the login spec");
+    const t2 = try getTicket(db, a, k1);
+    try testing.expectEqual(Stage.review, t2.stage);
+    try testing.expectEqualStrings(flag_review, t2.flags[0].kind);
+
+    // A sent comment on a done ticket sends it back for another round.
+    const r = try addComment(ctx, db, a, k1, "you", "also cover logout", true);
+    try testing.expect(r.sent_back);
+    const t3 = try getTicket(db, a, k1);
+    try testing.expectEqual(Stage.running, t3.stage);
+    try testing.expectEqual(@as(i64, 2), t3.round);
+    try testing.expectEqual(@as(usize, 0), t3.flags.len);
+
+    // Search covers titles and comments.
+    try testing.expectEqual(@as(usize, 1), (try listTickets(db, a, .{ .search = "logout" })).len);
+    try testing.expectEqual(@as(usize, 1), (try listTickets(db, a, .{ .search = "csv" })).len);
+
+    // Testing sets its flag; Done clears every flag.
+    try move(ctx, db, a, k1, .testing);
+    try testing.expectEqualStrings(flag_testing, (try getTicket(db, a, k1)).flags[0].kind);
+    try move(ctx, db, a, k1, .done);
+    try testing.expectEqual(@as(usize, 0), (try getTicket(db, a, k1)).flags.len);
+    try testing.expectEqual(@as(usize, 1), (try listTickets(db, a, .{ .done = false })).len);
+
+    // Sub-tickets: in the parent's project, hidden by `top`, listed by parent.
+    const sub = try createTicket(ctx, db, a, .{ .parent = k2, .title = "CSV quoting rules" });
+    try testing.expectEqualStrings("QA-3", sub);
+    try testing.expectEqualStrings("QA-2", (try getTicket(db, a, sub)).parent);
+    try testing.expectEqual(@as(i64, 1), (try getTicket(db, a, k2)).children);
+    try testing.expectEqual(@as(usize, 1), (try listTickets(db, a, .{ .parent = k2 })).len);
+    try testing.expectEqual(@as(usize, 2), (try listTickets(db, a, .{ .top = true })).len);
+    try testing.expectError(error.Exists, removeTicket(db, a, k2));
+    try removeTicket(db, a, sub);
+
+    try testing.expectError(error.Exists, removeProject(db, "qa-tool"));
+    try removeTicket(db, a, k1);
+    try removeTicket(db, a, k2);
+    try removeProject(db, "qa-tool");
+}

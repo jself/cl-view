@@ -54,7 +54,7 @@ work = ~/.claude-work
 personal = ~/.claude
 ```
 
-`default`, `operator` and dotted keys (`web.*`) are settings; every other key is a profile.
+`default`, `operator` and dotted keys (`web.*`, `board.*`) are settings; every other key is a profile.
 `-p <profile>` selects a profile, and `operator` picks the operator's
 profile (falling back to `default`). If `CLAUDE_CONFIG_DIR` is set when
 `cl` runs, it overrides `default`: the profile with that directory is used, or
@@ -79,6 +79,8 @@ cl alert <text> | --clear flag the chooser header from the operator
 cl web                    serve the chooser to a browser (foreground)
 cl web password           set the web password (stored as an argon2id hash)
 cl web start | stop       run the web server in the background / stop it
+cl ticket | t <command>   the ticket board (see Board)
+cl project <command>      projects that tickets belong to
 
 launch options:
   -p, --profile <name>    profile from the config
@@ -181,6 +183,143 @@ web.password = $argon2id$...    # written by `cl web password`
   same-origin connections.
 - Attaching from the phone resizes that session to the phone's width
   (`window-size latest`); it switches back when you use it at the desk.
+
+## Board
+
+A ticket board on top of the sessions, stored in SQLite at
+`<board.dir>/board.db` (default `~/.local/state/cl`). Use it in the browser
+at `/board` on `cl web` (the terminal page links to it), or with `cl ticket`;
+both do the same things. The design notes are in `docs/board-plan.md`.
+
+```
+board.dir = ~/.local/state/cl
+board.worktrees = ~/.local/share/cl/worktrees
+board.dispatch = true            # cl web starts queued tickets
+board.trust_worktrees = true     # say yes to Claude's folder-trust dialog in new worktrees
+```
+
+Every ticket belongs to a project, which gives it a key prefix:
+
+```
+cl project add qa-tool ~/devel/qa-tool --slots 2 --mode worktree   # QA-1, QA-2, ...
+cl project add boats ~/devel/boats --prefix BOAT
+cl project list | set <name> [options] | rm <name>
+```
+
+Stages are the workflow: backlog, planning (optional), queued, running,
+review, testing, done. Flags say what needs you and are separate from the
+stage: `input` (a permission prompt), `question`, `review`, `testing`, or any
+word you like.
+
+```
+cl t new qa-tool "Flaky login spec" -m "fails one run in five" [--worktree | --queue] [--plan]
+cl t list [--stage review] [--project qa-tool] [--flag question] [--search login] [--open] [--json]
+cl t needs                       the inbox: tickets with a flag, oldest first
+cl t show QA-1 [--json]          details, flags, comments and activity
+cl t edit QA-1 --title ... | move QA-1 testing | rm QA-1
+cl t comment QA-1 "also cover logout" --send
+cl t flag QA-1 needs-design "which layout?" | unflag QA-1 needs-design
+cl t done QA-1 --summary "Fixed the race"
+```
+
+- `done` is how Claude says a ticket is finished and needs nothing more: it
+  moves to review with the `review` flag, and the summary becomes a comment.
+- `comment --send` also types the comment into the ticket's session. On a
+  ticket in review or testing it means "not done yet": the ticket goes back
+  to running and its round goes up. Without `--send` a comment is a note.
+- Entering testing sets `testing`; leaving review or testing clears its flag;
+  done clears every flag.
+- Inside a ticket's session (`CL_TICKET` set) the key can be left out:
+  `cl t done --summary ...`, `cl t comment "..."` (as claude).
+- `--plan` starts a ticket in planning: Claude runs in plan mode, interviews
+  you (`--skill grilling` or `--skill wayfinder` names a skill for it), posts
+  the plan and runs `done`, which means "plan ready" there. `cl t approve`
+  moves it to running and tells Claude to build it; on a ticket in review or
+  testing, approve moves it on a stage.
+
+### Running tickets
+
+A ticket runs one of two ways (`--queue` is the default, a project can set
+`--mode worktree`):
+
+- **queue**: typed into a session when that session is idle and has no other
+  ticket in progress (planning, running, review or testing; it is free once
+  that ticket is done): `--target <tmux name>`, else the parent's session for
+  a sub-ticket, else the session of the project's ticket in progress, else a
+  new session in the project's directory.
+- **worktree**: its own worktree at `<board.worktrees>/<project>/<key-title>`
+  (a `git worktree` with a branch of that name, or a `jj workspace`) and its
+  own session, up to the project's `--slots` in progress at once.
+
+```
+cl t move QA-1 queued      the dispatcher starts it when it can
+cl t start QA-1 [--now]    start it now (--now: type into a busy queue session anyway)
+cl t dispatch [--once]     the dispatcher; `cl web` runs it too
+cl t cleanup QA-1 --branch remove the worktree and its merged branch
+```
+
+The first message tells Claude the ticket (with any notes you added before
+it started) and how to finish: write a review guide for gutter
+(`.claude/review-guide.md`), a test plan if there is something to try
+(`.claude/test-plan.md`: Setup, Launch, Checks), then `cl ticket done
+<key> --summary ...`. An idle session that never said done stays in running.
+
+Sessions cl starts for tickets get `CL_TICKET` and hooks (`--settings
+<board.dir>/claude-hooks.json`): a permission prompt sets `input`, and the
+end of a turn clears it. A ticket whose session goes away gets `ended`;
+`cl t start` starts it again.
+
+### What needs you
+
+cl watches each ticket's session (every few seconds, in `cl web` or `cl t
+dispatch`). When Claude waits, it reads what for from local files: the
+session registry says it is waiting, the transcript holds the pending
+AskUserQuestion (its questions and options) or the command a permission
+prompt is about, and the pane shows the menu's numbered options. That
+becomes the ticket's `question` or `input` flag, with the details, and clears
+when the session moves on.
+
+```
+cl t answer QA-1 2                 pick option 2 (a question, or a permission prompt)
+cl t answer QA-1 "Green please"    your own words ("Type something")
+cl t answer QA-1 1 "Large"         two questions: one answer each, then Submit
+cl t key QA-1 esc | interrupt      press a key in the session
+```
+
+Answers are keypresses in the session, the same as typing them yourself.
+
+### Review and testing
+
+```
+cl t gutter QA-1 [--stop]          gutter on the ticket's changes, with Claude's review guide
+cl t send-review QA-1              send the review you submitted in gutter back to Claude
+cl t testplan QA-1                 Claude's test plan: setup steps, launch command, checks
+cl t launch QA-1 [--stop]          run the launch command (tmux session clrun_qa-1)
+cl t test QA-1                     walk through the plan here; failures go back to Claude
+cl t approve QA-1                  review -> testing -> done
+```
+
+gutter diffs against the revision the ticket started from. It only listens on
+127.0.0.1, so when the board opens it, `cl web` also opens the same port on
+its other `web.listen` addresses (tailscale) and forwards it, while that
+ticket's gutter runs. Test results that all pass move the ticket to done; a
+failure sends them to Claude for another round.
+
+### The web board
+
+`/board` shows Board, Lanes (a row per project) and List views, with "Needs
+you" across the top: every ask, with quick answers. Filters pick what needs
+you, a project, and whether sub-tickets show. A ticket opens in a popup:
+answer its questions, comment or send it back, watch its session or open it
+in the terminal (`/?attach=<session>`), open gutter, launch and test, see
+its sub-tickets and activity, and edit it. On a phone the columns swipe and
+the popup fills the screen.
+
+- Sub-tickets are tickets with a parent: their own key, stage, flags and
+  comments. `cl t new --parent QA-1 "title"`, or from the ticket's own
+  session `cl t sub "title"`. `list --top` leaves them out, `list --parent
+  QA-1` lists them, and `show` includes them. A ticket with sub-tickets can't
+  be removed until they are.
 
 ## Notes
 

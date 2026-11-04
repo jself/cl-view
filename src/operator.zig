@@ -29,6 +29,15 @@ const instructions =
     \\                                     bring a closed session back (use the values from cl closed);
     \\                                     if Claude deleted its transcript, this starts a new session there
     \\
+    \\The ticket board (run `cl ticket` for every command):
+    \\  cl ticket needs --json             tickets waiting on the human, oldest first (the inbox)
+    \\  cl ticket list [--stage <s>] [--project <p>] [--json]
+    \\  cl ticket show <key> [--json]      details, flags, sub-tickets, comments, activity
+    \\  cl ticket new <project> <title> -m <details> [--worktree | --queue] [--plan] [--stage queued]
+    \\  cl ticket comment <key> <text> --send   type it into the ticket's session (a reviewed ticket goes back to work)
+    \\  cl ticket move <key> <stage> / approve <key> / start <key>
+    \\Tickets in the inbox are for the human; tell them, and act only on what they asked you to handle.
+    \\
     \\Statuses: busy (working), idle (waiting for its next prompt), shell (idle, with a
     \\background task such as a dev server still running), blocked (needs input, usually a
     \\permission prompt or a question), waiting (blocked on something external), starting,

@@ -36,6 +36,10 @@
             .url = "https://github.com/rockorager/libvaxis/archive/c0e8b09.tar.gz",
             .hash = "vaxis-0.6.0-BWNV_FG5CgDzWjc9UtIppV_SLu5AQbs_cPNA8i4EMFMq",
         },
+        .sqlite = .{
+            .url = "https://sqlite.org/2025/sqlite-amalgamation-3500400.zip",
+            .hash = "N-V-__8AAHCbqABM_X5RTjbDBDBWErxZE8tJzmtEnLOLRHGx",
+        },
     },
     .paths = .{
         "build.zig",

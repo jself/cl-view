@@ -58,6 +58,8 @@ const Registry = struct {
     nameSource: ?[]const u8 = null,
     statusUpdatedAt: ?i64 = null,
     updatedAt: ?i64 = null,
+    /// While waiting: "permission prompt", "input needed", ...
+    waitingFor: ?[]const u8 = null,
     sessionId: ?[]const u8 = null,
     cwd: ?[]const u8 = null,
     /// Set while Claude's agents view (Left at an empty prompt) is open: the
@@ -96,6 +98,12 @@ pub const Info = struct {
     summary: []const u8,
     /// Claude's current session id, "" if unknown.
     session_id: []const u8,
+    /// What a waiting session waits for ("permission prompt", "input needed"), "" if unknown.
+    waiting_for: []const u8 = "",
+    /// The session's working directory, "" if unknown.
+    cwd: []const u8 = "",
+    /// The profile's Claude config dir.
+    config_dir: []const u8 = "",
 };
 
 pub const StatusMap = std.StringHashMapUnmanaged(Info);
@@ -134,6 +142,9 @@ pub fn readStatuses(ctx: Ctx, arena: std.mem.Allocator, cfg: config.Config) !Sta
                 .updated_ms = reg.updatedAt orelse 0,
                 .summary = lastReply(ctx, arena, config_dir, reg.cwd, session_id) catch "",
                 .session_id = try arena.dupe(u8, session_id orelse ""),
+                .waiting_for = try arena.dupe(u8, reg.waitingFor orelse ""),
+                .cwd = try arena.dupe(u8, reg.cwd orelse ""),
+                .config_dir = config_dir,
             };
             if (reg.tmux) |target| {
                 const colon = std.mem.indexOfScalar(u8, target, ':') orelse target.len;
@@ -378,13 +389,28 @@ test "promptVisible ignores menus" {
     try std.testing.expect(!promptVisible("\n  ❯ 1. Yes\n    2. Not now\n"));
 }
 
+/// Claude's "do you trust this folder?" dialog.
+pub fn trustDialog(text: []const u8) bool {
+    return std.mem.indexOf(u8, text, "Yes, I trust this folder") != null;
+}
+
 /// Wait (up to 60 s) for the prompt, then type `message` and press Enter.
-pub fn sendInitialMessage(ctx: Ctx, tmux_name: []const u8, message: []const u8) !void {
+/// With `accept_trust`, answer the folder-trust dialog with yes (for
+/// worktrees cl made from a repo you put on the board).
+pub fn sendInitialMessage(ctx: Ctx, tmux_name: []const u8, message: []const u8, accept_trust: bool) !void {
     var tries: usize = 0;
+    var trusted = false;
     while (tries < 300) : (tries += 1) {
         const text = tmux.capturePlain(ctx, tmux_name) catch return error.TmuxFailed;
         defer ctx.gpa.free(text);
         if (promptVisible(text)) break;
+        if (accept_trust and !trusted and trustDialog(text)) {
+            // "No, exit" is selected first: move to "Yes, I trust this folder".
+            tmux.runQuiet(ctx, &.{ "send-keys", "-t", tmux_name, "Down" }) catch {};
+            ctx.sleepMs(300);
+            tmux.runQuiet(ctx, &.{ "send-keys", "-t", tmux_name, "Enter" }) catch {};
+            trusted = true;
+        }
         ctx.sleepMs(200);
     } else return error.PromptTimeout;
     ctx.sleepMs(300);

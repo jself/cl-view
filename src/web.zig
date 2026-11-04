@@ -7,6 +7,9 @@ const Ctx = @import("ctx.zig");
 const config = @import("config.zig");
 const tmux = @import("tmux.zig");
 const pty = @import("pty.zig");
+const dispatch = @import("dispatch.zig");
+const review = @import("review.zig");
+const web_board = @import("web_board.zig");
 
 const index_html = @embedFile("web/index.html");
 const login_html = @embedFile("web/login.html");
@@ -63,6 +66,7 @@ fn serve(ctx: Ctx, cfg: config.Config) !void {
     }
     if (threads.items.len == 0) fail("web.listen is empty", .{});
     (try std.Thread.spawn(.{}, reapLoop, .{&state})).detach();
+    if (cfg.board.dispatch) (try std.Thread.spawn(.{}, dispatch.loop, .{ ctx, cfg, &logLine })).detach();
     for (threads.items) |t| t.join();
 }
 
@@ -118,6 +122,110 @@ fn listenLoop(state: *State, spec: Spec) void {
             t.detach();
         }
     }
+}
+
+// ---- gutter relay ----
+
+/// gutter listens on 127.0.0.1 only. To open it from another machine (the
+/// phone, over tailscale), the same port is opened on this server's other
+/// listen addresses and relayed to it, only while that ticket's gutter runs.
+const Relay = struct { port: u16, key: [32]u8, key_len: usize };
+var relays: [32]Relay = undefined;
+var relay_count: usize = 0;
+var relay_mutex: std.Io.Mutex = .init;
+
+/// Make the ticket's gutter on 127.0.0.1:`port` reachable on the other
+/// web.listen addresses.
+pub fn relayGutter(ctx: Ctx, cfg: config.Config, key: []const u8, port: u16) void {
+    relay_mutex.lockUncancelable(ctx.io);
+    defer relay_mutex.unlock(ctx.io);
+    for (relays[0..relay_count]) |*r| if (r.port == port) {
+        // Same port, maybe a new ticket: point it there.
+        r.key_len = @min(key.len, r.key.len);
+        @memcpy(r.key[0..r.key_len], key[0..r.key_len]);
+        return;
+    };
+    if (relay_count == relays.len) return;
+    var r: Relay = .{ .port = port, .key = undefined, .key_len = @min(key.len, 32) };
+    @memcpy(r.key[0..r.key_len], key[0..r.key_len]);
+    relays[relay_count] = r;
+    relay_count += 1;
+    var it = std.mem.splitScalar(u8, cfg.web.listen, ',');
+    while (it.next()) |raw| {
+        const text = std.mem.trim(u8, raw, " \t");
+        if (text.len == 0) continue;
+        const spec = parseSpec(text);
+        var ip_buf: [64]u8 = undefined;
+        const host = if (std.mem.eql(u8, spec.host, "tailscale")) tailscaleIp(ctx, &ip_buf) catch continue else spec.host;
+        if (std.mem.startsWith(u8, host, "127.") or std.mem.eql(u8, host, "::1") or std.mem.eql(u8, host, "localhost")) continue;
+        const addr = std.Io.net.IpAddress.parse(host, port) catch continue;
+        const t = std.Thread.spawn(.{}, relayListen, .{ ctx, addr, port }) catch continue;
+        t.detach();
+    }
+}
+
+/// The ticket the relay on `port` is for, while its gutter still uses that port.
+fn relayLive(ctx: Ctx, port: u16) bool {
+    var key_buf: [32]u8 = undefined;
+    var key: []const u8 = "";
+    {
+        relay_mutex.lockUncancelable(ctx.io);
+        defer relay_mutex.unlock(ctx.io);
+        for (relays[0..relay_count]) |r| if (r.port == port) {
+            @memcpy(key_buf[0..r.key_len], r.key[0..r.key_len]);
+            key = key_buf[0..r.key_len];
+        };
+    }
+    if (key.len == 0) return false;
+    var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);
+    defer arena_state.deinit();
+    const live = review.gutterPort(ctx, arena_state.allocator(), key) catch return false;
+    return live == port;
+}
+
+fn relayListen(ctx: Ctx, addr: std.Io.net.IpAddress, port: u16) void {
+    var server = addr.listen(ctx.io, .{ .reuse_address = true }) catch |err| {
+        logf("gutter relay on {f}: {s}", .{ addr, @errorName(err) });
+        return;
+    };
+    defer server.deinit(ctx.io);
+    while (true) {
+        const client = server.accept(ctx.io) catch return;
+        if (!relayLive(ctx, port)) {
+            client.close(ctx.io);
+            continue;
+        }
+        const t = std.Thread.spawn(.{}, relayConn, .{ ctx, client, port }) catch {
+            client.close(ctx.io);
+            continue;
+        };
+        t.detach();
+    }
+}
+
+fn relayConn(ctx: Ctx, client: std.Io.net.Stream, port: u16) void {
+    defer client.close(ctx.io);
+    const local = std.Io.net.IpAddress.parse("127.0.0.1", port) catch return;
+    const upstream = local.connect(ctx.io, .{ .mode = .stream }) catch return;
+    defer upstream.close(ctx.io);
+    const back = std.Thread.spawn(.{}, pipe, .{ ctx, upstream, client }) catch return;
+    pipe(ctx, client, upstream);
+    back.join();
+}
+
+/// Copy `from` to `to` until `from` ends, then end `to`'s sending side.
+fn pipe(ctx: Ctx, from: std.Io.net.Stream, to: std.Io.net.Stream) void {
+    var rbuf: [16 * 1024]u8 = undefined;
+    var wbuf: [16 * 1024]u8 = undefined;
+    var r = from.reader(ctx.io, &rbuf);
+    var w = to.writer(ctx.io, &wbuf);
+    while (true) {
+        const n = r.interface.stream(&w.interface, .limited(wbuf.len)) catch break;
+        if (n == 0) break;
+        w.interface.flush() catch break;
+    }
+    w.interface.flush() catch {};
+    to.shutdown(ctx.io, .send) catch {};
 }
 
 /// The tailscale CLI: on PATH, or inside the app on macOS (Mac App Store and
@@ -203,6 +311,7 @@ fn handleRequest(state: *State, req: *std.http.Server.Request) !bool {
         try req.respond(if (authed) index_html else loginPage(""), .{ .extra_headers = &html_headers });
         return false;
     }
+    if (try web_board.handle(state.ctx, state.cfg, req, path, authed)) return false;
     try req.respond("not found\n", .{ .status = .not_found });
     return false;
 }
@@ -227,7 +336,7 @@ fn header(req: *const std.http.Server.Request, name: []const u8) ?[]const u8 {
 }
 
 /// Refuse cross-site WebSocket connections: the Origin must name this host.
-fn sameOrigin(req: *const std.http.Server.Request) bool {
+pub fn sameOrigin(req: *const std.http.Server.Request) bool {
     const origin = header(req, "origin") orelse return false;
     const host = header(req, "host") orelse return false;
     const rest = if (std.mem.startsWith(u8, origin, "http://"))
@@ -379,7 +488,8 @@ const Terminal = struct {
 };
 
 /// Find the page's terminal (taking a reference) or start a new one.
-fn acquireTerminal(state: *State, term_id: []const u8, cols: u16, rows: u16) !struct { *Terminal, bool } {
+/// `attach` names a tmux session to open instead of the chooser ("" for the chooser).
+fn acquireTerminal(state: *State, term_id: []const u8, attach: []const u8, cols: u16, rows: u16) !struct { *Terminal, bool } {
     const ctx = state.ctx;
     state.mutex.lockUncancelable(ctx.io);
     defer state.mutex.unlock(ctx.io);
@@ -403,7 +513,8 @@ fn acquireTerminal(state: *State, term_id: []const u8, cols: u16, rows: u16) !st
         try env.append(arena, try std.fmt.allocPrint(arena, "{s}={s}", .{ k, e.value_ptr.* }));
     }
     try env.appendSlice(arena, &.{ "TERM=xterm-256color", "COLORTERM=truecolor" });
-    t.pty = pty.spawn(arena, &.{ state.exe, "list" }, env.items, cols, rows) catch |err| {
+    const argv: []const []const u8 = if (attach.len > 0) &.{ state.exe, "attach", try arena.dupe(u8, attach) } else &.{ state.exe, "list" };
+    t.pty = pty.spawn(arena, argv, env.items, cols, rows) catch |err| {
         logf("pty: {s}", .{@errorName(err)});
         return err;
     };
@@ -460,6 +571,10 @@ fn serveTerminal(state: *State, req: *std.http.Server.Request, key: []const u8) 
     const raw_id = termId(req.head.target);
     @memcpy(id_buf[0..raw_id.len], raw_id);
     const term_id = id_buf[0..raw_id.len];
+    var attach_buf: [64]u8 = undefined;
+    const raw_attach = attachTarget(req.head.target);
+    @memcpy(attach_buf[0..raw_attach.len], raw_attach);
+    const attach = attach_buf[0..raw_attach.len];
     var ws = try req.respondWebSocket(.{ .key = key });
     try ws.flush();
 
@@ -469,7 +584,7 @@ fn serveTerminal(state: *State, req: *std.http.Server.Request, key: []const u8) 
     const first = ws.readSmallMessage() catch return;
     if (first.data.len > 0 and first.data[0] == '1') parseSize(first.data[1..], &cols, &rows);
 
-    const t, const fresh = acquireTerminal(state, term_id, cols, rows) catch return;
+    const t, const fresh = acquireTerminal(state, term_id, attach, cols, rows) catch return;
     defer releaseTerminal(state, t);
     const tty = t.pty.tty;
     {
@@ -533,6 +648,22 @@ fn termId(target: []const u8) []const u8 {
     if (val.len > 32) return "";
     for (val) |c| if (!std.ascii.isAlphanumeric(c)) return "";
     return val;
+}
+
+/// The session to open, from `/ws?t=<id>&a=<tmux name>`: letters, digits, - and _.
+fn attachTarget(target: []const u8) []const u8 {
+    const q = std.mem.indexOf(u8, target, "&a=") orelse return "";
+    const v = target[q + 3 ..];
+    const val = v[0 .. std.mem.indexOfScalar(u8, v, '&') orelse v.len];
+    if (val.len > 64) return "";
+    for (val) |c| if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '_') return "";
+    return val;
+}
+
+test attachTarget {
+    try std.testing.expectEqualStrings("cl_qa-1_ab12", attachTarget("/ws?t=x&a=cl_qa-1_ab12"));
+    try std.testing.expectEqualStrings("", attachTarget("/ws?t=x&a=a;b"));
+    try std.testing.expectEqualStrings("", attachTarget("/ws?t=x"));
 }
 
 test termId {
@@ -688,6 +819,10 @@ fn readSecret(ctx: Ctx, prompt: []const u8, buf: []u8) ![]const u8 {
 }
 
 /// Server log line, timestamped.
+fn logLine(text: []const u8) void {
+    logf("{s}", .{text});
+}
+
 fn logf(comptime fmt: []const u8, args: anytype) void {
     var buf: [512]u8 = undefined;
     const io = std.Io.Threaded.global_single_threaded.io();
