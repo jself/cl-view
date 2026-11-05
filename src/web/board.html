@@ -73,6 +73,9 @@
          gap: calc(8 * var(--u)); min-height: calc(160 * var(--u)); scroll-snap-align: start; }
   .col h2 { margin: 0; font-size: calc(13 * var(--u)); font-weight: 600; display: flex; gap: calc(8 * var(--u)); align-items: center; padding: calc(2 * var(--u)) calc(4 * var(--u)); }
   .col h2 .n { font: calc(12 * var(--u)) var(--mono); color: var(--muted); }
+  .add { width: 100%; min-height: calc(34 * var(--u)); border: 1px dashed var(--line); border-radius: calc(10 * var(--u)); background: none;
+         color: var(--muted); font-size: calc(18 * var(--u)); line-height: 1; cursor: pointer; }
+  .add:hover { color: var(--fg); border-color: var(--muted); background: #18191c; }
   .card { width: 100%; text-align: left; background: var(--card); border: 1px solid var(--line); border-radius: calc(10 * var(--u)); padding: calc(11 * var(--u));
           display: flex; flex-direction: column; gap: calc(6 * var(--u)); cursor: pointer; color: var(--fg); }
   .card.hot { border-color: #f5a524; }
@@ -406,14 +409,14 @@ const inColumn = (rows, stage) => { const cs = rows.filter((r) => r.ticket.stage
   return stage === "done" ? cs : cs.sort((a, b) => a.ticket.rank - b.ticket.rank || a.ticket.id - b.ticket.id); };
 function boardHtml(rows) {
   return `<div class="cols">${columns().map((s) => { const cs = inColumn(rows, s);
-    return `<section class="col" data-drop="${s}"><h2>${STAGE_NAME[s]}<span class="n">${cs.length}</span></h2>${cs.map((r) => cardHtml(r)).join("")}</section>`; }).join("")}</div>`;
+    return `<section class="col" data-drop="${s}"><h2>${STAGE_NAME[s]}<span class="n">${cs.length}</span></h2>${cs.map((r) => cardHtml(r)).join("")}<button type="button" class="add" data-new-when="${s}" aria-label="New ticket in ${STAGE_NAME[s]}">+</button></section>`; }).join("")}</div>`;
 }
 function lanesHtml(rows) {
   const projects = state.data.projects.filter((p) => !state.project || p.name === state.project);
   return `<div class="lanes"><table><thead><tr><th></th>${columns().map((s) => `<th>${STAGE_NAME[s]}</th>`).join("")}</tr></thead><tbody>
     ${projects.map((p) => { const mine = rows.filter((r) => r.ticket.project === p.name);
       const running = mine.filter((r) => ["running", "planning"].includes(r.ticket.stage) && r.status && r.status !== "gone").length;
-      return `<tr><td class="lane"><div><strong>${esc(p.name)}</strong><span class="mono muted" style="font-size:calc(11.5 * var(--u))">${p.mode === "worktree" ? `${running} of ${p.slots} running` : "queue"}</span></div></td>
+      return `<tr><td class="lane"><div><strong>${esc(p.name)}</strong><span class="mono muted" style="font-size:calc(11.5 * var(--u))">${p.mode === "worktree" ? `${running} of ${p.slots} running` : "queue"}</span><button type="button" class="add" data-new-project="${esc(p.name)}" aria-label="New ticket in ${esc(p.name)}">+</button></div></td>
         ${columns().map((s) => `<td data-drop="${s}" data-project="${esc(p.name)}"><div>${inColumn(mine, s).map((r) => cardHtml(r, true)).join("")}</div></td>`).join("")}</tr>`; }).join("")}
   </tbody></table></div>`;
 }
@@ -582,11 +585,12 @@ function detailsTab(d) {
 // The new-ticket form starts from the settings of the last ticket created here.
 const NEW_KEEP = ["when", "mode", "target", "skill", "profile"];
 const lastNew = () => { try { return JSON.parse(store("cl-new") || "{}") || {}; } catch { return {}; } };
-function openNew(parentKey) {
+// pick: { project, when } from a column's or lane's + button; it wins over the remembered choices.
+function openNew(parentKey, pick = {}) {
   const d = state.data; const parent = parentKey ? d.tickets.find((r) => r.ticket.key === parentKey)?.ticket : null;
   const last = lastNew();
   const lastProj = d.projects.some((x) => x.name === last.project) ? last.project : "";
-  const proj = parent?.project || state.project || lastProj || d.projects[0]?.name || "";
+  const proj = parent?.project || pick.project || state.project || lastProj || d.projects[0]?.name || "";
   const p = d.projects.find((x) => x.name === proj);
   document.getElementById("newBody").innerHTML = `
     <div class="head"><h1 style="flex:1">${parent ? "New sub-ticket of " + esc(parent.key) : "New ticket"}</h1><button type="button" class="btn" id="closeNew">Close</button></div>
@@ -611,6 +615,8 @@ function openNew(parentKey) {
     if (el.tagName === "SELECT" && ![...el.options].some((o) => o.value === v)) continue;
     el.value = v;
   }
+  // Only backlog, planning and queued are choices under When; other columns keep the default.
+  if (pick.when && [...form.elements.when.options].some((o) => o.value === pick.when)) form.elements.when.value = pick.when;
   document.getElementById("newDlg").showModal();
 }
 async function submitNew(form) {
@@ -794,6 +800,7 @@ document.addEventListener("click", async (e) => {
   if (el.id === "subsBtn") { state.subs = !state.subs; store("cl-subs", state.subs ? "1" : "0"); render(); return; }
   if (el.id === "needsToggle") { state.needsOpen = !state.needsOpen; store("cl-needs", state.needsOpen ? "1" : "0"); renderNeeds(); return; }
   if (el.id === "newBtn") return openNew(null);
+  if (ds.newWhen || ds.newProject) return openNew(null, { when: ds.newWhen, project: ds.newProject });
   if (el.id === "closeNew") return document.getElementById("newDlg").close();
   if (el.id === "closeDlg") { document.getElementById("ticketDlg").close(); return; }
   if (ds.finish !== undefined) { document.getElementById("finishDlg").close(ds.finish); return; }
