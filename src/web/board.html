@@ -340,7 +340,7 @@ function renderNeeds() {
       : f.kind === "review" ? `<button type="button" class="btn primary" data-open="${esc(t.key)}" data-tab="review">Review</button>`
       : f.kind === "testing" ? `<button type="button" class="btn primary" data-open="${esc(t.key)}" data-tab="test">Test it</button>`
       : `<button type="button" class="btn primary" data-open="${esc(t.key)}" data-tab="needs">Open</button>`;
-    const shell = t.tmux && r.status && r.status !== "gone" ? `<a class="btn" href="/?attach=${encodeURIComponent(t.tmux)}">Shell</a>` : "";
+    const shell = t.tmux && r.status && r.status !== "gone" ? `<a class="btn" href="${shellHref(t)}">Shell</a>` : "";
     return `<div class="ask"><div class="pills"><span class="pill ${flagClass(f.kind)}">${esc(flagLabel(f))}</span><span class="mono muted" style="font-size:calc(11.5 * var(--u))">${esc(t.key)} · ${ago(f.at)}</span></div>
       <div style="font-weight:500">${esc(t.title)}</div><div class="what">${esc(askText(t, f))}</div>
       ${quick ? `<div class="acts">${quick}</div>` : ""}<div class="acts">${main}${shell}</div></div>`;
@@ -393,6 +393,8 @@ function listHtml(rows) {
 }
 
 // ---- ticket popup ----
+// The terminal page shows the ticket's title above the session.
+function shellHref(t) { return `/?attach=${encodeURIComponent(t.tmux)}&ticket=${encodeURIComponent(t.key)}`; }
 async function openTicket(key, tab) {
   state.open = key; state.tab = tab || null; state.picks = {}; state.other = {}; state.checks = {};
   document.getElementById("ticketBody").innerHTML = `<p class="muted">Loading ${esc(key)}…</p>`;
@@ -434,7 +436,7 @@ function renderDetailInner() {
   const planReady = t.stage === "planning" && t.flags.some((f) => f.kind === "review");
   const approve = planReady ? "Approve plan" : t.stage === "review" ? "Approve, to testing" : t.stage === "testing" && !t.finishing ? "Tested, done" : "";
   const acts = [];
-  if (liveSession) acts.push(`<a class="btn primary" href="/?attach=${encodeURIComponent(t.tmux)}">Open shell</a>`);
+  if (liveSession) acts.push(`<a class="btn primary" href="${shellHref(t)}">Open shell</a>`);
   if (!liveSession && t.stage !== "done") acts.push(`<button type="button" class="btn primary" data-act="start">${t.tmux ? "Start again" : "Start now"}</button>`);
   if (liveSession && (d.guide || t.worktree)) acts.push(`<button type="button" class="btn" data-act="gutter">Open in gutter</button>`);
   if (approve) acts.push(`<button type="button" class="btn" data-act="approve">${approve}</button>`);
@@ -471,7 +473,7 @@ function tabHtml(d) {
 }
 function needsTab(d) {
   const t = d.ticket; const f = t.flags.find((x) => x.kind === "question") || t.flags.find((x) => x.kind === "input"); const det = flagDetail(f) || {};
-  const shell = `<a class="btn" href="/?attach=${encodeURIComponent(t.tmux)}">Answer in the shell</a>`;
+  const shell = `<a class="btn" href="${shellHref(t)}">Answer in the shell</a>`;
   if (f.kind === "question" && det.questions?.length) {
     return det.questions.map((q, qi) => `<div class="q"><span class="muted" style="font-size:calc(12 * var(--u))">${esc(q.header || "Question")}${q.multiSelect ? " · pick any" : ""}</span>
         <div style="font-size:calc(15 * var(--u))">${esc(q.question)}</div>

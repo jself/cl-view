@@ -12,6 +12,15 @@
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); overflow: hidden; }
   body { display: flex; flex-direction: column; height: 100dvh; }
+  /* Shown over an opened session or the chat: what it is, and an X back to the board. */
+  #head { display: flex; align-items: center; gap: 8px; padding: 4px 4px 4px 10px; background: var(--bar); flex-shrink: 0;
+          font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
+  #head[hidden] { display: none; }
+  #head .key { color: var(--muted); flex-shrink: 0; }
+  #head .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #head a { display: grid; place-items: center; width: 36px; height: 32px; flex-shrink: 0; border-radius: 8px;
+            color: var(--fg); font-size: 18px; text-decoration: none; }
+  #head a:hover { background: var(--key); }
   #term { flex: 1; min-height: 0; padding: 4px 0 0 4px; }
   /* Wraps to fit the screen; buttons stretch to fill each row. */
   #keys { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
@@ -31,6 +40,8 @@
 </style>
 </head>
 <body>
+<div id="head" hidden><span class="key" id="headKey"></span><span class="title" id="headTitle"></span>
+  <a href="/board" id="close" title="Back to the board (the session keeps running)" aria-label="Close and go back to the board">✕</a></div>
 <div id="term"></div>
 <div id="keys">
   <a href="/board" title="The ticket board">Board</a>
@@ -118,6 +129,26 @@
       return id;
     } catch { return ""; }
   })();
+  // Opened from the board (a session or the chat): say what it is, with an X
+  // back to the board. Leaving only detaches; reopening resumes it.
+  if (attach) {
+    const ticket = new URLSearchParams(location.search).get("ticket") || "";
+    const show = (key, title) => {
+      document.getElementById("headKey").textContent = key;
+      document.getElementById("headTitle").textContent = title;
+      document.title = (key ? key + " · " : "") + title;
+    };
+    if (attach === "operator") show("", "Chat with the operator");
+    else if (!ticket) show("", attach);
+    else {
+      show(ticket, "");
+      fetch("/api/ticket/" + encodeURIComponent(ticket)).then((r) => r.ok ? r.json() : null)
+        .then((d) => { if (d?.ticket?.title) show(ticket, d.ticket.title); }).catch(() => {});
+    }
+    document.getElementById("head").hidden = false;
+    document.querySelector('#keys a[href="/board"]').remove();
+  }
+
   let retries = 0;
   let retryTimer = 0;
   let probeTimer = 0;
