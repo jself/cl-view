@@ -847,6 +847,22 @@ pub fn rankTicket(db: Db, a: std.mem.Allocator, key: []const u8, after: ?[]const
     unreachable;
 }
 
+/// Put a ticket first (`top`) or last among the tickets in its stage, across
+/// every project: the top or bottom of its board column with all projects
+/// shown, so also of its own project's tickets there.
+pub fn rankInStage(db: Db, a: std.mem.Allocator, key: []const u8, top: bool) Error!void {
+    const t = try getTicket(db, a, key);
+    var st = try db.query(if (top)
+        "SELECT key FROM tickets WHERE stage = ?1 AND id != ?2 ORDER BY rank, id LIMIT 1"
+    else
+        "SELECT key FROM tickets WHERE stage = ?1 AND id != ?2 ORDER BY rank DESC, id DESC LIMIT 1", .{ @tagName(t.stage), t.id });
+    defer st.finalize();
+    if (!try st.step()) return; // Alone in its column.
+    const ref = try st.dupe(a, 0);
+    if (top) return rankTicket(db, a, key, null, ref);
+    return rankTicket(db, a, key, ref, null);
+}
+
 pub fn setBase(db: Db, id: i64, base: []const u8) Error!void {
     try db.exec("UPDATE tickets SET base = ?2 WHERE id = ?1", .{ id, base });
 }
@@ -1011,4 +1027,42 @@ test "rank: new tickets go last, a drop goes between its neighbors" {
     try rankTicket(db, a, k1, k3, null);
     try testing.expectEqualStrings("Three One Two", try order(db, a));
     try testing.expectEqual(@as(i64, rank_gap + rank_gap / 2), (try getTicket(db, a, k1)).rank);
+}
+
+test "rank: --top and --bottom go to the ends of the ticket's stage" {
+    const ctx = testCtx();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try Db.open(":memory:");
+    defer db.close();
+    try migrate(db);
+    try addProject(db, .{ .name = "qa", .dir = "/x/qa" });
+    try addProject(db, .{ .name = "web", .dir = "/x/web" });
+    // Ranks: Back1 < Q1 < Q2 (web) < Q3 < Back2. Only Q1..Q3 are queued.
+    const b1 = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Back1", .stage = .backlog });
+    const q1 = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Q1", .stage = .queued });
+    const q2 = try createTicket(ctx, db, a, .{ .project = "web", .title = "Q2", .stage = .queued });
+    const q3 = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Q3", .stage = .queued });
+    const b2 = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Back2", .stage = .backlog });
+    const rank = struct {
+        fn of(d: Db, al: std.mem.Allocator, k: []const u8) !i64 {
+            return (try getTicket(d, al, k)).rank;
+        }
+    }.of;
+
+    // First in the column, across projects; still behind the backlog's Back1.
+    try rankInStage(db, a, q3, true);
+    try testing.expect(try rank(db, a, q3) < try rank(db, a, q1));
+    try testing.expect(try rank(db, a, q3) > try rank(db, a, b1));
+    // Last in the column, ahead of the backlog's Back2.
+    try rankInStage(db, a, q1, false);
+    try testing.expect(try rank(db, a, q1) > try rank(db, a, q2));
+    try testing.expect(try rank(db, a, q1) < try rank(db, a, b2));
+    // Already there, or alone in its stage: nothing breaks.
+    try rankInStage(db, a, q3, true);
+    try testing.expect(try rank(db, a, q3) < try rank(db, a, q2));
+    try rankInStage(db, a, b2, true);
+    try testing.expect(try rank(db, a, b2) < try rank(db, a, b1));
+    try testing.expectError(error.NotFound, rankInStage(db, a, "QA-99", true));
 }

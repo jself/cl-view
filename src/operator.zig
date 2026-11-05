@@ -128,6 +128,9 @@ const tickets_skill =
     \\
     \\  cl ticket edit <key> [--title <t>] [-m <body>] [--plan | --no-plan] ...
     \\  cl ticket move <key> <stage>       e.g. queued to have the dispatcher start it
+    \\  cl ticket rank <key> --top         reorder when asked: --top / --bottom of its
+    \\                                     stage (all projects), or --before / --after <key>;
+    \\                                     the dispatcher starts queued tickets in this order
     \\  cl ticket start <key>              start it now
     \\  cl ticket comment <key> "<text>"   a note; with --send it is also typed into the
     \\                                     ticket's session, and a ticket in review or testing

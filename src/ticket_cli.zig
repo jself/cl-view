@@ -38,6 +38,11 @@ pub const ticket_usage =
     \\                              opens a PR, then it goes to done (a jj change cl merges
     \\                              itself; Claude settles conflicts); --close, the default, and
     \\                              tickets without a branch of their own go straight there)
+    \\  rank <key> --before <key> | --after <key> | --top | --bottom
+    \\                              reorder: next to another ticket, as dragging its card on
+    \\                              the board does, or first or last in its stage across all
+    \\                              projects (the board column). The dispatcher starts queued
+    \\                              tickets of a project in this order
     \\  start <key> [--now]         start it now: a worktree and session, or typed into its
     \\                              queue session (--now even if that session is busy)
     \\  approve <key> [--spin-off] [--merge | --pr | --close]
@@ -273,7 +278,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
     const a = arena_state.allocator();
     const cmd = argv[0];
     const args = try Args.parse(a, argv[1..], &.{
-        "--body", "--target", "--stage", "--profile", "--project", "--flag", "--search", "--title", "--as", "--summary", "--parent", "--skill", "--pr-url",
+        "--body", "--target", "--stage", "--profile", "--project", "--flag", "--search", "--title", "--as", "--summary", "--parent", "--skill", "--pr-url", "--before", "--after",
     }, ticket_usage);
     const env_key = ctx.env.get("CL_TICKET");
     const db = openBoard(ctx, cfg);
@@ -356,6 +361,25 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         const finish = finishArg(args);
         actions.move(ctx, db, a, pos[0], parseStage(pos[1]), args.has("--spin-off"), finish) catch |e| boardFail(db, e, "ticket");
         return finishNote(db, a, pos[0]);
+    }
+    if (std.mem.eql(u8, cmd, "rank")) {
+        const usage = "usage: cl ticket rank <key> --before <key> | --after <key> | --top | --bottom";
+        args.only(&.{ "--before", "--after", "--top", "--bottom" }, ticket_usage);
+        if (pos.len != 1) fail("{s}", .{usage});
+        const before = args.get("--before");
+        const after = args.get("--after");
+        var places: u8 = 0;
+        for ([_]bool{ before != null, after != null, args.has("--top"), args.has("--bottom") }) |b| places += @intFromBool(b);
+        if (places != 1) fail("give one of --before, --after, --top or --bottom\n{s}", .{usage});
+        for ([_]?[]const u8{ pos[0], before, after }) |k| if (k) |key| {
+            _ = board.getTicket(db, a, key) catch |e| boardFail(db, e, try std.fmt.allocPrint(a, "ticket {s}", .{key}));
+        };
+        if (before orelse after) |ref| if (std.mem.eql(u8, ref, pos[0])) fail("can't rank {s} next to itself", .{ref});
+        (if (before != null or after != null)
+            board.rankTicket(db, a, pos[0], after, before)
+        else
+            board.rankInStage(db, a, pos[0], args.has("--top"))) catch |e| boardFail(db, e, "ticket");
+        return;
     }
     if (std.mem.eql(u8, cmd, "comment")) {
         args.only(&.{ "--send", "--as" }, ticket_usage);
