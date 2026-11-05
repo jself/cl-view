@@ -617,7 +617,7 @@ function renderDetailInner() {
   // Ran before (killed, or its session ended): a fresh session, resuming its conversation where Claude still has it.
   const ranBefore = t.killed || t.tmux || t.session_id;
   if (!liveSession && t.stage !== "done") acts.push(`<button type="button" class="btn primary" data-act="start"${ranBefore ? ` title="A fresh session for it${t.session_id ? ", resuming its conversation where Claude still has it" : ""}"` : ""}>${ranBefore ? "Restart" : "Start now"}</button>`);
-  if (liveSession && (d.guide || t.worktree)) acts.push(`<button type="button" class="btn" data-act="gutter">Open in gutter</button>`);
+  if (d.gutter && liveSession && (d.guide || t.worktree)) acts.push(`<button type="button" class="btn" data-act="gutter">Open in gutter</button>`);
   if (approve) acts.push(`<button type="button" class="btn" data-act="approve">${approve}</button>`);
   if (liveSession) acts.push(`<button type="button" class="btn danger" data-act="kill" title="End its session; it keeps its stage and can be restarted">Kill</button>`);
   if (t.stage === "backlog") acts.push(`<button type="button" class="btn" data-move="queued">Queue it</button>`);
@@ -679,11 +679,11 @@ function reviewTab(d) {
   const t = d.ticket;
   return `<div style="display:flex;flex-direction:column;gap:calc(10 * var(--u))">
     ${t.summary ? `<div class="comment claude"><div class="who">Claude's summary</div><div class="body">${esc(t.summary)}</div></div>` : ""}
-    <p class="muted" style="margin:0">${d.guide ? "Claude wrote a review guide for gutter." : "No review guide yet; gutter still shows the diff."}
-      ${d.gutter_port ? " gutter's window is open: submit your review there and it goes straight to Claude." : sessionLive(d) ? " gutter opens in a window; the review you submit there goes straight to Claude." : " Start the session again to review in gutter."}</p>
+    ${d.gutter || d.gutter_port ? `<p class="muted" style="margin:0">${d.guide ? "Claude wrote a review guide for gutter." : "No review guide yet; gutter still shows the diff."}
+      ${d.gutter_port ? " gutter's window is open: submit your review there and it goes straight to Claude." : sessionLive(d) ? " gutter opens in a window; the review you submit there goes straight to Claude." : " Start the session again to review in gutter."}</p>` : ""}
     <div class="actions">${d.gutter_port ? `<a class="btn primary" target="_blank" rel="noopener" href="http://${location.hostname}:${d.gutter_port}/">Open gutter in the browser</a>
         <button type="button" class="btn" data-act="gutter-stop">Close gutter</button>`
-      : sessionLive(d) ? `<button type="button" class="btn primary" data-act="gutter">Open in gutter</button>` : ""}
+      : d.gutter && sessionLive(d) ? `<button type="button" class="btn primary" data-act="gutter">Open in gutter</button>` : ""}
       ${t.stage === "review" ? `<button type="button" class="btn" data-act="approve">Approve, to testing</button>` : ""}</div>
     <label class="muted" style="display:flex;flex-direction:column;gap:calc(5 * var(--u));font-size:calc(12.5 * var(--u))">Or say what to change (sends it back for another round)
       <textarea id="backText" rows="3"></textarea></label>

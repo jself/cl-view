@@ -32,8 +32,9 @@ pub const Error = error{
 };
 
 /// What the ticket's session is told first. The key is spelled out, so the
-/// instructions work in sessions cl didn't start (no CL_TICKET).
-pub fn prompt(a: std.mem.Allocator, t: board.Ticket, notes: []const board.Comment) ![]const u8 {
+/// instructions work in sessions cl didn't start (no CL_TICKET). `gutter`:
+/// gutter is installed, so Claude writes a review guide for it.
+pub fn prompt(a: std.mem.Allocator, t: board.Ticket, notes: []const board.Comment, gutter: bool) ![]const u8 {
     var aw: std.Io.Writer.Allocating = .init(a);
     const w = &aw.writer;
     try w.print("Ticket {s}: {s}\n", .{ t.key, t.title });
@@ -59,15 +60,21 @@ pub fn prompt(a: std.mem.Allocator, t: board.Ticket, notes: []const board.Commen
         \\- Ask me with AskUserQuestion when you need a decision; the board shows it.
         \\- To split off a separate piece of work: `cl ticket new --parent {s} "<title>" -m "<details>"`.
         \\- When the work is finished and you need nothing more from me:
-        \\  1. Write a review guide to .claude/review-guide.md (`gutter -guide-format` shows the format).
-        \\  2. {s}Run `cl ticket done {s} --summary "<what changed, in a sentence or two>"`.
-        \\  3. If there is something for me to try, add `--test-plan -` and give the plan on stdin
+        \\{s}  {d}. {s}Run `cl ticket done {s} --summary "<what changed, in a sentence or two>"`.
+        \\  {d}. If there is something for me to try, add `--test-plan -` and give the plan on stdin
         \\     (a heredoc, not a file): steps the board walks me through one at a time, with buttons
         \\     to run a command (`run:`, from this directory) and open a page (`open:`), and checks
         \\     ("- [ ] what I should see"). `cl ticket testplan --format` shows the format.
         \\  Don't run it while you still need anything from me. When I send feedback, finish the same way.
         \\
-    , .{ t.key, if (t.change.len == 0 and t.mode == .worktree) "Commit your work on this branch (the review shows commits and new files that way). " else "", t.key });
+    , .{
+        t.key,
+        if (gutter) "  1. Write a review guide to .claude/review-guide.md (`gutter -guide-format` shows the format).\n" else "",
+        @as(u8, if (gutter) 2 else 1),
+        if (t.change.len == 0 and t.mode == .worktree) "Commit your work on this branch (the review shows commits and new files that way). " else "",
+        t.key,
+        @as(u8, if (gutter) 3 else 2),
+    });
     if (t.change.len > 0) try w.print(
         \\- This is a jj repo, and your work goes into the ticket's jj change {s}{s}{s} by itself:
         \\  don't commit (git or jj), start other changes or switch branches. When it's done, cl merges it.
@@ -457,7 +464,7 @@ fn startIn(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: 
         },
     }
     const notes = try board.unsentNotes(db, a, t.id);
-    const body = if (resume_id != null) try resumePrompt(a, tc, notes) else try prompt(a, tc, notes);
+    const body = if (resume_id != null) try resumePrompt(a, tc, notes) else try prompt(a, tc, notes, review.findGutter(ctx, a, cfg) != null);
     const text = if (switched) try std.mem.concat(a, u8, &.{ switched_note, body }) else body;
     var sid: [36]u8 = undefined;
     switch (t.mode) {
@@ -700,12 +707,18 @@ test prompt {
         .mode = .queue, .plan = true, .skill = "grilling", .target = "", .worktree = "", .branch = "", .profile = "",
         .tmux = "", .session_id = "", .summary = "", .round = 1, .created = 0, .updated = 0, .parent = "QA-1", .children = 0,
     };
-    const text = try prompt(arena_state.allocator(), t, &.{.{ .author = "you", .body = "keep it small", .sent = false, .at = 0 }});
+    const text = try prompt(arena_state.allocator(), t, &.{.{ .author = "you", .body = "keep it small", .sent = false, .at = 0 }}, true);
     try std.testing.expect(std.mem.indexOf(u8, text, "Ticket QA-3: Retry") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "sub-ticket of QA-1") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "- keep it small") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "grilling skill") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "cl ticket done QA-3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "  1. Write a review guide") != null);
+    // Without gutter: no review guide, and the steps are numbered from 1.
+    const plain = try prompt(arena_state.allocator(), t, &.{}, false);
+    try std.testing.expect(std.mem.indexOf(u8, plain, "gutter") == null);
+    try std.testing.expect(std.mem.indexOf(u8, plain, "me:\n  1. Run `cl ticket done QA-3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plain, "  2. If there is something") != null);
 }
 
 test "queue tickets run one at a time in the project's session" {

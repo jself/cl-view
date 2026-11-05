@@ -15,6 +15,8 @@
 //!   board.dispatch = true                (cl web starts queued tickets)
 //!   board.trust_worktrees = true         (yes to Claude's folder-trust dialog in ticket worktrees)
 //!
+//!   gutter.path = ~/bin/gutter           (gutter for reviews; "" looks it up on PATH)
+//!
 //! `default`, `operator` and dotted keys are settings; every other key is a
 //! profile. `operator` picks the operator's profile and falls back to `default`.
 //!
@@ -41,6 +43,7 @@ pub const Config = struct {
     operator: []const u8,
     web: Web = .{},
     board: Board = .{},
+    gutter: Gutter = .{},
 
     pub fn find(self: Config, name: []const u8) ?Profile {
         for (self.profiles) |p| if (std.mem.eql(u8, p.name, name)) return p;
@@ -90,6 +93,12 @@ pub const Board = struct {
     trust_worktrees: bool = true,
 };
 
+pub const Gutter = struct {
+    /// The gutter binary reviews open in; "" means `gutter` on PATH. A path
+    /// that isn't an executable file counts as gutter not being installed.
+    path: []const u8 = "",
+};
+
 pub fn load(ctx: Ctx) !Config {
     var cfg = try loadFile(ctx);
     if (ctx.env.get("CL_PORT")) |v| if (v.len > 0) {
@@ -114,6 +123,7 @@ fn loadFile(ctx: Ctx) !Config {
     var operator: ?[]const u8 = null;
     var web: Web = .{};
     var board: Board = .{};
+    var gutter: Gutter = .{};
     var lines = std.mem.splitScalar(u8, data, '\n');
     while (lines.next()) |raw| {
         const line = std.mem.trim(u8, raw, " \t\r");
@@ -142,6 +152,8 @@ fn loadFile(ctx: Ctx) !Config {
             board.trust_worktrees = !(std.mem.eql(u8, val, "false") or std.mem.eql(u8, val, "no") or std.mem.eql(u8, val, "off"));
         } else if (std.mem.eql(u8, key, "board.dispatch")) {
             board.dispatch = !(std.mem.eql(u8, val, "false") or std.mem.eql(u8, val, "no") or std.mem.eql(u8, val, "off"));
+        } else if (std.mem.eql(u8, key, "gutter.path")) {
+            gutter.path = try expandHomePerm(ctx, val);
         } else if (std.mem.indexOfScalar(u8, key, '.') != null) {
             continue; // unknown setting
         } else {
@@ -152,6 +164,7 @@ fn loadFile(ctx: Ctx) !Config {
         var c = try fallback(ctx);
         c.web = web;
         c.board = board;
+        c.gutter = gutter;
         return c;
     }
     const operator_profile = operator orelse default orelse profiles.items[0].name;
@@ -164,6 +177,7 @@ fn loadFile(ctx: Ctx) !Config {
         .operator = operator_profile,
         .web = web,
         .board = board,
+        .gutter = gutter,
     };
 }
 

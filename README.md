@@ -54,7 +54,7 @@ work = ~/.claude-work
 personal = ~/.claude
 ```
 
-`default`, `operator` and dotted keys (`web.*`, `board.*`) are settings; every other key is a profile.
+`default`, `operator` and dotted keys (`web.*`, `board.*`, `gutter.*`) are settings; every other key is a profile.
 `-p <profile>` selects a profile, and `operator` picks the operator's
 profile (falling back to `default`). If `CLAUDE_CONFIG_DIR` is set when
 `cl` runs, it overrides `default`: the profile with that directory is used, or
@@ -351,7 +351,7 @@ cl t cleanup QA-1 --branch remove the worktree and its merged branch
 
 The first message tells Claude the ticket (with any notes you added before
 it started) and how to finish: write a review guide for gutter
-(`.claude/review-guide.md`), then `cl ticket done <key> --summary ...`, with
+(`.claude/review-guide.md`, only asked for when gutter is installed), then `cl ticket done <key> --summary ...`, with
 `--test-plan -` and the plan on stdin if there is something to try: steps
 the Test tab walks you through one at a time, with buttons to run a command
 and open a page, checks to pass or fail and a comment box per step, all
@@ -392,6 +392,18 @@ cl t launch QA-1 --step 2          run step 2's run: command (tmux session clrun
 cl t test QA-1                     walk through the plan here; failures go back to Claude
 cl t approve QA-1                  review -> testing -> done
 ```
+
+Reviewing in gutter is optional. cl uses
+`gutter.path` from the config when it is set, else `gutter` on PATH:
+
+```
+gutter.path = ~/bin/gutter       # "" (the default) looks gutter up on PATH
+```
+
+Without gutter (or when `gutter.path` isn't an executable file) the board
+shows no Open in gutter, Claude isn't asked for a review guide, and
+`cl t gutter` says gutter isn't installed and exits 1. Review still works:
+read Claude's summary, approve, or send it back with a comment.
 
 `cl t gutter` (or the board's Open in gutter) opens gutter's window
 (`gutter -sync -window`, in tmux session clg_qa-1) in the ticket's worktree,

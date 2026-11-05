@@ -570,7 +570,10 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
             if (r.unsent) fail("{s} has no session to send the review to; it is kept as a comment", .{t.key});
             return out(if (r.sent) "Sent the review to the session.\n" else "No comments; nothing sent.\n");
         }
-        const port = review.startGutter(ctx, db, a, t) catch fail("gutter didn't start (is it installed?)", .{});
+        const port = review.startGutter(ctx, cfg, db, a, t) catch |e| switch (e) {
+            error.GutterMissing => fail("{s}", .{review.not_installed}),
+            else => fail("gutter didn't start", .{}),
+        };
         return out(try std.fmt.allocPrint(a, "gutter's window is open (http://127.0.0.1:{d}); the review you submit goes to the session\n", .{port}));
     }
     if (std.mem.eql(u8, cmd, "testplan")) {

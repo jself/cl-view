@@ -11,6 +11,7 @@ const Ctx = @import("ctx.zig");
 const tmux = @import("tmux.zig");
 const board = @import("board.zig");
 const worktree = @import("worktree.zig");
+const config = @import("config.zig");
 
 /// Where the ticket's files are: its worktree, else its parent's when it went
 /// on in its parent's session, else the project's directory.
@@ -47,6 +48,60 @@ fn sessionName(a: std.mem.Allocator, prefix: []const u8, key: []const u8) ![]con
 
 // ---- gutter ----
 
+/// Where gutter is: gutter.path when it is set, else `gutter` on PATH. Null
+/// when it isn't installed (or gutter.path isn't an executable file): cl then
+/// offers no gutter review.
+pub fn findGutter(ctx: Ctx, a: std.mem.Allocator, cfg: config.Config) ?[]const u8 {
+    if (cfg.gutter.path.len > 0) return if (isExecutable(ctx, cfg.gutter.path)) cfg.gutter.path else null;
+    var dirs = std.mem.splitScalar(u8, ctx.env.get("PATH") orelse "", ':');
+    while (dirs.next()) |d| {
+        if (!std.fs.path.isAbsolute(d)) continue;
+        const path = std.fs.path.join(a, &.{ d, "gutter" }) catch return null;
+        if (isExecutable(ctx, path)) return path;
+    }
+    return null;
+}
+
+fn isExecutable(ctx: Ctx, path: []const u8) bool {
+    const st = std.Io.Dir.cwd().statFile(ctx.io, path, .{}) catch return false;
+    if (st.kind == .directory) return false;
+    std.Io.Dir.cwd().access(ctx.io, path, .{ .execute = true }) catch return false;
+    return true;
+}
+
+test findGutter {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const io = std.testing.io;
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = dir_buf[0..try tmp.dir.realPath(io, &dir_buf)];
+    try tmp.dir.createDirPath(io, "bin/gutter.d");
+    try tmp.dir.writeFile(io, .{ .sub_path = "bin/gutter", .data = "#!/bin/sh\n", .flags = .{ .permissions = .executable_file } });
+    try tmp.dir.writeFile(io, .{ .sub_path = "bin/plain", .data = "x" });
+    const bin = try std.fs.path.join(a, &.{ dir, "bin" });
+    var env: std.process.Environ.Map = .init(a);
+    const ctx: Ctx = .{ .io = io, .gpa = a, .perm = a, .env = &env, .home = "/tmp" };
+    var cfg: config.Config = .{ .profiles = &.{}, .default = "", .operator = "" };
+    // Nothing on PATH, nothing set: not installed.
+    try env.put("PATH", "relative/bin:/nonexistent");
+    try std.testing.expect(findGutter(ctx, a, cfg) == null);
+    // On PATH.
+    try env.put("PATH", try std.fmt.allocPrint(a, "/nonexistent:{s}", .{bin}));
+    try std.testing.expectEqualStrings(try std.fs.path.join(a, &.{ bin, "gutter" }), findGutter(ctx, a, cfg).?);
+    // gutter.path wins over PATH, and must be an executable file.
+    cfg.gutter.path = try std.fs.path.join(a, &.{ bin, "plain" });
+    try std.testing.expect(findGutter(ctx, a, cfg) == null);
+    cfg.gutter.path = try std.fs.path.join(a, &.{ bin, "gutter.d" });
+    try std.testing.expect(findGutter(ctx, a, cfg) == null);
+    cfg.gutter.path = try std.fs.path.join(a, &.{ bin, "gutter" });
+    try std.testing.expectEqualStrings(cfg.gutter.path, findGutter(ctx, a, cfg).?);
+}
+
+pub const not_installed = "gutter isn't installed: put it on PATH, or set gutter.path in ~/.config/cl/config";
+
 /// The port of the ticket's running gutter, or null.
 pub fn gutterPort(ctx: Ctx, a: std.mem.Allocator, key: []const u8) !?u16 {
     const name = try sessionName(a, "clg_", key);
@@ -77,15 +132,17 @@ test parsePort {
     try std.testing.expect(parsePort("nothing") == null);
 }
 
-pub const GutterError = error{GutterFailed};
+pub const GutterError = error{ GutterFailed, GutterMissing };
 
 /// Open gutter's window on the ticket's changes in clg_<key> (or reuse the
 /// open one) and return its port on 127.0.0.1. gutter waits for Submit; the
 /// review then lands in <dir>/.claude/review.md and the pane runs `cl ticket
 /// gutter <key> --submitted`, which sends it to the session. Closing gutter
-/// without submitting writes nothing.
-pub fn startGutter(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket) !u16 {
+/// without submitting writes nothing. error.GutterMissing when gutter isn't
+/// installed (`findGutter`).
+pub fn startGutter(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: board.Ticket) !u16 {
     if (try gutterPort(ctx, a, t.key)) |p| return p;
+    const gutter = findGutter(ctx, a, cfg) orelse return error.GutterMissing;
     const name = try sessionName(a, "clg_", t.key);
     // A gutter that already exited: start a fresh one.
     if (tmux.hasSession(ctx, name)) tmux.runQuiet(ctx, &.{ "kill-session", "-t", name }) catch {};
@@ -96,12 +153,12 @@ pub fn startGutter(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
     const exe = exe_buf[0..try std.process.executablePath(ctx.io, &exe_buf)];
     const script =
-        \\cl=$1 key=$2; shift 2
-        \\if gutter -sync -window "$@" > .claude/review.md; then exec "$cl" ticket gutter "$key" --submitted; fi
+        \\cl=$1 key=$2 gutter=$3; shift 3
+        \\if "$gutter" -sync -window "$@" > .claude/review.md; then exec "$cl" ticket gutter "$key" --submitted; fi
         \\rm -f .claude/review.md; exit 1
     ;
     var argv: std.ArrayList([]const u8) = .empty;
-    try argv.appendSlice(a, &.{ "new-session", "-d", "-s", name, "-c", dir, "--", "sh", "-c", script, "sh", exe, t.key });
+    try argv.appendSlice(a, &.{ "new-session", "-d", "-s", name, "-c", dir, "--", "sh", "-c", script, "sh", exe, t.key, gutter });
     if (rev.len > 0) try argv.appendSlice(a, &.{ "-r", rev });
     tmux.runQuiet(ctx, argv.items) catch return error.GutterFailed;
     tmux.runQuiet(ctx, &.{ "set-option", "-t", name, "remain-on-exit", "on" }) catch {};

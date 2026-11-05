@@ -89,7 +89,8 @@ pub fn handle(ctx: Ctx, cfg: config.Config, req: *std.http.Server.Request, path:
             error.NoSession => .{ .conflict, "the ticket has no live session" },
             error.NothingAsked => .{ .conflict, "nothing is waiting for an answer" },
             error.BadAnswer => .{ .bad_request, "one answer per question: an option number or your own words (several numbers for a multi-select one)" },
-            error.GutterFailed => .{ .internal_server_error, "gutter didn't start (is it installed?)" },
+            error.GutterFailed => .{ .internal_server_error, "gutter didn't start" },
+            error.GutterMissing => .{ .conflict, review.not_installed },
             error.NotDelivered => .{ .conflict, "Claude didn't take the answer; it's still waiting. Check the session" },
             error.AlreadyStarted => .{ .conflict, "it already has a session" },
             error.TargetBusy => .{ .conflict, "its session is busy or has another ticket in progress; it waits in Queued and starts there when the session is free" },
@@ -301,7 +302,7 @@ fn ticketAction(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator
         try board.logEvent(ctx, db, t.id, "worktree removed", t.worktree);
     } else if (eql(u8, action, "gutter")) {
         const t = try board.getTicket(db, a, key);
-        const port = try review.startGutter(ctx, db, a, t);
+        const port = try review.startGutter(ctx, cfg, db, a, t);
         web.relayGutter(ctx, cfg, t.key, port);
         return ok(req, a, .{ .port = port });
     } else if (eql(u8, action, "gutter-stop")) {
@@ -408,6 +409,8 @@ fn getTicket(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, r
         .launches = if (plan) |p| try review.launchStates(ctx, a, t.key, p) else &.{},
         .ready = if (plan) |p| try review.waitStates(ctx, a, p) else &.{},
         .gutter_port = gutter_port,
+        // gutter is installed: the board offers it for review.
+        .gutter = review.findGutter(ctx, a, cfg) != null,
         .main_branch = if (t.branch.len > 0 or t.change.len > 0) worktree.mainBranch(ctx, a, (try board.getProject(db, a, t.project)).dir) else "",
     });
 }

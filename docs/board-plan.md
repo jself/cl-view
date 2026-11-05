@@ -107,7 +107,7 @@ Three sources, all local files or tmux:
 - **Open shell**: the existing web terminal, attached to the ticket's tmux
   session instead of the chooser (`/ws?attach=<tmux>`). Works for questions
   too.
-- **Open in gutter**: run `gutter -dir <worktree>/.claude -r <base>..<branch>`
+- **Open in gutter** (only when gutter is installed, see `gutter.path`): run `gutter -dir <worktree>/.claude -r <base>..<branch>`
   in a hidden tmux window on the server and open its URL (reachable over
   tailscale from the phone). "Send review to Claude": run it with `-sync` and
   `cl send` the review it prints.
