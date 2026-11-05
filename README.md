@@ -370,6 +370,11 @@ in the terminal (`/?attach=<session>`), open gutter, launch and test, see
 its sub-tickets and activity, and edit it. On a phone the columns swipe and
 the popup fills the screen.
 
+Drag a card to another column to move it, or up and down for priority (on a
+phone, hold it first). Each column runs top to bottom in priority order,
+except Done (latest first); new tickets go to the bottom, and the dispatcher
+starts queued tickets from the top.
+
 - Sub-tickets are tickets with a parent: their own key, stage, flags and
   comments. `cl t new --parent QA-1 "title"`, or from the ticket's own
   session `cl t sub "title"`. `list --top` leaves them out, `list --parent

@@ -123,6 +123,9 @@ pub const Ticket = struct {
     /// On its way to Done: "merge" or "pr" while Claude merges its branch or
     /// opens a PR (it moves to Done when Claude is finished), else "".
     finishing: []const u8 = "",
+    /// Priority: lower comes first. The board shows each column in rank order
+    /// and the dispatcher starts waiting tickets in it.
+    rank: i64 = 0,
     flags: []Flag = &.{},
 };
 
@@ -161,6 +164,7 @@ const schema =
     \\  base TEXT NOT NULL DEFAULT '',
     \\  finishing TEXT NOT NULL DEFAULT '',
     \\  change_id TEXT NOT NULL DEFAULT '',
+    \\  rank INTEGER NOT NULL DEFAULT 0,
     \\  created INTEGER NOT NULL,
     \\  updated INTEGER NOT NULL
     \\);
@@ -233,7 +237,7 @@ pub fn open(ctx: Ctx, cfg: config.Config) !Db {
     return db;
 }
 
-const version = 6;
+const version = 7;
 
 pub fn migrate(db: Db) !void {
     const have = (try db.int("PRAGMA user_version", .{})) orelse 0;
@@ -244,6 +248,8 @@ pub fn migrate(db: Db) !void {
     if (have >= 1 and have < 4) try db.execMulti("ALTER TABLE tickets ADD COLUMN base TEXT NOT NULL DEFAULT ''");
     if (have >= 1 and have < 5) try db.execMulti("ALTER TABLE tickets ADD COLUMN finishing TEXT NOT NULL DEFAULT ''");
     if (have >= 1 and have < 6) try db.execMulti("ALTER TABLE tickets ADD COLUMN change_id TEXT NOT NULL DEFAULT ''");
+    // Version 6 had no priority: oldest first, as the dispatcher went.
+    if (have >= 1 and have < 7) try db.execMulti(std.fmt.comptimePrint("ALTER TABLE tickets ADD COLUMN rank INTEGER NOT NULL DEFAULT 0; UPDATE tickets SET rank = id * {d}", .{rank_gap}));
     try db.execMulti(schema);
     try db.execMulti(std.fmt.comptimePrint("PRAGMA user_version = {d}", .{version}));
 }
@@ -416,9 +422,9 @@ pub fn createTicket(ctx: Ctx, db: Db, a: std.mem.Allocator, in: TicketInput) Err
     const key = try std.fmt.allocPrint(a, "{s}-{d}", .{ p.prefix, num });
     const t = now(ctx);
     try db.exec(
-        \\INSERT INTO tickets (key, project, title, body, stage, mode, plan, target, profile, parent, skill, created, updated)
-        \\VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)
-    , .{ key, p.name, title, in.body orelse "", @tagName(stage), @tagName(in.mode orelse p.mode), plan, in.target orelse "", in.profile orelse p.profile, if (parent) |pt| pt.id else null, in.skill orelse "", t });
+        \\INSERT INTO tickets (key, project, title, body, stage, mode, plan, target, profile, parent, skill, created, updated, rank)
+        \\VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, (SELECT coalesce(max(rank), 0) + ?13 FROM tickets))
+    , .{ key, p.name, title, in.body orelse "", @tagName(stage), @tagName(in.mode orelse p.mode), plan, in.target orelse "", in.profile orelse p.profile, if (parent) |pt| pt.id else null, in.skill orelse "", t, rank_gap });
     const id = db.lastId();
     try logEvent(ctx, db, id, "created", @tagName(stage));
     if (parent) |pt| try logEvent(ctx, db, pt.id, "sub-ticket", key);
@@ -427,7 +433,7 @@ pub fn createTicket(ctx: Ctx, db: Db, a: std.mem.Allocator, in: TicketInput) Err
 }
 
 const ticket_cols = "t.id, t.key, t.project, t.title, t.body, t.stage, t.mode, t.plan, t.target, t.worktree, t.branch, t.profile, t.tmux, t.session_id, t.summary, t.round, t.created, t.updated, " ++
-    "coalesce((SELECT p.key FROM tickets p WHERE p.id = t.parent), ''), (SELECT count(*) FROM tickets c WHERE c.parent = t.id), t.skill, t.base, t.finishing, t.change_id";
+    "coalesce((SELECT p.key FROM tickets p WHERE p.id = t.parent), ''), (SELECT count(*) FROM tickets c WHERE c.parent = t.id), t.skill, t.base, t.finishing, t.change_id, t.rank";
 
 fn readTicket(st: sqlite.Stmt, a: std.mem.Allocator) !Ticket {
     return .{
@@ -455,6 +461,7 @@ fn readTicket(st: sqlite.Stmt, a: std.mem.Allocator) !Ticket {
         .base = try st.dupe(a, 21),
         .finishing = try st.dupe(a, 22),
         .change = try st.dupe(a, 23),
+        .rank = st.int(24),
     };
 }
 
@@ -783,6 +790,39 @@ pub fn setChange(db: Db, id: i64, change: []const u8, bookmark: []const u8) Erro
     try db.exec("UPDATE tickets SET change_id = ?2, branch = ?3 WHERE id = ?1", .{ id, change, bookmark });
 }
 
+/// Space between neighboring ranks: room to put tickets in between.
+const rank_gap = 1024;
+
+/// Reprioritize: put a ticket right after the one keyed `after`, or right
+/// before `before` when there is no `after` (a drop at the top of a column).
+/// New tickets go last.
+pub fn rankTicket(db: Db, a: std.mem.Allocator, key: []const u8, after: ?[]const u8, before: ?[]const u8) Error!void {
+    const t = try getTicket(db, a, key);
+    const ref = try getTicket(db, a, after orelse before orelse return error.BadInput);
+    if (ref.id == t.id) return;
+    try db.execMulti("BEGIN IMMEDIATE");
+    errdefer db.execMulti("ROLLBACK") catch {};
+    for (0..2) |_| {
+        const r = (try db.int("SELECT rank FROM tickets WHERE id = ?1", .{ref.id})).?;
+        // The rank on the other side of `ref`, leaving the moved ticket out.
+        const other = (if (after != null)
+            try db.int("SELECT coalesce(min(rank), ?1 + 2 * ?3) FROM tickets WHERE rank > ?1 AND id != ?2", .{ r, t.id, rank_gap })
+        else
+            try db.int("SELECT coalesce(max(rank), ?1 - 2 * ?3) FROM tickets WHERE rank < ?1 AND id != ?2", .{ r, t.id, rank_gap })).?;
+        const mid = @divFloor(r + other, 2);
+        if (mid != r and mid != other) {
+            try db.exec("UPDATE tickets SET rank = ?2 WHERE id = ?1", .{ t.id, mid });
+            return db.execMulti("COMMIT");
+        }
+        // No room between them: spread every ticket out again, keeping the order.
+        try db.exec(
+            \\UPDATE tickets SET rank = ?1 * (1 + (SELECT count(*) FROM tickets u
+            \\  WHERE u.rank < tickets.rank OR (u.rank = tickets.rank AND u.id < tickets.id)))
+        , .{rank_gap});
+    }
+    unreachable;
+}
+
 pub fn setBase(db: Db, id: i64, base: []const u8) Error!void {
     try db.exec("UPDATE tickets SET base = ?2 WHERE id = ?1", .{ id, base });
 }
@@ -891,4 +931,44 @@ test "projects, tickets, flags, comments, done" {
     try removeTicket(db, a, k1);
     try removeTicket(db, a, k2);
     try removeProject(db, "qa-tool");
+}
+
+test "rank: new tickets go last, a drop goes between its neighbors" {
+    const ctx = testCtx();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try Db.open(":memory:");
+    defer db.close();
+    try migrate(db);
+    try addProject(db, .{ .name = "qa", .dir = "/x/qa" });
+    const k1 = try createTicket(ctx, db, a, .{ .project = "qa", .title = "One" });
+    const k2 = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Two" });
+    const k3 = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Three" });
+    const order = struct {
+        fn of(d: Db, al: std.mem.Allocator) ![]const u8 {
+            var st = try d.query("SELECT title FROM tickets ORDER BY rank, id", .{});
+            defer st.finalize();
+            var out: std.ArrayList(u8) = .empty;
+            while (try st.step()) {
+                if (out.items.len > 0) try out.append(al, ' ');
+                try out.appendSlice(al, st.text(0));
+            }
+            return out.items;
+        }
+    }.of;
+    try testing.expectEqualStrings("One Two Three", try order(db, a));
+    try rankTicket(db, a, k3, null, k1);
+    try testing.expectEqualStrings("Three One Two", try order(db, a));
+    try rankTicket(db, a, k3, k1, null);
+    try testing.expectEqualStrings("One Three Two", try order(db, a));
+    try rankTicket(db, a, k1, k2, null);
+    try testing.expectEqualStrings("Three Two One", try order(db, a));
+
+    // Out of room between two ranks: everything spreads out again.
+    try db.exec("UPDATE tickets SET rank = 5 WHERE key = ?1", .{k3});
+    try db.exec("UPDATE tickets SET rank = 6 WHERE key = ?1", .{k2});
+    try rankTicket(db, a, k1, k3, null);
+    try testing.expectEqualStrings("Three One Two", try order(db, a));
+    try testing.expectEqual(@as(i64, rank_gap + rank_gap / 2), (try getTicket(db, a, k1)).rank);
 }

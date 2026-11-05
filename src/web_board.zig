@@ -6,7 +6,7 @@
 //!   GET  /api/board                     projects, tickets, sessions, profiles
 //!   GET  /api/ticket/<key>              one ticket in full (+ session tail, review, test plan)
 //!   POST /api/ticket                    new ticket
-//!   POST /api/ticket/<key>/<action>     edit move comment flag unflag done approve start
+//!   POST /api/ticket/<key>/<action>     edit move rank comment flag unflag done approve start
 //!                                       answer key rm cleanup gutter send-review launch
 //!                                       launch-stop test-results
 //!   POST /api/project                   add a project
@@ -135,6 +135,9 @@ const Body = struct {
     spin_off: ?bool = null,
     /// Going to Done: "merge", "pr" or "close" (the default).
     finish: ?[]const u8 = null,
+    /// Moving or ranking: the keys of the tickets it lands between.
+    after: ?[]const u8 = null,
+    before: ?[]const u8 = null,
 };
 
 fn finishOf(b: Body) !actions.Finish {
@@ -241,7 +244,12 @@ fn ticketAction(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator
             .profile = b.profile,
         });
     } else if (eql(u8, action, "move")) {
-        try actions.move(ctx, db, a, key, board.Stage.parse(b.stage orelse "") orelse return error.BadInput, b.spin_off orelse false, try finishOf(b));
+        const stage = board.Stage.parse(b.stage orelse "") orelse return error.BadInput;
+        // Ranked first, so the dispatcher never sees it queued in the wrong place.
+        if (nonEmpty(b.after) != null or nonEmpty(b.before) != null) try board.rankTicket(db, a, key, nonEmpty(b.after), nonEmpty(b.before));
+        try actions.move(ctx, db, a, key, stage, b.spin_off orelse false, try finishOf(b));
+    } else if (eql(u8, action, "rank")) {
+        try board.rankTicket(db, a, key, nonEmpty(b.after), nonEmpty(b.before));
     } else if (eql(u8, action, "comment")) {
         const r = try actions.comment(ctx, db, a, key, "you", b.text orelse return error.BadInput, b.send orelse false);
         return ok(req, a, r);
