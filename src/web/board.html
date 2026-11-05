@@ -142,6 +142,7 @@
   .comment .who { font-size: calc(12 * var(--u)); color: var(--muted); }
   .comment .body { white-space: pre-wrap; overflow-wrap: anywhere; }
   .comment.claude { background: #1b1f27; }
+  .desc { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 30vh; overflow-y: auto; padding-bottom: calc(12 * var(--u)); margin-bottom: calc(12 * var(--u)); border-bottom: 1px solid var(--line2); }
   .form { display: grid; gap: calc(12 * var(--u)); }
   .form label { display: flex; flex-direction: column; gap: calc(5 * var(--u)); font-size: calc(12.5 * var(--u)); color: var(--muted); }
   .form .row2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(calc(200 * var(--u)), 1fr)); gap: calc(12 * var(--u)); }
@@ -449,7 +450,7 @@ function renderDetailInner() {
       ${t.round > 1 ? `<span>round ${t.round}</span>` : ""}${t.plan ? `<span>plan first${t.skill ? " · " + esc(t.skill) : ""}</span>` : ""}${parent}</div>
     <div class="actions">${acts.join("")}</div>
     <div class="tabs" role="tablist">${tabs.map(([k, l]) => `<button type="button" role="tab" class="${state.tab === k ? "on" : ""}" aria-selected="${state.tab === k}" data-tab="${k}">${esc(l)}</button>`).join("")}</div>
-    <div id="tabBody">${tabHtml(d)}</div>`;
+    <div id="tabBody">${state.tab === tabs[0][0] && (t.body || "").trim() ? `<div class="desc">${esc(t.body)}</div>` : ""}${tabHtml(d)}</div>`;
 }
 function tabHtml(d) {
   const t = d.ticket;
