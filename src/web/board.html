@@ -76,6 +76,9 @@
   .card { width: 100%; text-align: left; background: var(--card); border: 1px solid var(--line); border-radius: calc(10 * var(--u)); padding: calc(11 * var(--u));
           display: flex; flex-direction: column; gap: calc(6 * var(--u)); cursor: pointer; color: var(--fg); }
   .card.hot { border-color: #f5a524; }
+  /* The key and title sit on a band tinted by the session's status. */
+  .card .hd { display: flex; flex-direction: column; gap: calc(6 * var(--u)); margin: calc(-11 * var(--u)) calc(-11 * var(--u)) 0; padding: calc(11 * var(--u)) calc(11 * var(--u)) calc(9 * var(--u));
+              border-radius: calc(9 * var(--u)) calc(9 * var(--u)) 0 0; background: linear-gradient(100deg, color-mix(in srgb, var(--sbg, transparent) 24%, transparent), color-mix(in srgb, var(--sbg, transparent) 6%, transparent)); }
   .card .top { display: flex; gap: calc(8 * var(--u)); font: calc(11.5 * var(--u)) var(--mono); color: var(--muted); }
   .card .top .grow { flex: 1; }
   /* The shell icon on a card or list row: straight to the session's terminal. */
@@ -97,10 +100,14 @@
     background: #60a5fa; pointer-events: none; z-index: 21; box-shadow: 0 0 0 1px #0b0b0c; } /* over the ghost */
   .card.ins-above::before { top: calc(-6 * var(--u)); } .card.ins-below::after { bottom: calc(-6 * var(--u)); }
   .lanes .card.ins-above::before { top: calc(-5 * var(--u)); } .lanes .card.ins-below::after { bottom: calc(-5 * var(--u)); }
-  .status { display: inline-flex; align-items: center; gap: calc(7 * var(--u)); font-size: calc(12.5 * var(--u)); color: #d6d7da; }
-  .dot { width: calc(8 * var(--u)); height: calc(8 * var(--u)); border-radius: calc(4 * var(--u)); flex: none; display: inline-block; background: #5d6168; }
-  .s-busy { background: #60a5fa; } .s-waiting, .s-blocked { background: #f5a524; } .s-idle { background: #a0a3a8; }
-  .s-shell { background: #2dd4bf; } .s-gone { background: #f87171; } .s-starting { background: #a78bfa; } .s-none { background: transparent; border: 1px solid #5d6168; }
+  /* Session status colors, the same hues as `cl list`: --sc for the label and dot, --sbg tints a card's title band, stronger on the left and faint on the right. */
+  .s-busy { --sc: #facc15; --sbg: var(--sc); } .s-waiting { --sc: #e879f9; --sbg: var(--sc); } .s-blocked { --sc: #f87171; --sbg: var(--sc); }
+  .s-idle { --sc: #4ade80; --sbg: var(--sc); } .s-shell { --sc: #22d3ee; --sbg: var(--sc); } .s-starting { --sc: #60a5fa; --sbg: var(--sc); }
+  .s-gone { --sc: #8b8e94; --sbg: var(--sc); } .s-unknown, .s-none { --sc: #a0a3a8; }
+  .status { display: inline-flex; align-items: center; gap: calc(7 * var(--u)); font-size: calc(12.5 * var(--u)); color: var(--sc, #d6d7da); }
+  .status.s-none { color: #d6d7da; }
+  .dot { width: calc(8 * var(--u)); height: calc(8 * var(--u)); border-radius: calc(4 * var(--u)); flex: none; display: inline-block; background: var(--sc, #5d6168); }
+  .s-none .dot { background: transparent; border: 1px solid #5d6168; }
   .pills { display: flex; flex-wrap: wrap; gap: calc(5 * var(--u)); }
   .pill { display: inline-flex; align-items: center; height: calc(22 * var(--u)); padding: 0 calc(8 * var(--u)); border-radius: calc(11 * var(--u)); font-size: calc(11.5 * var(--u));
           background: var(--other-bg); color: var(--other); white-space: nowrap; }
@@ -275,7 +282,7 @@ const pills = (t) => t.flags.length || t.finishing ? `<span class="pills">${fini
 // A Backlog or Queued ticket whose session is gone hasn't ended: it's waiting to start.
 const statusOf = (row) => row.status || (row.ticket.tmux.startsWith("(") ? "starting" : row.ticket.tmux && !["backlog", "queued"].includes(row.ticket.stage) ? "gone" : "none");
 const statusHtml = (row) => { const s = statusOf(row); const label = s === "none" ? (row.ticket.stage === "queued" ? "Waiting for a slot" : "Not started") : (STATUS_NAME[s] || s);
-  return `<span class="status"><span class="dot s-${esc(s)}"></span>${esc(label)}</span>`; };
+  return `<span class="status s-${esc(s)}"><span class="dot"></span>${esc(label)}</span>`; };
 // A live session's shell icon. In a card (a button) it's a span the click handler follows.
 const SHELL_SVG = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><path d="M4.5 6l2 2-2 2M8.5 10.5h3"/></svg>`;
 const liveRow = (row) => row.ticket.tmux && row.status && row.status !== "gone";
@@ -384,9 +391,9 @@ function renderFilters() {
 
 function cardHtml(row, compact) {
   const t = row.ticket; const hot = t.flags.some((f) => f.kind === "input" || f.kind === "question");
-  return `<button type="button" class="card ${hot ? "hot" : ""}" data-open="${esc(t.key)}" data-drag="${esc(t.key)}">
-    <span class="top"><span>${esc(t.key)}</span><span class="grow"></span>${shellIcon(row)}<span>${ago(t.updated)}</span></span>
-    <span class="t">${esc(t.title)}</span>
+  return `<button type="button" class="card s-${esc(statusOf(row))} ${hot ? "hot" : ""}" data-open="${esc(t.key)}" data-drag="${esc(t.key)}">
+    <span class="hd"><span class="top"><span>${esc(t.key)}</span><span class="grow"></span>${shellIcon(row)}<span>${ago(t.updated)}</span></span>
+    <span class="t">${esc(t.title)}</span></span>
     ${t.parent ? `<span class="sub">sub-ticket of ${esc(t.parent)}</span>` : ""}
     ${compact ? "" : `<span class="meta">${esc(t.project)} · ${esc(where(t))}</span>`}
     ${t.children ? `<span class="meta">${t.children} sub-ticket${t.children > 1 ? "s" : ""}</span>` : ""}
