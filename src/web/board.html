@@ -479,6 +479,10 @@ function renderDetailInner() {
   if (approve) acts.push(`<button type="button" class="btn" data-act="approve">${approve}</button>`);
   if (liveSession) acts.push(`<button type="button" class="btn" data-key="esc">Esc</button><button type="button" class="btn" data-key="interrupt">Interrupt</button>`);
   if (t.stage === "backlog") acts.push(`<button type="button" class="btn" data-move="queued">Queue it</button>`);
+  // Moves it (with its change and conversation, once under way) to a worktree of its own or back.
+  if (t.stage !== "done") acts.push(t.mode === "queue"
+    ? `<button type="button" class="btn" data-relocate="worktree" title="Give it a worktree of its own; Claude goes on there and the queue session is free">Move to a worktree</button>`
+    : `<button type="button" class="btn" data-relocate="queue" title="Go on in the project's main folder, in its session once that is free">Move to the queue</button>`);
   const parent = t.parent ? `<button type="button" class="btn" data-open="${esc(t.parent)}">Parent ${esc(t.parent)}</button>` : "";
   document.getElementById("ticketBody").innerHTML = `
     <div class="head"><span class="mono muted">${esc(t.key)} · ${esc(t.project)}</span>${pills(t)}<span style="flex:1"></span>
@@ -559,7 +563,7 @@ function testTab(d) {
 function commentsTab(d) {
   const t = d.ticket; const back = t.stage === "review" || t.stage === "testing";
   return `<div style="display:flex;flex-direction:column;gap:calc(8 * var(--u))">${d.comments.map((c) =>
-      `<div class="comment ${c.author === "claude" ? "claude" : ""}"><div class="who">${c.author === "claude" ? "Claude" : "You"} · ${ago(c.at)}${c.sent ? " · sent" : ""}</div><div class="body">${esc(c.body)}</div></div>`).join("")}
+      `<div class="comment ${c.author === "claude" ? "claude" : ""}"><div class="who">${c.author === "claude" ? "Claude" : c.author === "cl" ? "cl" : "You"} · ${ago(c.at)}${c.sent ? " · sent" : ""}</div><div class="body">${esc(c.body)}</div></div>`).join("")}
     <textarea id="commentText" rows="3" aria-label="Comment" placeholder="Comment"></textarea>
     <div class="actions"><button type="button" class="btn" id="saveNote">Save note</button>
       <button type="button" class="btn primary" id="saveSend" ${t.tmux ? "" : "disabled"}>${back ? "Send back to Claude" : "Save and send to Claude"}</button></div>
@@ -816,6 +820,13 @@ document.addEventListener("click", async (e) => {
   if (ds.tab) { state.tab = ds.tab; renderDetail(); return; }
   if (ds.key) return act(key, "key", { key: ds.key });
   if (ds.move) return act(key, "move", { stage: ds.move }, "Moved");
+  if (ds.relocate) {
+    let r; try { r = await act(key, "relocate", { mode: ds.relocate }); } catch { return; }
+    toast(r.result === "waiting" ? (ds.relocate === "worktree" ? "All worktree slots are taken: it waits in Queued for one" : "Back in the queue: it waits for the project's session")
+      : r.result === "moved" ? (ds.relocate === "worktree" ? "Moved to its own worktree" : "Moved to the main folder")
+      : ds.relocate === "worktree" ? "It gets a worktree of its own when it starts" : "It runs in the queue when it starts");
+    return;
+  }
   if (ds.pick !== undefined && ds.multi) {
     const p = state.picks[ds.pick] || []; state.picks[ds.pick] = p.includes(ds.n) ? p.filter((x) => x !== ds.n) : [...p, ds.n]; renderDetail(); return;
   }

@@ -16,6 +16,7 @@ const board = @import("board.zig");
 const worktree = @import("worktree.zig");
 const signals = @import("signals.zig");
 const history = @import("history.zig");
+const review = @import("review.zig");
 
 pub const Error = error{
     AlreadyStarted,
@@ -23,6 +24,11 @@ pub const Error = error{
     TargetBusy,
     WorktreeFailed,
     SessionFailed,
+    /// It has work under way that can't move with it: no jj change of its
+    /// own (git, or a sub-ticket in its parent's change).
+    NoChange,
+    /// Claude is working in its session, or waiting on you: it can't move now.
+    Busy,
 };
 
 /// What the ticket's session is told first. The key is spelled out, so the
@@ -162,9 +168,26 @@ fn newSession(ctx: Ctx, cfg: config.Config, a: std.mem.Allocator, t: board.Ticke
 /// transcript for `dir`. Tickets typed into another conversation have none.
 fn resumeId(ctx: Ctx, cfg: config.Config, a: std.mem.Allocator, t: board.Ticket, dir: []const u8, profile: []const u8) ?[]const u8 {
     if (t.session_id.len != 36) return null;
-    const prof = cfg.find(profile) orelse cfg.defaultProfile();
-    const config_dir = prof.config_dir orelse (claude.defaultConfigDir(ctx, a) catch return null);
+    const config_dir = configDir(ctx, cfg, a, profile) orelse return null;
     return if (claude.canResume(ctx, a, config_dir, dir, t.session_id)) t.session_id else null;
+}
+
+/// Where Claude keeps its transcripts for `profile`.
+fn configDir(ctx: Ctx, cfg: config.Config, a: std.mem.Allocator, profile: []const u8) ?[]const u8 {
+    const prof = cfg.find(profile) orelse cfg.defaultProfile();
+    return prof.config_dir orelse (claude.defaultConfigDir(ctx, a) catch null);
+}
+
+/// Take the ticket's conversation (and cl's files for it) from checkout
+/// `from` to `to`: Claude keeps transcripts by directory, so this is what
+/// lets it resume there. The conversation to resume, or null when `from`
+/// has none.
+fn carryConversation(ctx: Ctx, cfg: config.Config, a: std.mem.Allocator, t: board.Ticket, from: []const u8, to: []const u8) ?[]const u8 {
+    if (t.session_id.len != 36) return null;
+    const config_dir = configDir(ctx, cfg, a, t.profile) orelse return null;
+    if (!(claude.copyTranscript(ctx, a, config_dir, from, to, t.session_id) catch false)) return null;
+    worktree.carryClFiles(ctx, a, from, to);
+    return resumeId(ctx, cfg, a, t, to, t.profile);
 }
 
 /// Live sessions and their statuses, read once per dispatcher pass.
@@ -252,7 +275,13 @@ fn targetHasTicket(db: board.Db, tmux_name: []const u8, id: i64) !bool {
 /// ticket into its target even when the target is busy (Claude queues
 /// typed messages).
 pub fn start(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: board.Ticket, force: bool) !void {
-    startIn(ctx, cfg, db, a, t, force, null) catch |err| {
+    return startKeeping(ctx, cfg, db, a, t, force, false);
+}
+
+/// `start`; with `keep_stage` a ticket in Review or Testing stays there (it
+/// moved, it wasn't sent back).
+fn startKeeping(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: board.Ticket, force: bool, keep_stage: bool) !void {
+    startIn(ctx, cfg, db, a, t, force, null, keep_stage) catch |err| {
         // Busy: it waits in Queued, and the dispatcher starts (or resumes) it
         // there once the session is free.
         if (err == error.TargetBusy and t.stage != .queued and t.stage != .planning) {
@@ -263,7 +292,98 @@ pub fn start(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t
     };
 }
 
-fn startIn(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: board.Ticket, force: bool, view_in: ?View) !void {
+pub const Relocated = enum {
+    /// Only its mode changed: it hadn't started, so it starts the new way.
+    mode,
+    /// It went on in its new place.
+    moved,
+    /// It waits in Queued: for the project's session (back in the queue),
+    /// or for a worktree slot.
+    waiting,
+};
+
+/// Move a ticket between the queue and a worktree of its own (`to`). One
+/// that hasn't started, or has nothing to carry, only changes mode. One
+/// under way takes its jj change and its conversation along. To a worktree:
+/// a jj workspace on its change, the conversation copied there and resumed,
+/// and the queue session gets a new conversation (free for the next ticket).
+/// Back to the queue: the workspace is forgotten (its work stays in the
+/// change), and the conversation resumes in the project's checkout on the
+/// change, in the project's session once that is free. Either way it may
+/// wait in Queued: for the project's session, or for one of the project's
+/// worktree slots. Its change and bookmark stay the same. Claude is told it
+/// moved. Refused while its session is working or waiting on something.
+pub fn relocate(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: board.Ticket, to: board.Mode) !Relocated {
+    if (t.mode == to) return .mode;
+    if (t.tmux.len > 0 and t.tmux[0] == '(') return error.Busy;
+    const view = try View.read(ctx, a, cfg);
+    const p = try board.getProject(db, a, t.project);
+    const live = t.tmux.len > 0 and view.alive(t.tmux);
+    const trunk = worktree.trunkBookmark(ctx, a, p.dir);
+    const own = trunk != null and t.change.len > 0 and worktree.changeState(ctx, a, p.dir, t.change, trunk.?) == .open;
+    if (!own) {
+        // Work under way with nothing to carry it in: it would be left behind.
+        if (live or t.worktree.len > 0) return error.NoChange;
+        try board.updateTicket(ctx, db, a, t.key, .{ .mode = to });
+        return .mode;
+    }
+    if (live) {
+        // Claude mid-turn, or a question or prompt that would be lost.
+        if (!view.idle(ctx, t.tmux)) return error.Busy;
+        // A sub-ticket going on in this conversation would lose it.
+        if (try targetHasTicket(db, t.tmux, t.id)) return error.Busy;
+    }
+    review.stopGutter(ctx, a, t.key) catch {};
+    review.stopLaunch(ctx, a, t.key) catch {};
+    const short = t.change[0..@min(t.change.len, 12)];
+    var note: []const u8 = undefined;
+    switch (to) {
+        .worktree => {
+            // Its own conversation open in the queue session: that session
+            // gets a new one, and this one goes on in the worktree.
+            if (live) if (view.statuses.get(t.tmux)) |info| if (std.mem.eql(u8, info.session_id, t.session_id)) {
+                const s = view.find(t.tmux).?;
+                tmux.respawn(ctx, s.tmux_name, s.dir, &.{}, &.{"claude"}) catch return error.SessionFailed;
+            };
+            note = try std.fmt.allocPrint(a, "This ticket moved from the project's main folder ({s}) to a worktree of its own, your current directory now: work, build and run things there from now on. Its jj change {s} came along and is checked out there; the main folder has moved on to other work.", .{ p.dir, short });
+        },
+        .queue => {
+            if (live) tmux.kill(ctx, t.tmux) catch {};
+            if (t.worktree.len > 0) {
+                _ = carryConversation(ctx, cfg, a, t, t.worktree, p.dir);
+                worktree.forget(ctx, a, p.dir, t.worktree) catch {
+                    try board.logEvent(ctx, db, t.id, "move failed", worktree.lastError());
+                    return error.WorktreeFailed;
+                };
+                try board.logEvent(ctx, db, t.id, "worktree removed", t.worktree);
+            }
+            note = try std.fmt.allocPrint(a, "This ticket moved from its worktree{s}{s} back to the project's main folder ({s}), your current directory now: work, build and run things there from now on. Its jj change {s} is checked out there.", .{ if (t.worktree.len > 0) " at " else "", t.worktree, p.dir, short });
+        },
+    }
+    try board.updateTicket(ctx, db, a, t.key, .{ .mode = to });
+    try board.setSession(ctx, db, t.id, "", t.session_id, "", t.branch);
+    try board.logEvent(ctx, db, t.id, "moved", @tagName(to));
+    _ = try board.addComment(ctx, db, a, t.key, "cl", note, false);
+    // Not under way (Backlog, Queued, or its session had ended): it goes on
+    // in its new place when it starts.
+    if (!live) return .mode;
+    const now_t = try board.getTicket(db, a, t.key);
+    // Every worktree slot taken: it waits in Queued, and the dispatcher
+    // starts it in its worktree (the conversation comes along) when one frees.
+    if (to == .worktree and try runningWorktrees(db, a, view, p.name) >= p.slots) {
+        try board.moveTicket(ctx, db, now_t, .queued);
+        try board.clearFlagId(ctx, db, t.id, "ended");
+        return .waiting;
+    }
+    startKeeping(ctx, cfg, db, a, now_t, false, true) catch |err| switch (err) {
+        error.TargetBusy => return .waiting,
+        error.AlreadyStarted => return .moved,
+        else => return err,
+    };
+    return .moved;
+}
+
+fn startIn(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: board.Ticket, force: bool, view_in: ?View, keep_stage: bool) !void {
     const view = view_in orelse try View.read(ctx, a, cfg);
     if (t.tmux.len > 0) {
         if (t.tmux[0] == '(' or view.alive(t.tmux)) return error.AlreadyStarted;
@@ -281,7 +401,7 @@ fn startIn(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: 
     const free = live and !busy and view.idle(ctx, target) and !try targetHasTicket(db, target, t.id);
     // A ticket that had a conversation of its own picks it back up.
     const target_s = if (live) view.find(target) else null;
-    const resume_id = switch (t.mode) {
+    var resume_id = switch (t.mode) {
         .worktree => if (t.worktree.len > 0) resumeId(ctx, cfg, a, t, t.worktree, t.profile) else null,
         .queue => resumeId(ctx, cfg, a, t, p.dir, if (target_s) |s| s.profile else t.profile),
     };
@@ -307,10 +427,18 @@ fn startIn(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: 
     var switched = false;
     switch (t.mode) {
         .worktree => {
-            wt = worktree.create(ctx, a, cfg, p.dir, p.name, t.key, t.title, trunk orelse "", desc) catch |err| {
+            // A change of its own already (it ran in the queue): the
+            // worktree works on that one.
+            const own = trunk != null and t.change.len > 0 and worktree.changeState(ctx, a, p.dir, t.change, trunk.?) == .open;
+            wt = (if (own)
+                worktree.createOn(ctx, a, cfg, p.dir, p.name, t.key, t.title, t.change, t.branch, trunk.?)
+            else
+                worktree.create(ctx, a, cfg, p.dir, p.name, t.key, t.title, trunk orelse "", desc)) catch |err| {
                 try board.logEvent(ctx, db, t.id, "start failed", worktree.lastError());
                 return if (err == error.OutOfMemory) err else error.WorktreeFailed;
             };
+            // Its conversation ran in the project's checkout: it comes along.
+            if (resume_id == null) resume_id = carryConversation(ctx, cfg, a, t, p.dir, wt.path);
             // A worktree made earlier keeps the change it has.
             if (wt.change.len > 0) {
                 try board.setChange(db, t.id, wt.change, wt.branch);
@@ -362,7 +490,7 @@ fn startIn(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: 
     try board.markNotesSent(db, t.id);
     try board.clearFlagId(ctx, db, t.id, "start-failed");
     try board.clearFlagId(ctx, db, t.id, "ended");
-    if (t.stage != .planning) try board.moveTicket(ctx, db, t, .running);
+    if (t.stage != .planning and !(keep_stage and (t.stage == .review or t.stage == .testing))) try board.moveTicket(ctx, db, t, .running);
     const now_t = try board.getTicket(db, a, t.key);
     try board.logEvent(ctx, db, t.id, "started", now_t.tmux);
 }
@@ -497,7 +625,7 @@ pub fn tick(ctx: Ctx, cfg: config.Config, db: board.Db) !usize {
             const p = board.getProject(db, a, t.project) catch continue;
             if (try runningWorktrees(db, a, view, p.name) >= p.slots) continue;
         }
-        startIn(ctx, cfg, db, a, t, false, view) catch |err| switch (err) {
+        startIn(ctx, cfg, db, a, t, false, view, false) catch |err| switch (err) {
             error.TargetBusy, error.AlreadyStarted => continue,
             else => {
                 board.setFlagId(ctx, db, t.id, "start-failed", "auto", @errorName(err)) catch {};

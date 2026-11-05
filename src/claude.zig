@@ -219,6 +219,42 @@ pub fn transcriptPath(arena: std.mem.Allocator, config_dir: []const u8, cwd: []c
     return std.fmt.allocPrint(arena, "{s}/{s}.jsonl", .{ try projectDir(arena, config_dir, cwd), session_id });
 }
 
+/// Copy conversation `session_id` (its transcript and the folder of tool
+/// results and subagents beside it) to where Claude looks for it from
+/// `to_cwd`, so `--resume` finds it there. False when `from_cwd` has none.
+pub fn copyTranscript(ctx: Ctx, arena: std.mem.Allocator, config_dir: []const u8, from_cwd: []const u8, to_cwd: []const u8, session_id: []const u8) !bool {
+    const src = try transcriptPath(arena, config_dir, from_cwd, session_id);
+    std.Io.Dir.cwd().access(ctx.io, src, .{}) catch return false;
+    const dst = try projectDir(arena, config_dir, to_cwd);
+    try std.Io.Dir.cwd().createDirPath(ctx.io, dst);
+    var argv: std.ArrayList([]const u8) = .empty;
+    try argv.appendSlice(arena, &.{ "cp", "-a", src });
+    const side = try std.fmt.allocPrint(arena, "{s}/{s}", .{ try projectDir(arena, config_dir, from_cwd), session_id });
+    if (std.Io.Dir.cwd().access(ctx.io, side, .{})) |_| try argv.append(arena, side) else |_| {}
+    try argv.append(arena, dst);
+    const res = try std.process.run(arena, ctx.io, .{ .argv = argv.items });
+    return switch (res.term) {
+        .exited => |code| code == 0,
+        else => false,
+    };
+}
+
+test copyTranscript {
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp" };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cfg_dir = try tmp.dir.realPathFileAlloc(ctx.io, ".", a);
+    try tmp.dir.createDirPath(ctx.io, "projects/-x-main/sid/tool-results");
+    try tmp.dir.writeFile(ctx.io, .{ .sub_path = "projects/-x-main/sid.jsonl", .data = "{}\n" });
+    try std.testing.expect(!try copyTranscript(ctx, a, cfg_dir, "/x/main", "/x/wt", "other"));
+    try std.testing.expect(try copyTranscript(ctx, a, cfg_dir, "/x/main", "/x/wt", "sid"));
+    try std.testing.expect(canResume(ctx, a, cfg_dir, "/x/wt", "sid"));
+    try tmp.dir.access(ctx.io, "projects/-x-wt/sid/tool-results", .{});
+}
+
 /// Whether Claude can still resume: the transcript for `session_id` exists, or
 /// with no id (`--continue`), any transcript for `cwd` does. Claude deletes old
 /// transcripts (settings.json `cleanupPeriodDays`, 30 days by default).

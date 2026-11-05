@@ -60,6 +60,10 @@ pub const ticket_usage =
     \\  testplan <key> [--json]     the test plan Claude wrote: setup, launch, checks
     \\  launch <key> [--stop]       run the test plan's launch command (tmux session clrun_<key>)
     \\  test <key>                  walk through the test plan here; failures go back to Claude
+    \\  relocate <key> worktree|queue
+    \\                              move it to a worktree of its own, or back to the queue; one
+    \\                              under way takes its jj change and conversation along and
+    \\                              Claude is told it moved (edit --worktree/--queue does this too)
     \\  cleanup <key> [--branch]    remove its worktree (--branch: and the merged branch)
     \\  dispatch [--once]           start queued tickets as slots and sessions free up
     \\                              (cl web runs this too)
@@ -177,6 +181,24 @@ fn openBoard(ctx: Ctx, cfg: config.Config) board.Db {
 
 fn parseStage(s: []const u8) board.Stage {
     return board.Stage.parse(s) orelse fail("no such stage: {s} (backlog planning queued running review testing done)", .{s});
+}
+
+/// Move a ticket to `to` (see `dispatch.relocate`) and say where it went.
+fn relocate(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, key: []const u8, to: board.Mode) !void {
+    const t = board.getTicket(db, a, key) catch |e| boardFail(db, e, "ticket");
+    const r = dispatch.relocate(ctx, cfg, db, a, t, to) catch |e| switch (e) {
+        error.Busy => fail("{s}: Claude is working in its session or waiting on you; move it once it is idle", .{t.key}),
+        error.NoChange => fail("{s} is under way, but its work has no jj change of its own to move with it", .{t.key}),
+        error.WorktreeFailed => fail("jj: {s}", .{worktree.lastError()}),
+        error.SessionFailed => fail("cannot start the session", .{}),
+        else => boardFail(db, e, "ticket"),
+    };
+    const after = board.getTicket(db, a, t.key) catch |e| boardFail(db, e, "ticket");
+    return out(switch (r) {
+        .mode => try std.fmt.allocPrint(a, "{s} runs {s} when it starts\n", .{ t.key, if (to == .worktree) "in a worktree of its own" else "in the queue" }),
+        .moved => try std.fmt.allocPrint(a, "{s} moved to {s}{s}{s}\n", .{ t.key, after.tmux, if (after.worktree.len > 0) " at " else "", try ctx.shortenHomeIn(a, after.worktree) }),
+        .waiting => try std.fmt.allocPrint(a, "{s} waits in Queued for {s}\n", .{ t.key, if (to == .worktree) "a worktree slot (the project's are all taken)" else "the project's session" }),
+    });
 }
 
 fn parseMode(args: Args) ?board.Mode {
@@ -348,13 +370,18 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
             .project = args.get("--project") orelse "",
             .title = args.get("--title"),
             .body = args.get("--body"),
-            .mode = parseMode(args),
             .plan = if (args.has("--plan")) true else if (args.has("--no-plan")) false else null,
             .target = args.get("--target"),
             .profile = args.get("--profile"),
             .skill = args.get("--skill"),
         }) catch |e| boardFail(db, e, "ticket or project");
+        if (parseMode(args)) |m| return relocate(ctx, cfg, db, a, key, m);
         return;
+    }
+    if (std.mem.eql(u8, cmd, "relocate")) {
+        args.only(&.{}, ticket_usage);
+        if (pos.len != 2) fail("usage: cl ticket relocate <key> worktree|queue", .{});
+        return relocate(ctx, cfg, db, a, pos[0], board.Mode.parse(pos[1]) orelse fail("worktree or queue", .{}));
     }
     if (std.mem.eql(u8, cmd, "move") or std.mem.eql(u8, cmd, "mv")) {
         args.only(&.{ "--spin-off", "--merge", "--pr", "--close" }, ticket_usage);

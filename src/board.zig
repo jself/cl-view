@@ -876,9 +876,10 @@ pub fn setTarget(db: Db, id: i64, target: []const u8) Error!void {
     try db.exec("UPDATE tickets SET target = ?2 WHERE id = ?1", .{ id, target });
 }
 
-/// Unsent notes from you, oldest first: they go along with the first prompt.
+/// Unsent notes from you (or from cl, about what it did to the ticket),
+/// oldest first: they go along with the next prompt.
 pub fn unsentNotes(db: Db, a: std.mem.Allocator, id: i64) Error![]Comment {
-    var st = try db.query("SELECT author, body, sent, at FROM comments WHERE ticket = ?1 AND author = 'you' AND sent = 0 ORDER BY at, id", .{id});
+    var st = try db.query("SELECT author, body, sent, at FROM comments WHERE ticket = ?1 AND author IN ('you', 'cl') AND sent = 0 ORDER BY at, id", .{id});
     defer st.finalize();
     var out: std.ArrayList(Comment) = .empty;
     while (try st.step()) try out.append(a, .{ .author = try st.dupe(a, 0), .body = try st.dupe(a, 1), .sent = false, .at = st.int(3) });
@@ -886,7 +887,7 @@ pub fn unsentNotes(db: Db, a: std.mem.Allocator, id: i64) Error![]Comment {
 }
 
 pub fn markNotesSent(db: Db, id: i64) Error!void {
-    try db.exec("UPDATE comments SET sent = 1 WHERE ticket = ?1 AND author = 'you' AND sent = 0", .{id});
+    try db.exec("UPDATE comments SET sent = 1 WHERE ticket = ?1 AND author IN ('you', 'cl') AND sent = 0", .{id});
 }
 
 // ---- tests ----

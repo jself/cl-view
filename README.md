@@ -328,6 +328,20 @@ A ticket runs one of two ways (`--queue` is the default, a project can set
   own session, up to the project's `--slots` in progress at once (3 by
   default).
 
+A ticket can switch ways at any time (`cl t relocate QA-1 worktree|queue`, or
+**Move to a worktree** / **Move to the queue** on the board). One that hasn't
+started only changes mode. One under way (jj only: it needs a change of its
+own) takes its change and its conversation along, once its session is idle.
+To a worktree: a `jj workspace` on its change, its transcript copied there
+(Claude keeps them by directory) and resumed, and the queue session gets a new
+conversation, free for the next ticket. Back to the queue: the workspace is
+forgotten (its work stays in the change) and the conversation resumes in the
+project's checkout on that change, in the project's session once it is free
+(until then it waits in Queued). A move to a worktree respects the project's
+`--slots`: with all of them taken it waits in Queued and starts in its
+worktree when one frees up. Its change and bookmark stay the same throughout,
+and Claude is told it moved.
+
 ```
 cl t move QA-1 queued      the dispatcher starts it when it can
 cl t start QA-1 [--now]    start it now (--now: type into a busy queue session anyway)

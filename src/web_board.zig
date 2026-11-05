@@ -8,7 +8,7 @@
 //!   POST /api/ticket                    new ticket
 //!   POST /api/ticket/<key>/<action>     edit move rank comment flag unflag done approve start
 //!                                       answer key rm cleanup gutter gutter-stop launch
-//!                                       launch-stop test-results
+//!                                       launch-stop test-results relocate
 //!   POST /api/project                   add a project
 //!   POST /api/project/<name>/<action>   set rm
 const std = @import("std");
@@ -93,6 +93,8 @@ pub fn handle(ctx: Ctx, cfg: config.Config, req: *std.http.Server.Request, path:
             error.AlreadyStarted => .{ .conflict, "it already has a session" },
             error.TargetBusy => .{ .conflict, "its session is busy or has another ticket in progress; it waits in Queued and starts there when the session is free" },
             error.WorktreeFailed => .{ .internal_server_error, worktree.lastError() },
+            error.Busy => .{ .conflict, "Claude is working in its session or waiting on you; it can move once it is idle" },
+            error.NoChange => .{ .conflict, "its work has no jj change of its own to move with it" },
             error.SessionFailed => .{ .internal_server_error, "the session didn't start" },
             error.OpenSubtickets => .{ .conflict, "it has sub-tickets that aren't done yet; finish them or spin them off" },
             error.NoTestPlan => .{ .not_found, "no test plan (.claude/test-plan.md)" },
@@ -235,16 +237,22 @@ fn realDir(ctx: Ctx, a: std.mem.Allocator, path: []const u8) ![]const u8 {
 fn ticketAction(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: *std.http.Server.Request, key: []const u8, action: []const u8, b: Body) !void {
     const eql = std.mem.eql;
     if (eql(u8, action, "edit")) {
+        const mode = if (b.mode) |m| board.Mode.parse(m) orelse return error.BadInput else null;
         try board.updateTicket(ctx, db, a, key, .{
             .project = b.project orelse "",
             .title = b.title,
             .body = b.body,
-            .mode = if (b.mode) |m| board.Mode.parse(m) orelse return error.BadInput else null,
             .plan = b.plan,
             .skill = b.skill,
             .target = b.target,
             .profile = b.profile,
         });
+        // A new mode moves the ticket (with its work, once started).
+        if (mode) |m| _ = try dispatch.relocate(ctx, cfg, db, a, try board.getTicket(db, a, key), m);
+    } else if (eql(u8, action, "relocate")) {
+        const m = board.Mode.parse(b.mode orelse "") orelse return error.BadInput;
+        const r = try dispatch.relocate(ctx, cfg, db, a, try board.getTicket(db, a, key), m);
+        return ok(req, a, .{ .result = @tagName(r) });
     } else if (eql(u8, action, "move")) {
         const stage = board.Stage.parse(b.stage orelse "") orelse return error.BadInput;
         // Ranked first, so the dispatcher never sees it queued in the wrong place.

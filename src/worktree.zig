@@ -184,6 +184,47 @@ pub fn create(ctx: Ctx, a: std.mem.Allocator, cfg: config.Config, repo: []const 
     return .{ .path = path, .branch = name };
 }
 
+/// A jj workspace for a change that exists already (a queue ticket moving to
+/// a worktree of its own): its working copy is `change` itself, bookmark and
+/// all. `repo`'s working copy leaves the change first for a new one on top
+/// of `trunk`, so only the workspace works on it.
+pub fn createOn(ctx: Ctx, a: std.mem.Allocator, cfg: config.Config, repo: []const u8, project: []const u8, key: []const u8, title: []const u8, change: []const u8, bookmark: []const u8, trunk: []const u8) Error!Worktree {
+    const name = try slug(a, key, title);
+    const base = root(ctx, a, cfg) catch return error.OutOfMemory;
+    const parent = try std.fmt.allocPrint(a, "{s}/{s}", .{ base, project });
+    std.Io.Dir.cwd().createDirPath(ctx.io, parent) catch return error.CommandFailed;
+    const path = try std.fmt.allocPrint(a, "{s}/{s}", .{ parent, name });
+    const wt: Worktree = .{ .path = path, .branch = bookmark, .change = change };
+    if (std.Io.Dir.cwd().access(ctx.io, path, .{})) |_| return wt else |_| {}
+    // Snapshots the checkout's files into the change before it leaves.
+    if (std.mem.eql(u8, try workingChange(ctx, a, repo), change)) _ = try run(ctx, a, &.{ "jj", "-R", repo, "new", try sym(a, trunk) });
+    _ = try run(ctx, a, &.{ "jj", "-R", repo, "workspace", "add", "--name", name, "-r", change, path });
+    // The workspace starts on a new empty change on top; editing the change
+    // itself drops that one.
+    _ = try run(ctx, a, &.{ "jj", "-R", path, "edit", change });
+    return wt;
+}
+
+/// Let go of a jj workspace but keep its work: what its files hold goes into
+/// its change first, then the workspace is forgotten and its directory goes.
+pub fn forget(ctx: Ctx, a: std.mem.Allocator, repo: []const u8, path: []const u8) Error!void {
+    _ = try workingChange(ctx, a, path);
+    _ = try run(ctx, a, &.{ "jj", "-R", repo, "workspace", "forget", std.fs.path.basename(path) });
+    std.Io.Dir.cwd().deleteTree(ctx.io, path) catch return error.CommandFailed;
+}
+
+/// Move cl's ticket files (review guide, review, test plan in .claude/) from
+/// one checkout to another, where it has none of its own yet.
+pub fn carryClFiles(ctx: Ctx, a: std.mem.Allocator, from: []const u8, to: []const u8) void {
+    const dst = std.fmt.allocPrint(a, "{s}/.claude", .{to}) catch return;
+    std.Io.Dir.cwd().createDirPath(ctx.io, dst) catch return;
+    for ([_][]const u8{ "review-guide.md", "review.md", "test-plan.md" }) |name| {
+        const src = std.fmt.allocPrint(a, "{s}/.claude/{s}", .{ from, name }) catch return;
+        std.Io.Dir.cwd().access(ctx.io, src, .{}) catch continue;
+        _ = run(ctx, a, &.{ "mv", "-n", src, std.fmt.allocPrint(a, "{s}/{s}", .{ dst, name }) catch return }) catch {};
+    }
+}
+
 /// Remove a ticket's worktree. git refuses when it has uncommitted changes;
 /// `delete_branch` also deletes a fully merged branch.
 pub fn remove(ctx: Ctx, a: std.mem.Allocator, repo: []const u8, wt: Worktree, delete_branch: bool) Error!void {
@@ -526,6 +567,28 @@ test "a change per ticket: switch, merge back, conflicts" {
     try std.testing.expect(strayWork(ctx, a, repo, trunk) == null);
     try std.testing.expect((try mergeChange(ctx, a, repo, "", five.id, five.bookmark, trunk)).merged);
     try std.testing.expectEqualStrings("stray\n", try run(ctx, a, &.{ "git", "-C", repo, "show", "master:c.txt" }));
+
+    // A ticket's change moves to a workspace of its own and back, with the
+    // edits it has in either place.
+    var cfg: config.Config = .{ .profiles = &.{}, .default = "", .operator = "" };
+    var wt_root = std.testing.tmpDir(.{});
+    defer wt_root.cleanup();
+    cfg.board.worktrees = try wt_root.dir.realPathFileAlloc(ctx.io, ".", a);
+    _ = catchUp(ctx, a, repo, trunk);
+    const six = try newChange(ctx, a, repo, trunk, "T-6: moves", "t-6-moves");
+    try tmp.dir.writeFile(ctx.io, .{ .sub_path = "d.txt", .data = "main\n" });
+    const wt = try createOn(ctx, a, cfg, repo, "demo", "T-6", "moves", six.id, six.bookmark, trunk);
+    try std.testing.expectEqualStrings(six.id, try workingChange(ctx, a, wt.path));
+    try std.testing.expect(!std.mem.eql(u8, six.id, try workingChange(ctx, a, repo)));
+    var wdir = try std.Io.Dir.cwd().openDir(ctx.io, wt.path, .{});
+    defer wdir.close(ctx.io);
+    try std.testing.expectEqualStrings("main\n", read(ctx, wdir, a, "d.txt"));
+    try wdir.writeFile(ctx.io, .{ .sub_path = "d.txt", .data = "worktree\n" });
+    try forget(ctx, a, repo, wt.path);
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(ctx.io, wt.path, .{}));
+    try std.testing.expect(try editChange(ctx, a, repo, six.id));
+    try std.testing.expectEqualStrings("worktree\n", read(ctx, tmp.dir, a, "d.txt"));
+    try std.testing.expectEqual(ChangeState.open, changeState(ctx, a, repo, six.id, trunk));
 
     // cl's own files stay out of changes.
     excludeClFiles(ctx, a, repo);
