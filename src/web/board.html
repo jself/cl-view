@@ -56,7 +56,8 @@
   #needs.closed .strip { display: none; }
   .ask { flex: none; width: calc(300 * var(--u)); max-width: 85vw; scroll-snap-align: start; background: #1a1b1e; border: 1px solid var(--line);
          border-radius: calc(12 * var(--u)); padding: calc(12 * var(--u)); display: flex; flex-direction: column; gap: calc(8 * var(--u)); }
-  .ask .what { font-size: calc(12.5 * var(--u)); color: var(--dim); line-height: 1.45; overflow-wrap: anywhere; }
+  .ask .what { font-size: calc(12.5 * var(--u)); color: var(--dim); line-height: 1.45; overflow-wrap: anywhere;
+               display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
   .ask .acts { display: flex; flex-wrap: wrap; gap: calc(6 * var(--u)); margin-top: auto; }
 
   nav#filters { display: flex; flex-wrap: wrap; align-items: center; gap: calc(8 * var(--u)); padding: calc(12 * var(--u)) calc(16 * var(--u)); }
@@ -250,6 +251,16 @@ function askText(t, f) {
   if (f.kind === "conflict") return "Merging it back conflicts in: " + f.detail.split("\n").map((l) => l.trim().split(/\s+/)[0]).join(", ");
   return f.detail || FLAG_NAME[f.kind] || f.kind;
 }
+// One short line for a Needs you card; askText goes in its tooltip. A lone question with quick
+// answers keeps its text (clamped by CSS) so the buttons make sense.
+function askLine(t, f, quick) {
+  const d = flagDetail(f);
+  if (f.kind === "question") return quick ? askText(t, f) : d?.questions?.length > 1 ? `Needs ${d.questions.length} answers` : "Needs an answer";
+  if (f.kind === "input") return d?.tool ? `Wants permission: ${d.tool}` : "Waiting on a prompt";
+  if (f.kind === "review") return f.detail === "plan" ? "Plan ready for approval" : "Ready for review";
+  if (f.kind === "conflict") { const n = f.detail.split("\n").filter((l) => l.trim()).length; return `Merge conflicts in ${n} file${n === 1 ? "" : "s"}`; }
+  return askText(t, f);
+}
 const flagLabel = (f) => f.kind === "review" && f.detail === "plan" ? "Plan ready" : (FLAG_NAME[f.kind] || f.kind);
 const flagClass = (k) => ["input", "question", "review", "testing", "conflict"].includes(k) ? "f-" + k : "";
 // Finishing: Claude is merging the branch or opening a PR before it goes to Done.
@@ -343,7 +354,7 @@ function renderNeeds() {
       : `<button type="button" class="btn primary" data-open="${esc(t.key)}" data-tab="needs">Open</button>`;
     const shell = t.tmux && r.status && r.status !== "gone" ? `<a class="btn" href="${shellHref(t)}">Shell</a>` : "";
     return `<div class="ask"><div class="pills"><span class="pill ${flagClass(f.kind)}">${esc(flagLabel(f))}</span><span class="mono muted" style="font-size:calc(11.5 * var(--u))">${esc(t.key)} · ${ago(f.at)}</span></div>
-      <div style="font-weight:500">${esc(t.title)}</div><div class="what">${esc(askText(t, f))}</div>
+      <div style="font-weight:500">${esc(t.title)}</div><div class="what" title="${esc(askText(t, f))}">${esc(askLine(t, f, quick))}</div>
       ${quick ? `<div class="acts">${quick}</div>` : ""}<div class="acts">${main}${shell}</div></div>`;
   }).join(""));
 }
