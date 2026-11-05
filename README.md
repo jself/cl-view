@@ -228,12 +228,13 @@ gitignored, like `node_modules`, stays out as usual.
 Stages are the workflow: backlog, planning (optional), queued, running,
 review, testing, done. Flags say what needs you and are separate from the
 stage: `input` (a permission prompt), `question`, `review`, `testing`, or any
-word you like.
+word you like. While a ticket's session is busy working on it, it stays out of
+the inbox whatever its flags say; it comes back once the session stops.
 
 ```
 cl t new qa-tool "Flaky login spec" -m "fails one run in five" [--worktree | --queue] [--plan]
 cl t list [--stage review] [--project qa-tool] [--flag question] [--search login] [--open] [--json]
-cl t needs                       the inbox: tickets with a flag, oldest first
+cl t needs                       the inbox: flagged tickets Claude isn't working on, oldest first
 cl t show QA-1 [--json]          details, flags, comments and activity
 cl t edit QA-1 --title ... | move QA-1 testing | rm QA-1
 cl t comment QA-1 "also cover logout" --send

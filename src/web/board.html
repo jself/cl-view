@@ -210,6 +210,8 @@ async function act(key, action, body, msg) {
 }
 
 const flagDetail = (f) => { try { return JSON.parse(f.detail); } catch { return null; } };
+// The human is holding it up: it has a flag and Claude isn't working on it.
+const needsMe = (row) => row.ticket.flags.length > 0 && row.ticket.stage !== "done" && !row.working;
 const asks = (t) => t.flags.filter((f) => f.kind !== "testing" || t.stage === "testing");
 function askText(t, f) {
   const d = flagDetail(f);
@@ -247,7 +249,7 @@ function visible() {
     if (q && !(t.key + " " + t.title + " " + t.body).toLowerCase().includes(q)) return false;
     const f = state.filter;
     if (f === "all") return true;
-    if (f === "me") return t.flags.length > 0;
+    if (f === "me") return needsMe(row);
     if (f === "working") return row.status === "busy";
     return t.flags.some((x) => x.kind === f);
   });
@@ -268,7 +270,7 @@ function render() {
 }
 
 function renderNeeds() {
-  const rows = state.data.tickets.filter((r) => r.ticket.flags.length && r.ticket.stage !== "done");
+  const rows = state.data.tickets.filter(needsMe);
   rows.sort((a, b) => Math.min(...a.ticket.flags.map((f) => f.at)) - Math.min(...b.ticket.flags.map((f) => f.at)));
   const box = document.getElementById("needs");
   box.style.display = rows.length ? "" : "none";
@@ -298,7 +300,7 @@ function renderNeeds() {
 
 function renderFilters() {
   const d = state.data; const all = d.tickets.filter((r) => state.subs || !r.ticket.parent);
-  const n = (f) => all.filter((r) => f === "all" || (f === "me" ? r.ticket.flags.length : f === "working" ? r.status === "busy" : r.ticket.flags.some((x) => x.kind === f))).length;
+  const n = (f) => all.filter((r) => f === "all" || (f === "me" ? needsMe(r) : f === "working" ? r.status === "busy" : r.ticket.flags.some((x) => x.kind === f))).length;
   const chips = [["all", "All"], ["me", "Needs me"], ["input", "Needs input"], ["question", "Questions"], ["review", "Review"], ["testing", "Testing"], ["working", "Working"]];
   document.getElementById("filters").innerHTML = chips.map(([k, l]) =>
       `<button type="button" class="chip ${state.filter === k ? "on" : ""}" data-filter="${k}" aria-pressed="${state.filter === k}">${l}<span class="n">${n(k)}</span></button>`).join("")

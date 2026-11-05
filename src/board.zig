@@ -499,6 +499,9 @@ pub const Filter = struct {
     flag: ?[]const u8 = null,
     /// Only tickets with any active flag (the inbox), oldest ask first.
     needs: bool = false,
+    /// With `needs`: the tmux sessions that are busy. A ticket one of them is
+    /// working on is left out; it comes back once its session stops.
+    busy: []const []const u8 = &.{},
     /// Full-text search over keys, titles, bodies and comments.
     search: ?[]const u8 = null,
     /// Include Done tickets (always included when filtering by stage).
@@ -561,9 +564,30 @@ pub fn listTickets(db: Db, a: std.mem.Allocator, f: Filter) Error![]Ticket {
     if (fts.len > 0) try st.bind(4, fts);
     if (f.parent) |k| try st.bind(5, k);
     var out: std.ArrayList(Ticket) = .empty;
-    while (try st.step()) try out.append(a, try readTicket(st, a));
+    while (try st.step()) {
+        const t = try readTicket(st, a);
+        if (f.needs and try isWorking(db, t, f.busy)) continue;
+        try out.append(a, t);
+    }
     for (out.items) |*t| t.flags = try activeFlags(db, a, t.id);
     return out.toOwnedSlice(a);
+}
+
+/// The ticket a session is on: the newest one there in progress (Running,
+/// Planning) or finishing, else the newest one there not done.
+pub fn sessionTicket(db: Db, tmux_name: []const u8) Error!?i64 {
+    return db.int(
+        \\SELECT id FROM tickets WHERE tmux = ?1 AND stage != 'done'
+        \\ORDER BY (stage IN ('running', 'planning') OR finishing != '') DESC, id DESC LIMIT 1
+    , .{tmux_name});
+}
+
+/// Is Claude working on `t` right now: its session is one of the `busy` ones
+/// and is on it? Then it isn't waiting on the human, whatever its flags say.
+pub fn isWorking(db: Db, t: Ticket, busy: []const []const u8) Error!bool {
+    if (t.tmux.len == 0) return false;
+    for (busy) |b| if (std.mem.eql(u8, b, t.tmux)) return (try sessionTicket(db, t.tmux)) == t.id;
+    return false;
 }
 
 /// Change the given fields of a ticket.
@@ -853,6 +877,22 @@ test "projects, tickets, flags, comments, done" {
     try testing.expectEqual(Stage.running, t3.stage);
     try testing.expectEqual(@as(i64, 2), t3.round);
     try testing.expectEqual(@as(usize, 0), t3.flags.len);
+
+    // A busy session's ticket isn't waiting on the human; it is again once
+    // the session stops. A busy session speaks only for the ticket it is on.
+    try setSession(ctx, db, t3.id, "cl_qa_1", "", "", "");
+    try done(ctx, db, a, k1, "Covered logout too");
+    const busy: []const []const u8 = &.{"cl_qa_1"};
+    try testing.expectEqual(@as(usize, 0), (try listTickets(db, a, .{ .needs = true, .busy = busy })).len);
+    try testing.expectEqual(@as(usize, 1), (try listTickets(db, a, .{ .needs = true })).len);
+    // QA-2 (Planning) starts in the same session: busy, it is on QA-2.
+    const t2b = try getTicket(db, a, k2);
+    try setSession(ctx, db, t2b.id, "cl_qa_1", "", "", "");
+    try testing.expect(!try isWorking(db, try getTicket(db, a, k1), busy));
+    try testing.expect(try isWorking(db, try getTicket(db, a, k2), busy));
+    try testing.expectEqual(@as(usize, 1), (try listTickets(db, a, .{ .needs = true, .busy = busy })).len);
+    try setSession(ctx, db, t2b.id, "", "", "", "");
+    _ = try addComment(ctx, db, a, k1, "you", "also cover logout", true);
 
     // Search covers titles and comments.
     try testing.expectEqual(@as(usize, 1), (try listTickets(db, a, .{ .search = "logout" })).len);

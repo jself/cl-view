@@ -5,6 +5,7 @@ const std = @import("std");
 const Ctx = @import("ctx.zig");
 const config = @import("config.zig");
 const tmux = @import("tmux.zig");
+const claude = @import("claude.zig");
 const board = @import("board.zig");
 const dispatch = @import("dispatch.zig");
 const worktree = @import("worktree.zig");
@@ -24,7 +25,8 @@ pub const ticket_usage =
     \\      [--top] [--parent <key>]
     \\                              tickets, newest first (--needs: oldest ask first;
     \\                              --top: no sub-tickets; --parent: its sub-tickets)
-    \\  needs                       tickets with a flag, oldest first (the inbox)
+    \\  needs                       tickets with a flag, oldest first (the inbox); a ticket
+    \\                              whose session is working on it is left out until it stops
     \\  show <key>                  details, flags, sub-tickets, comments and activity
     \\  edit <key> [--title <t>] [-m <body>] [--project <p>] [--worktree | --queue]
     \\      [--target <session>] [--plan | --no-plan] [--skill <name>] [--profile <name>]
@@ -299,11 +301,14 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
     if (std.mem.eql(u8, cmd, "list") or std.mem.eql(u8, cmd, "ls") or std.mem.eql(u8, cmd, "needs")) {
         args.only(&.{ "--stage", "--project", "--flag", "--needs", "--search", "--open", "--top", "--parent", "--json" }, ticket_usage);
         if (pos.len != 0) fail("{s} takes no arguments\n{s}", .{ cmd, ticket_usage });
+        const needs = args.has("--needs") or std.mem.eql(u8, cmd, "needs");
         const ts = board.listTickets(db, a, .{
             .stage = if (args.get("--stage")) |s| parseStage(s) else null,
             .project = args.get("--project"),
             .flag = args.get("--flag"),
-            .needs = args.has("--needs") or std.mem.eql(u8, cmd, "needs"),
+            .needs = needs,
+            // Tickets Claude is working on aren't waiting on the human.
+            .busy = if (needs) claude.busySessions(ctx, a, cfg) catch &.{} else &.{},
             .search = args.get("--search"),
             .done = !args.has("--open"),
             .top = args.has("--top"),

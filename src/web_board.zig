@@ -301,26 +301,30 @@ const TicketRow = struct {
     ticket: board.Ticket,
     /// The live session's status ("" without one).
     status: []const u8,
+    /// Claude is working on it now: it stays out of Needs You until it stops.
+    working: bool = false,
 };
 
-fn sessionStatuses(ctx: Ctx, cfg: config.Config, a: std.mem.Allocator) !struct { rows: []SessionRow, map: std.StringHashMapUnmanaged([]const u8) } {
+fn sessionStatuses(ctx: Ctx, cfg: config.Config, a: std.mem.Allocator) !struct { rows: []SessionRow, map: std.StringHashMapUnmanaged([]const u8), busy: []const []const u8 } {
     const sessions = try tmux.list(ctx, a);
     const statuses = try claude.readStatuses(ctx, a, cfg);
     var rows: std.ArrayList(SessionRow) = .empty;
     var map: std.StringHashMapUnmanaged([]const u8) = .empty;
+    var busy: std.ArrayList([]const u8) = .empty;
     for (sessions) |s| {
-        const st = claude.statusFor(ctx, statuses, s).label();
-        try rows.append(a, .{ .tmux = s.tmux_name, .name = s.name, .dir = s.dir, .status = st });
-        try map.put(a, s.tmux_name, st);
+        const st = claude.statusFor(ctx, statuses, s);
+        try rows.append(a, .{ .tmux = s.tmux_name, .name = s.name, .dir = s.dir, .status = st.label() });
+        try map.put(a, s.tmux_name, st.label());
+        if (st == .busy) try busy.append(a, s.tmux_name);
     }
-    return .{ .rows = rows.items, .map = map };
+    return .{ .rows = rows.items, .map = map, .busy = busy.items };
 }
 
 fn getBoard(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: *std.http.Server.Request) !void {
     const ss = try sessionStatuses(ctx, cfg, a);
     const tickets = try board.listTickets(db, a, .{});
     var rows: std.ArrayList(TicketRow) = .empty;
-    for (tickets) |t| try rows.append(a, .{ .ticket = t, .status = ss.map.get(t.tmux) orelse "" });
+    for (tickets) |t| try rows.append(a, .{ .ticket = t, .status = ss.map.get(t.tmux) orelse "", .working = try board.isWorking(db, t, ss.busy) });
     var profiles: std.ArrayList([]const u8) = .empty;
     for (cfg.profiles) |p| try profiles.append(a, p.name);
     try ok(req, a, .{

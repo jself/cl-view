@@ -15,6 +15,9 @@ password), with a phone layout, and can be wrapped as a desktop app later.
   - `review`: Claude said it's done and no feedback is needed (auto, see Done)
   - `testing`: needs you to try it (auto on Review → Testing, or by hand)
   - anything you set by hand
+
+  A ticket whose session is busy working on it is left out of the inbox (the
+  board's strip and `cl ticket needs`) until the session stops.
 - **Views**: Board (stage columns), Lanes (project rows × stage columns), List.
   "Needs you" is an expanding strip at the top of every view, with a card per
   ask and its quick actions; it is the main thing to use while work runs.

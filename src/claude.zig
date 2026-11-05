@@ -350,6 +350,16 @@ pub fn statusFor(ctx: Ctx, map: StatusMap, s: tmux.Session) Status {
     return .unknown;
 }
 
+/// The tmux names of sessions that are busy (Claude is working). Empty when
+/// tmux isn't running.
+pub fn busySessions(ctx: Ctx, arena: std.mem.Allocator, cfg: config.Config) ![]const []const u8 {
+    const sessions = tmux.list(ctx, arena) catch return &.{};
+    const statuses = try readStatuses(ctx, arena, cfg);
+    var out: std.ArrayList([]const u8) = .empty;
+    for (sessions) |s| if (statusFor(ctx, statuses, s) == .busy) try out.append(arena, s.tmux_name);
+    return out.toOwnedSlice(arena);
+}
+
 fn hasBraille(s: []const u8) bool {
     var it = std.unicode.Utf8View.initUnchecked(s).iterator();
     while (it.nextCodepoint()) |cp| {
