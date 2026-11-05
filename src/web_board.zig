@@ -360,9 +360,13 @@ fn getTicket(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, r
     const t = try board.getTicket(db, a, key);
     const ss = try sessionStatuses(ctx, cfg, a);
     const live = t.tmux.len > 0 and ss.map.contains(t.tmux);
+    // The tail keeps its colors and links (SGR and OSC 8 escapes): the board
+    // draws it with xterm.js at the pane's width.
     var tail: []const u8 = "";
+    var tail_cols: u16 = 0;
     if (live) {
-        const raw = tmux.capturePlainLines(ctx, t.tmux, 50) catch "";
+        tail_cols = tmux.paneWidth(ctx, t.tmux) catch 0;
+        const raw = tmux.capture(ctx, t.tmux, 50) catch "";
         tail = try a.dupe(u8, std.mem.trimEnd(u8, raw, "\n "));
         if (raw.len > 0) ctx.gpa.free(raw);
     }
@@ -379,6 +383,7 @@ fn getTicket(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, r
         .comments = try board.comments(db, a, t.id),
         .events = try board.events(db, a, t.id),
         .tail = tail,
+        .tail_cols = tail_cols,
         .dir = dir,
         .guide = dir.len > 0 and review.hasGuide(ctx, a, dir),
         .test_plan = if (dir.len > 0) review.readTestPlan(ctx, a, dir) else null,

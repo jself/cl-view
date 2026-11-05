@@ -287,6 +287,13 @@ pub fn capture(ctx: Ctx, tmux_name: []const u8, lines: usize) ![]u8 {
     return run(ctx, &.{ "capture-pane", "-t", tmux_name, "-p", "-e", "-S", start });
 }
 
+/// The width of the session's active pane, in columns.
+pub fn paneWidth(ctx: Ctx, tmux_name: []const u8) !u16 {
+    const out = try run(ctx, &.{ "display-message", "-p", "-t", tmux_name, "#{pane_width}" });
+    defer ctx.gpa.free(out);
+    return std.fmt.parseInt(u16, std.mem.trim(u8, out, " \n"), 10);
+}
+
 /// Plain-text capture of the last `lines` lines of the pane. Caller owns result.
 pub fn capturePlainLines(ctx: Ctx, tmux_name: []const u8, lines: usize) ![]u8 {
     var buf: [16]u8 = undefined;

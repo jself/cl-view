@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
 <meta name="color-scheme" content="dark">
 <title>cl board</title>
+<link rel="stylesheet" href="/xterm.css">
 <script>
   // Everything on the board is sized in --u, one scaled pixel, so the whole
   // page scales like browser zoom: by web.font_size from the config (in
@@ -151,6 +152,22 @@
   .tabs button.on { color: #fff; border-bottom-color: #7fb2ff; }
   pre.term { margin: 0; background: #0b0b0c; border: 1px solid var(--line2); border-radius: calc(10 * var(--u)); padding: calc(10 * var(--u)) calc(12 * var(--u)); font: calc(12 * var(--u))/1.5 var(--mono);
              white-space: pre-wrap; overflow-wrap: anywhere; max-height: 50vh; overflow-y: auto; }
+  .tail { position: relative; }
+  /* The session's screen at its own width: a wide pane scrolls sideways. */
+  .tail .tailterm { height: 50vh; overflow-x: auto; overflow-y: hidden; background: #0b0b0c; border: 1px solid var(--line2);
+                    border-radius: calc(10 * var(--u)); padding: calc(8 * var(--u)) 0 calc(8 * var(--u)) calc(10 * var(--u)); }
+  .tail .tailterm .xterm { height: 100%; }
+  .tail .tobottom { position: absolute; right: calc(14 * var(--u)); bottom: calc(10 * var(--u)); padding: calc(6 * var(--u)) calc(12 * var(--u));
+                    border: 1px solid var(--line2); border-radius: 999px; background: rgba(40, 42, 48, .7); color: #fff; opacity: .75;
+                    font-size: calc(12.5 * var(--u)); cursor: pointer; backdrop-filter: blur(2px); }
+  .tail .tobottom:hover { opacity: 1; }
+  .tail .tobottom[hidden] { display: none; }
+  /* Opens the session in the full terminal view, like Open shell. */
+  .tail .maximize { position: absolute; top: calc(8 * var(--u)); right: calc(18 * var(--u)); display: grid; place-items: center;
+                    width: calc(30 * var(--u)); height: calc(30 * var(--u)); border: 1px solid var(--line2); border-radius: calc(8 * var(--u));
+                    background: rgba(40, 42, 48, .7); color: #fff; opacity: .6; backdrop-filter: blur(2px); }
+  .tail .maximize:hover { opacity: 1; }
+  .tail .maximize svg { width: calc(15 * var(--u)); height: calc(15 * var(--u)); }
   .opts { display: grid; grid-template-columns: repeat(auto-fit, minmax(calc(200 * var(--u)), 1fr)); gap: calc(8 * var(--u)); }
   .opt { display: flex; flex-direction: column; align-items: flex-start; gap: calc(2 * var(--u)); padding: calc(10 * var(--u)) calc(12 * var(--u)); border: 1px solid var(--line);
          border-radius: calc(10 * var(--u)); background: var(--card); cursor: pointer; text-align: left; }
@@ -215,6 +232,8 @@
 <dialog id="killDlg" aria-label="Kill the session" style="width:min(calc(480 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="killBody"></div></dialog>
 <div id="toast" role="status"></div>
 
+<script src="/xterm.js"></script>
+<script src="/addon-fit.js"></script>
 <script>
 "use strict";
 const STAGES = ["backlog", "planning", "queued", "running", "review", "testing", "done"];
@@ -451,7 +470,7 @@ function listHtml(rows) {
 // The terminal page shows the ticket's title above the session.
 function shellHref(t) { return `/?attach=${encodeURIComponent(t.tmux)}&ticket=${encodeURIComponent(t.key)}`; }
 async function openTicket(key, tab) {
-  state.open = key; state.tab = tab || null; state.picks = {}; state.other = {}; state.checks = {};
+  state.open = key; state.tab = tab || null; state.tailPinned = true; tail.text = null; state.picks = {}; state.other = {}; state.checks = {};
   document.getElementById("ticketBody").innerHTML = `<p class="muted">Loading ${esc(key)}…</p>`;
   const dlg = document.getElementById("ticketDlg"); if (!dlg.open) dlg.showModal();
   await loadDetail(key);
@@ -462,9 +481,90 @@ async function loadDetail(key, quiet) {
   // Keep what's being typed: only redraw when nothing in the popup has focus.
   const focused = document.activeElement && document.getElementById("ticketDlg").contains(document.activeElement) && /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName);
   if (quiet && state.sending) return;
-  if (quiet && focused) { const pre = document.querySelector("#ticketBody pre.term"); if (pre && state.tab === "session") pre.textContent = state.detail.tail || "(no session)"; return; }
+  if (quiet && focused) { drawTail(); return; }
   // A refresh keeps the popup's scroll and the session tail's.
   if (quiet) keepScroll(document.getElementById("ticketDlg"), renderDetail); else renderDetail();
+  drawTail();
+}
+
+// ---- session tail ----
+// The Session tab draws the session's screen with xterm.js, colors and links
+// included, at the pane's width. One terminal lives across the popup's
+// redraws, moved into each new #tailSlot. It follows new output, like tmux,
+// until it's scrolled up; then, like tmux's copy mode, it holds still (no
+// redraws) and a "Scroll to bottom" button shows over it. Back at the bottom
+// it catches up and follows again.
+const tail = { term: null, fit: null, el: null, text: null, writing: false, leftAt: 0 };
+const atBottom = (term) => term.buffer.active.viewportY >= term.buffer.active.baseY;
+function setPinned(pinned) {
+  const was = state.tailPinned; state.tailPinned = pinned;
+  const b = document.getElementById("toBottom"); if (b) b.hidden = pinned;
+  if (pinned && !was) drawTail(); // catch up on what came in while scrolled up
+}
+const openLink = (uri) => { if (/^https?:\/\//i.test(uri)) window.open(uri, "_blank", "noopener"); };
+function tailTerm() {
+  const term = new Terminal({
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, "DejaVu Sans Mono", monospace',
+    fontSize: Math.round(12 * (Number(document.documentElement.style.getPropertyValue("--font")) || 14) / 14),
+    disableStdin: true, cursorInactiveStyle: "none", convertEol: true, scrollback: 1000,
+    theme: { background: "#0b0b0c" },
+    // Claude's links (OSC 8).
+    linkHandler: { activate: (e, uri) => openLink(uri) },
+  });
+  // Bare URLs too.
+  term.registerLinkProvider({ provideLinks(y, done) {
+    const line = term.buffer.active.getLine(y - 1)?.translateToString(true) || "";
+    const links = [...line.matchAll(/https?:\/\/[^\s"'<>()]*[^\s"'<>().,;:!?]/g)].map((m) => ({
+      range: { start: { x: m.index + 1, y }, end: { x: m.index + m[0].length, y } }, text: m[0], activate: () => openLink(m[0]) }));
+    done(links.length ? links : undefined);
+  } });
+  // It's read-only: leave every key to the page, so Escape still closes the
+  // popup once the terminal has focus.
+  term.attachCustomKeyEventHandler(() => false);
+  tail.fit = new FitAddon.FitAddon(); term.loadAddon(tail.fit);
+  term.open(tail.el);
+  // Scrolling by hand (back down to the bottom, too) decides whether it
+  // follows. This runs after xterm.js's own handler has moved the buffer.
+  // Right after a wheel up, a scroll event still at the bottom is xterm.js
+  // catching up on a redraw, not the human coming back down.
+  tail.el.querySelector(".xterm-viewport").addEventListener("scroll", () => {
+    if (tail.writing) return;
+    const bottom = atBottom(term);
+    if (!bottom || performance.now() - tail.leftAt > 300) setPinned(bottom);
+  });
+  // xterm.js moves the buffer a moment after a wheel or swipe, and a refresh
+  // in between would snap back to the bottom: a wheel up or a swipe down
+  // leaves the bottom right away.
+  const leaving = () => {
+    if (term.buffer.active.baseY === 0) return;
+    tail.leftAt = performance.now(); setPinned(false);
+  };
+  let touchY = 0;
+  tail.el.addEventListener("wheel", (e) => { if (e.deltaY < 0) leaving(); }, { passive: true });
+  tail.el.addEventListener("touchstart", (e) => { touchY = e.touches[0].clientY; }, { passive: true });
+  tail.el.addEventListener("touchmove", (e) => { if (e.touches[0].clientY > touchY) leaving(); touchY = e.touches[0].clientY; }, { passive: true });
+  return term;
+}
+function drawTail() {
+  const d = state.detail; const slot = document.getElementById("tailSlot");
+  if (!tail.el) { tail.el = document.createElement("div"); tail.el.className = "tailterm"; }
+  if (slot) slot.replaceWith(tail.el);
+  if (!d || !tail.el.isConnected) return;
+  tail.term ??= tailTerm();
+  const term = tail.term;
+  // Where it is now decides, read from the terminal (a fresh popup or tab
+  // resets tail.text and starts at the bottom). Just after a wheel up, the
+  // terminal may not have moved yet: that counts as scrolled up.
+  if (tail.text !== null && !tail.writing && performance.now() - tail.leftAt > 300) state.tailPinned = atBottom(term);
+  const b = document.getElementById("toBottom"); if (b) b.hidden = state.tailPinned;
+  if (!state.tailPinned) return;
+  const rows = tail.fit.proposeDimensions()?.rows || 24, cols = d.tail_cols || 80;
+  if (cols !== term.cols || rows !== term.rows) { term.resize(cols, rows); tail.text = null; }
+  const text = d.tail || (d.ticket.tmux ? "(the session is gone)" : "(not started yet)");
+  if (text === tail.text) { term.scrollToBottom(); return; }
+  tail.text = text; tail.writing = true;
+  term.reset();
+  term.write(text, () => { tail.writing = false; if (state.tailPinned) term.scrollToBottom(); });
 }
 function tabsFor(d) {
   const t = d.ticket; const tabs = [];
@@ -483,6 +583,7 @@ function renderDetail() {
   for (const id of ["commentText", "msg", "backText", "testNote"]) { const el = document.getElementById(id); if (el) kept[id] = el.value; }
   renderDetailInner();
   for (const [id, v] of Object.entries(kept)) { const el = document.getElementById(id); if (el && v) el.value = v; }
+  drawTail();
 }
 function renderDetailInner() {
   const d = state.detail; const t = d.ticket; const tabs = tabsFor(d);
@@ -523,7 +624,9 @@ function tabHtml(d) {
     case "review": return reviewTab(d);
     case "test": return testTab(d);
     case "comments": return commentsTab(d);
-    case "session": return `<pre class="term">${esc(d.tail || (t.tmux ? "(the session is gone)" : "(not started yet)"))}</pre>
+    case "session": return `<div class="tail"><div id="tailSlot"></div>
+      ${t.tmux && d.status && d.status !== "gone" ? `<a class="maximize" href="${shellHref(t)}" title="Open the shell" aria-label="Open the shell"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 2.5h4v4M6.5 13.5h-4v-4M13.5 2.5l-4.5 4.5M2.5 13.5 7 9"/></svg></a>` : ""}
+      <button type="button" class="tobottom" id="toBottom" hidden>Scroll to bottom ↓</button></div>
       ${t.tmux ? `<div style="display:flex;gap:calc(8 * var(--u));margin-top:calc(10 * var(--u))"><input type="text" id="msg" placeholder="Message Claude" style="flex:1;min-width:0"><button type="button" class="btn primary" id="sendMsg">Send</button></div>` : ""}`;
     case "subs": return `<div style="display:flex;flex-direction:column;gap:calc(8 * var(--u))">${d.subtickets.map((r) => cardHtml(r)).join("")}</div>`;
     case "activity": return `<ol class="muted" style="margin:0;padding-left:calc(20 * var(--u));display:flex;flex-direction:column;gap:calc(4 * var(--u))">${d.events.map((e) =>
@@ -858,7 +961,8 @@ document.addEventListener("click", async (e) => {
   }
   if (ds.open) return openTicket(ds.open, ds.tab);
   const key = state.open; if (!key) return;
-  if (ds.tab) { state.tab = ds.tab; renderDetail(); return; }
+  if (ds.tab) { state.tab = ds.tab; state.tailPinned = true; tail.text = null; renderDetail(); return; }
+  if (el.id === "toBottom") { tail.term?.scrollToBottom(); setPinned(true); return; }
   if (ds.move) return act(key, "move", { stage: ds.move }, "Moved");
   if (ds.relocate) {
     let r; try { r = await act(key, "relocate", { mode: ds.relocate }); } catch { return; }
@@ -978,7 +1082,7 @@ function restoreScrolls(saved) {
 addEventListener("pagehide", () => {
   const drafts = {}; for (const id of DRAFTS) { const el = document.getElementById(id); if (el?.value) drafts[id] = el.value; }
   const place = { filter: state.filter, project: state.project, search: state.search, open: state.open, tab: state.tab,
-    picks: state.picks, other: state.other, checks: state.checks, drafts, scrolls: scrolls(), page: [scrollX, scrollY] };
+    picks: state.picks, other: state.other, checks: state.checks, tailPinned: state.tailPinned, drafts, scrolls: scrolls(), page: [scrollX, scrollY] };
   try { sessionStorage.setItem("cl-board-place", JSON.stringify(place)); } catch {}
 });
 async function restorePlace() {
@@ -1000,6 +1104,8 @@ async function restorePlace() {
   for (const [id, v] of Object.entries(place.drafts || {})) { const el = document.getElementById(id); if (el) el.value = v; }
   restoreScrolls(place.scrolls || []);
   scrollTo(...(place.page || [0, 0]));
+  // Back at the bottom if it was following; where it was if scrolled up.
+  if (place.tailPinned !== false) { tail.term?.scrollToBottom(); setPinned(true); }
 }
 
 restorePlace();
