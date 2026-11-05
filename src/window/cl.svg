@@ -1,11 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
   <rect x="8" y="8" width="112" height="112" rx="22" fill="#161616"/>
   <rect x="8" y="8" width="112" height="112" rx="22" fill="none" stroke="#2563eb" stroke-width="4"/>
-  <rect x="24" y="28" width="22" height="14" rx="3" fill="#3b82f6"/>
-  <rect x="24" y="46" width="22" height="14" rx="3" fill="#3b82f6" opacity=".6"/>
-  <rect x="53" y="28" width="22" height="14" rx="3" fill="#a3a3a3"/>
-  <rect x="82" y="28" width="22" height="14" rx="3" fill="#a3a3a3" opacity=".6"/>
-  <rect x="82" y="46" width="22" height="14" rx="3" fill="#a3a3a3" opacity=".6"/>
-  <polyline points="28,74 44,86 28,98" fill="none" stroke="#e5e5e5" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
-  <rect x="52" y="93" width="30" height="7" rx="3" fill="#e5e5e5"/>
+  <rect x="24" y="36" width="16" height="16" rx="4" fill="#3b82f6"/>
+  <polyline points="28,44 31,47.5 36,40.5" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="48" y="40" width="30" height="8" rx="4" fill="#a3a3a3" opacity=".6"/>
+  <rect x="24" y="60" width="16" height="16" rx="4" fill="#3b82f6"/>
+  <polyline points="28,68 31,71.5 36,64.5" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="48" y="64" width="40" height="8" rx="4" fill="#a3a3a3" opacity=".6"/>
+  <rect x="25.5" y="85.5" width="13" height="13" rx="3" fill="none" stroke="#e5e5e5" stroke-width="3"/>
+  <rect x="48" y="88" width="34" height="8" rx="4" fill="#e5e5e5"/>
+  <path d="M94 20 C95.5 30 98 32.5 108 34 C98 35.5 95.5 38 94 48 C92.5 38 90 35.5 80 34 C90 32.5 92.5 30 94 20 Z" fill="#f59e0b"/>
+  <path d="M104 50 C104.6 54 105.5 54.9 109.5 55.5 C105.5 56.1 104.6 57 104 61 C103.4 57 102.5 56.1 98.5 55.5 C102.5 54.9 103.4 54 104 50 Z" fill="#f59e0b" opacity=".7"/>
 </svg>
