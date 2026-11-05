@@ -323,6 +323,17 @@ pub fn pasteFile(ctx: Ctx, tmux_name: []const u8, path: []const u8) !void {
     try runQuiet(ctx, &.{ "send-keys", "-t", tmux_name, "Enter" });
 }
 
+/// Paste `text` into the session as one bracketed paste, then press Enter.
+pub fn pasteText(ctx: Ctx, tmux_name: []const u8, text: []const u8) !void {
+    // A buffer per session, so two pastes into different sessions can't mix.
+    var buf_name: [128]u8 = undefined;
+    const buf = std.fmt.bufPrint(&buf_name, "cl-paste-{s}", .{tmux_name}) catch "cl-paste";
+    try runQuiet(ctx, &.{ "set-buffer", "-b", buf, "--", text });
+    try runQuiet(ctx, &.{ "paste-buffer", "-p", "-d", "-b", buf, "-t", tmux_name });
+    ctx.sleepMs(300);
+    try runQuiet(ctx, &.{ "send-keys", "-t", tmux_name, "Enter" });
+}
+
 /// Attach the current terminal to a session; returns when the client detaches.
 pub fn attach(ctx: Ctx, tmux_name: []const u8) !void {
     try ensureDetachBinding(ctx);

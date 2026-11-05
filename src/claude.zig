@@ -459,11 +459,18 @@ test trustYesSelected {
 /// With `accept_trust`, answer the folder-trust dialog with yes (for
 /// worktrees cl made from a repo you put on the board).
 pub fn sendInitialMessage(ctx: Ctx, tmux_name: []const u8, message: []const u8, accept_trust: bool) !void {
+    try waitForPrompt(ctx, tmux_name, accept_trust);
+    ctx.sleepMs(300);
+    try submit(ctx, tmux_name, message, false);
+}
+
+/// Wait (up to 60 s) for Claude's prompt to show in the pane.
+pub fn waitForPrompt(ctx: Ctx, tmux_name: []const u8, accept_trust: bool) !void {
     var tries: usize = 0;
     while (tries < 300) : (tries += 1) {
         const text = tmux.capturePlain(ctx, tmux_name) catch return error.TmuxFailed;
         defer ctx.gpa.free(text);
-        if (promptVisible(text)) break;
+        if (promptVisible(text)) return;
         if (accept_trust and trustDialog(text)) {
             // "No, exit" is selected first. Claude may not be reading keys
             // yet when the dialog shows, so press Enter only once the cursor
@@ -473,12 +480,23 @@ pub fn sendInitialMessage(ctx: Ctx, tmux_name: []const u8, message: []const u8, 
             ctx.sleepMs(300);
         }
         ctx.sleepMs(200);
-    } else return error.PromptTimeout;
-    ctx.sleepMs(300);
-    try tmux.sendLine(ctx, tmux_name, message);
+    }
+    return error.PromptTimeout;
+}
+
+/// Type `message` into the composer and press Enter. With `paste`,
+/// multi-line text goes in as one bracketed paste, so its newlines can't
+/// submit it in pieces.
+pub fn submit(ctx: Ctx, tmux_name: []const u8, message: []const u8, paste: bool) !void {
+    if (paste and std.mem.indexOfScalar(u8, message, '\n') != null) {
+        try tmux.pasteText(ctx, tmux_name, message);
+    } else {
+        try tmux.sendLine(ctx, tmux_name, message);
+    }
     // If the text is still sitting in the composer after a moment, press
     // Enter again. A multi-line message shows there as "[Pasted text #1 ...]".
-    const tail = message[0..@min(message.len, 40)];
+    const first = std.mem.sliceTo(message, '\n');
+    const tail = first[0..@min(first.len, 40)];
     for (0..3) |_| {
         ctx.sleepMs(1500);
         const text = tmux.capturePlain(ctx, tmux_name) catch return;

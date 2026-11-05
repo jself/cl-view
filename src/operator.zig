@@ -7,6 +7,7 @@ const Ctx = @import("ctx.zig");
 const config = @import("config.zig");
 const tmux = @import("tmux.zig");
 const launch = @import("launch.zig");
+const claude = @import("claude.zig");
 
 /// Appended to Claude's system prompt, so it always matches this binary.
 /// A CLAUDE.md in the operator's directory can add personal instructions.
@@ -171,4 +172,49 @@ pub fn ensure(ctx: Ctx, cfg: config.Config) ![]const u8 {
         .continue_flag = true,
         .extra = &.{ "--append-system-prompt", instructions },
     });
+}
+
+/// Type `text` into the operator and press Enter, starting it first if it
+/// isn't running (the board's Quick Ticket button). Multi-line text arrives
+/// as one message. Starting it happens here, so a failure to start is
+/// reported; waiting for its prompt and typing happen on a thread of their
+/// own, so the caller doesn't wait. Returns whether it had to be started.
+pub fn sendInBackground(ctx: Ctx, cfg: config.Config, text: []const u8) !bool {
+    var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);
+    defer arena_state.deinit();
+    const was_running = (try tmux.operator(ctx, arena_state.allocator())) != null;
+    const tmux_name = try ensure(ctx, cfg);
+    const owned = try ctx.gpa.dupe(u8, text);
+    errdefer ctx.gpa.free(owned);
+    const t = try std.Thread.spawn(.{}, deliver, .{ ctx, tmux_name, owned, !was_running });
+    t.detach();
+    return !was_running;
+}
+
+fn deliver(ctx: Ctx, tmux_name: []const u8, text: []const u8, fresh: bool) void {
+    defer ctx.gpa.free(text);
+    if (fresh) {
+        claude.waitForPrompt(ctx, tmux_name, false) catch |err| {
+            std.log.err("quick ticket: the operator's prompt didn't show ({s}); not sent", .{@errorName(err)});
+            return;
+        };
+        ctx.sleepMs(300);
+    }
+    claude.submit(ctx, tmux_name, text, true) catch |err|
+        std.log.err("quick ticket: couldn't type into the operator ({s})", .{@errorName(err)});
+}
+
+/// What the Quick Ticket button sends: the prefix, then the human's words.
+pub fn quickTicketText(a: std.mem.Allocator, text: []const u8) ![]const u8 {
+    const t = std.mem.trim(u8, text, " \t\r\n");
+    if (t.len == 0) return error.BadInput;
+    return std.fmt.allocPrint(a, "Add a Ticket: {s}", .{t});
+}
+
+test quickTicketText {
+    const a = std.testing.allocator;
+    const s = try quickTicketText(a, "  fix the login page\nit 500s\n");
+    defer a.free(s);
+    try std.testing.expectEqualStrings("Add a Ticket: fix the login page\nit 500s", s);
+    try std.testing.expectError(error.BadInput, quickTicketText(a, " \n "));
 }

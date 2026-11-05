@@ -348,4 +348,5 @@ test {
     std.testing.refAllDecls(@import("review.zig"));
     std.testing.refAllDecls(window);
     std.testing.refAllDecls(@import("web_board.zig"));
+    std.testing.refAllDecls(operator);
 }

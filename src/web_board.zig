@@ -23,6 +23,7 @@ const dispatch = @import("dispatch.zig");
 const review = @import("review.zig");
 const worktree = @import("worktree.zig");
 const web = @import("web.zig");
+const operator = @import("operator.zig");
 
 const board_html = @embedFile("web/board.html");
 
@@ -98,6 +99,7 @@ pub fn handle(ctx: Ctx, cfg: config.Config, req: *std.http.Server.Request, path:
             error.Busy => .{ .conflict, "Claude is working in its session or waiting on you; it can move once it is idle" },
             error.NoChange => .{ .conflict, "its work has no jj change of its own to move with it" },
             error.SessionFailed => .{ .internal_server_error, "the session didn't start" },
+            error.OperatorFailed => .{ .internal_server_error, "couldn't reach the operator; open Chat to check on it" },
             error.OpenSubtickets => .{ .conflict, "it has sub-tickets that aren't done yet; finish them or spin them off" },
             error.NoTestPlan => .{ .not_found, "no test plan" },
             error.NoLaunch => .{ .not_found, "the test plan has no launch command" },
@@ -200,6 +202,12 @@ fn route(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: 
         }
         try ticketAction(ctx, cfg, db, a, req, name, action, b);
         return;
+    }
+    // The Quick Ticket button: hand the human's words to the operator.
+    if (std.mem.eql(u8, what, "operator") and std.mem.eql(u8, name, "quick-ticket")) {
+        const text = try operator.quickTicketText(a, b.text orelse "");
+        const started = operator.sendInBackground(ctx, cfg, text) catch return error.OperatorFailed;
+        return ok(req, a, .{ .ok = true, .started = started });
     }
     if (std.mem.eql(u8, what, "project")) {
         if (name.len == 0) {

@@ -227,6 +227,7 @@
   </div>
   <a class="btn" href="/">Terminal</a>
   <a class="btn" href="/?attach=operator" title="Talk to the operator: it can make tickets and check on sessions">Chat</a>
+  <button type="button" class="btn" id="quickBtn" title="Tell the operator what to add; it makes the ticket">Quick ticket</button>
   <button type="button" class="btn primary" id="newBtn">New ticket</button>
 </header>
 
@@ -244,6 +245,12 @@
 <dialog id="newDlg" aria-label="New ticket"><div class="dlg" id="newBody"></div></dialog>
 <dialog id="finishDlg" aria-label="Finish the ticket" style="width:min(calc(480 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="finishBody"></div></dialog>
 <dialog id="subsDlg" aria-label="Unfinished sub-tickets" style="width:min(calc(520 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="subsBody"></div></dialog>
+<dialog id="quickDlg" aria-label="Quick ticket" style="width:min(calc(520 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg">
+  <div class="head"><h1 style="flex:1">Quick ticket</h1><button type="button" class="btn" id="closeQuick">Cancel</button></div>
+  <form class="form" id="quickForm">
+    <label>What should be added<textarea name="text" rows="4" required placeholder="In your own words. The operator picks the project and the rest."></textarea></label>
+    <p class="muted" style="margin:0">Enter sends it to the operator as &ldquo;Add a Ticket: &hellip;&rdquo;; Shift+Enter starts a new line.</p>
+    <div class="actions"><button type="submit" class="btn primary" id="quickSend">Send to the operator</button></div></form></div></dialog>
 <dialog id="killDlg" aria-label="Kill the session" style="width:min(calc(480 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="killBody"></div></dialog>
 <div id="toast" role="status"></div>
 
@@ -832,6 +839,25 @@ async function submitNew(form) {
   } catch (e) { toast(e.message, true); }
 }
 
+// ---- quick ticket: the human's words go to the operator, which makes the ticket ----
+function openQuick() {
+  const form = document.getElementById("quickForm");
+  form.reset(); document.getElementById("quickDlg").showModal(); form.elements.text.focus();
+}
+// The dialog closes at once; the server types it into the operator in the background.
+async function submitQuick(form) {
+  const text = form.elements.text.value.trim();
+  if (!text) return;
+  document.getElementById("quickDlg").close();
+  try {
+    const r = await api("operator/quick-ticket", { text });
+    toast(r.started ? "Starting the operator; it gets your ticket once it's up" : "Sent to the operator");
+  } catch (e) { toast(e.message, true); }
+}
+document.getElementById("quickForm").elements.text.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); e.target.form.requestSubmit(); }
+});
+
 // ---- drag a card to another column, or up and down for priority ----
 // Pointer events rather than HTML5 drag and drop, so it works on touch and on
 // <button> cards. A mouse picks a card up once it moves; a finger has to hold
@@ -1021,6 +1047,8 @@ document.addEventListener("click", async (e) => {
   if (el.id === "newBtn") return openNew(null);
   if (ds.newWhen || ds.newProject) return openNew(null, { when: ds.newWhen, project: ds.newProject });
   if (el.id === "closeNew") return document.getElementById("newDlg").close();
+  if (el.id === "quickBtn") return openQuick();
+  if (el.id === "closeQuick") return document.getElementById("quickDlg").close();
   if (el.id === "closeDlg") { document.getElementById("ticketDlg").close(); return; }
   if (ds.finish !== undefined) { document.getElementById("finishDlg").close(ds.finish); return; }
   if (el.id === "spinOff" || el.id === "spinCancel") { document.getElementById("subsDlg").close(el.id === "spinOff" ? "spin" : ""); return; }
@@ -1143,6 +1171,7 @@ document.addEventListener("keydown", (e) => {
 document.addEventListener("submit", async (e) => {
   e.preventDefault();
   if (e.target.id === "newForm") return submitNew(e.target);
+  if (e.target.id === "quickForm") return submitQuick(e.target);
   if (e.target.id === "editForm") {
     const f = Object.fromEntries(new FormData(e.target));
     await act(state.open, "edit", { title: f.title, body: f.body, project: f.project, mode: f.mode, target: f.target, plan: f.plan === "1", skill: f.skill }, "Saved");
