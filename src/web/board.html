@@ -27,6 +27,7 @@
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; background: var(--bg); color: var(--fg); font: calc(14 * var(--u))/1.4 var(--sans); }
+  body { overflow-x: clip; } /* wide content scrolls inside its own box (board columns, tables); the page never pans sideways */
   button, input, select, textarea { font: inherit; color: inherit; }
   a { color: #8fbcff; }
   .mono { font-family: var(--mono); }
@@ -45,7 +46,7 @@
   input[type=search], input[type=text], select, textarea {
     min-height: calc(36 * var(--u)); padding: calc(6 * var(--u)) calc(10 * var(--u)); border: 1px solid var(--line); border-radius: calc(8 * var(--u)); background: #18191c; }
   textarea { width: 100%; resize: vertical; }
-  #search { min-width: 0; flex: 1 1 calc(180 * var(--u)); max-width: calc(320 * var(--u)); }
+  #search { min-width: 0; flex: 0 1 calc(280 * var(--u)); margin-left: auto; }
 
   #needs { margin: calc(12 * var(--u)) calc(16 * var(--u)) 0; border: 1px solid #3a2f1a; background: #17150f; border-radius: calc(14 * var(--u)); }
   #needs > .nhd { display: flex; align-items: center; }
@@ -66,10 +67,18 @@
   .ask .acts { display: flex; flex-wrap: wrap; gap: calc(6 * var(--u)); margin-top: auto; }
 
   nav#filters { display: flex; flex-wrap: wrap; align-items: center; gap: calc(8 * var(--u)); padding: calc(12 * var(--u)) calc(16 * var(--u)); }
-  .chip { display: inline-flex; align-items: center; gap: calc(7 * var(--u)); min-height: calc(34 * var(--u)); padding: 0 calc(12 * var(--u)); border-radius: calc(17 * var(--u));
-          border: 1px solid var(--line); background: #18191c; color: #d6d7da; cursor: pointer; white-space: nowrap; flex: none; }
-  .chip.on { background: #ececec; color: #111214; border-color: #ececec; }
-  .chip .n { font: calc(12 * var(--u)) var(--mono); opacity: .8; }
+  nav#filters select { min-height: calc(34 * var(--u)); }
+  .switch { position: relative; display: inline-flex; align-items: center; gap: calc(8 * var(--u)); min-height: calc(34 * var(--u)); padding: 0 calc(4 * var(--u));
+            cursor: pointer; white-space: nowrap; flex: none; color: #d6d7da; user-select: none; }
+  .switch input { position: absolute; opacity: 0; width: 1px; height: 1px; margin: 0; }
+  .switch .track { position: relative; flex: none; width: calc(34 * var(--u)); height: calc(20 * var(--u)); border-radius: calc(10 * var(--u));
+                   background: #3a3c42; transition: background .15s; }
+  .switch .track::after { content: ""; position: absolute; top: calc(2 * var(--u)); left: calc(2 * var(--u)); width: calc(16 * var(--u)); height: calc(16 * var(--u));
+                          border-radius: 50%; background: #c4c6ca; transition: transform .15s, background .15s; }
+  .switch input:checked + .track { background: var(--accent); }
+  .switch input:checked + .track::after { transform: translateX(calc(14 * var(--u))); background: #fff; }
+  .switch input:focus-visible + .track { outline: 2px solid #8fbcff; outline-offset: 2px; }
+  .switch .n { font: calc(12 * var(--u)) var(--mono); color: var(--muted); }
 
   main { padding: 0 calc(16 * var(--u)) calc(32 * var(--u)); }
   .cols { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(calc(230 * var(--u)), 1fr); gap: calc(12 * var(--u)); overflow-x: auto;
@@ -207,9 +216,16 @@
            border-radius: calc(10 * var(--u)); display: none; max-width: calc(100vw - calc(32 * var(--u))); z-index: 10; }
   #toast.err { background: #7f1d1d; }
   .empty { color: var(--muted); padding: calc(24 * var(--u)) calc(4 * var(--u)); }
+  /* Tablets, folding phones and phones: search gets its own full-width row,
+     the dropdowns share the rest, and nothing in the bar can widen the page. */
+  @media (max-width: 1024px) {
+    nav#filters > * { min-width: 0; max-width: 100%; }
+    nav#filters select { flex: 1 1 calc(140 * var(--u)); }
+    #search { flex: 1 1 100%; margin-left: 0; }
+  }
   @media (max-width: 640px) {
-    header { padding: calc(10 * var(--u)) calc(12 * var(--u)); } main { padding: 0 calc(12 * var(--u)) calc(24 * var(--u)); } nav#filters { padding: calc(10 * var(--u)) calc(12 * var(--u)); flex-wrap: nowrap; overflow-x: auto; }
-    #needs { margin: calc(10 * var(--u)) calc(12 * var(--u)) 0; } #needs .sum#needsSum { display: none; } #search { max-width: none; }
+    header { padding: calc(10 * var(--u)) calc(12 * var(--u)); } main { padding: 0 calc(12 * var(--u)) calc(24 * var(--u)); } nav#filters { padding: calc(10 * var(--u)) calc(12 * var(--u)); }
+    #needs { margin: calc(10 * var(--u)) calc(12 * var(--u)) 0; } #needs .sum#needsSum { display: none; }
     .cols { grid-auto-columns: 86vw; }
     dialog { width: 100vw; max-width: 100vw; height: 100dvh; max-height: 100dvh; border-radius: 0; margin: 0; }
     .dlg { padding: calc(14 * var(--u)); }
@@ -221,7 +237,6 @@
   <span class="title">cl board</span>
   <span id="summary" class="muted"></span>
   <span class="grow"></span>
-  <input id="search" type="search" placeholder="Search tickets" aria-label="Search tickets">
   <div class="seg" role="group" aria-label="View">
     <button type="button" data-view="board">Board</button><button type="button" data-view="lanes">Lanes</button><button type="button" data-view="list">List</button>
   </div>
@@ -238,7 +253,13 @@
   <div class="strip" id="needsStrip"></div>
 </section>
 
-<nav id="filters" aria-label="Filters"></nav>
+<nav id="filters" aria-label="Filters">
+  <select id="statusSel" aria-label="Status"></select>
+  <select id="projectSel" aria-label="Project"></select>
+  <label class="switch"><input type="checkbox" role="switch" id="subsSw"><span class="track"></span>Sub-tickets</label>
+  <label class="switch"><input type="checkbox" role="switch" id="doneSw"><span class="track"></span>Done<span class="n" id="doneN"></span></label>
+  <input id="search" type="search" placeholder="Search tickets" aria-label="Search tickets">
+</nav>
 <main id="main"></main>
 
 <dialog id="ticketDlg" aria-label="Ticket"><div class="dlg" id="ticketBody"></div></dialog>
@@ -443,12 +464,16 @@ function renderFilters() {
   const d = state.data; const mine = d.tickets.filter((r) => state.subs || !r.ticket.parent);
   const done = mine.filter((r) => r.ticket.stage === "done").length; const all = state.done ? mine : mine.filter((r) => r.ticket.stage !== "done");
   const n = (f) => all.filter((r) => f === "all" || (f === "me" ? needsMe(r) : f === "working" ? r.status === "busy" : r.ticket.flags.some((x) => x.kind === f))).length;
-  const chips = [["all", "All"], ["me", "Needs me"], ["input", "Needs input"], ["question", "Questions"], ["review", "Review"], ["testing", "Testing"], ["working", "Working"]];
-  setHtml(document.getElementById("filters"), chips.map(([k, l]) =>
-      `<button type="button" class="chip ${state.filter === k ? "on" : ""}" data-filter="${k}" aria-pressed="${state.filter === k}">${l}<span class="n">${n(k)}</span></button>`).join("")
-    + `<select id="projectSel" aria-label="Project"><option value="">All projects</option>${d.projects.map((p) => `<option ${p.name === state.project ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select>`
-    + `<button type="button" class="chip ${state.subs ? "on" : ""}" id="subsBtn" aria-pressed="${state.subs}">Sub-tickets<span class="n">${state.subs ? "shown" : "hidden"}</span></button>`
-    + `<button type="button" class="chip ${state.done ? "on" : ""}" id="doneBtn" aria-pressed="${state.done}">Done<span class="n">${state.done ? "shown" : done + " hidden"}</span></button>`);
+  const statuses = [["all", "All tickets"], ["me", "Needs me"], ["input", "Needs input"], ["question", "Questions"], ["review", "Review"], ["testing", "Testing"], ["working", "Working"]];
+  setHtml(document.getElementById("statusSel"), statuses.map(([k, l]) =>
+    `<option value="${k}" ${state.filter === k ? "selected" : ""}>${l} (${n(k)})</option>`).join(""));
+  setHtml(document.getElementById("projectSel"), `<option value="">All projects</option>`
+    + d.projects.map((p) => `<option ${p.name === state.project ? "selected" : ""}>${esc(p.name)}</option>`).join(""));
+  document.getElementById("statusSel").value = state.filter;
+  document.getElementById("projectSel").value = state.project;
+  document.getElementById("subsSw").checked = state.subs;
+  document.getElementById("doneSw").checked = state.done;
+  document.getElementById("doneN").textContent = !state.done && done ? `${done} hidden` : "";
 }
 
 function cardHtml(row, compact) {
@@ -1040,9 +1065,6 @@ document.addEventListener("click", async (e) => {
   const el = e.target.closest("button, a, tr.row"); if (!el) return;
   const ds = el.dataset;
   if (ds.view) { state.view = ds.view; store("cl-view", ds.view); render(); return; }
-  if (ds.filter) { state.filter = ds.filter; render(); return; }
-  if (el.id === "doneBtn") { state.done = !state.done; store("cl-done", state.done ? "1" : "0"); render(); return; }
-  if (el.id === "subsBtn") { state.subs = !state.subs; store("cl-subs", state.subs ? "1" : "0"); render(); return; }
   if (el.id === "needsToggle") { state.needsOpen = !state.needsOpen; store("cl-needs", state.needsOpen ? "1" : "0"); renderNeeds(); return; }
   if (el.id === "newBtn") return openNew(null);
   if (ds.newWhen || ds.newProject) return openNew(null, { when: ds.newWhen, project: ds.newProject });
@@ -1145,7 +1167,10 @@ document.addEventListener("input", (e) => {
   if (e.target.id === "search") { state.search = e.target.value; render(); }
 });
 document.addEventListener("change", (e) => {
+  if (e.target.id === "statusSel") { state.filter = e.target.value; render(); }
   if (e.target.id === "projectSel") { state.project = e.target.value; render(); }
+  if (e.target.id === "doneSw") { state.done = e.target.checked; store("cl-done", state.done ? "1" : "0"); render(); }
+  if (e.target.id === "subsSw") { state.subs = e.target.checked; store("cl-subs", state.subs ? "1" : "0"); render(); }
   if (e.target.id === "stageSel" && state.open) moveTo(state.open, e.target.value);
 });
 document.addEventListener("keydown", (e) => {
