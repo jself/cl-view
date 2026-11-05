@@ -5,8 +5,16 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
 <meta name="color-scheme" content="dark">
 <title>cl board</title>
+<script>
+  // Everything on the board is sized in --u, one scaled pixel, so the whole
+  // page scales like browser zoom: by web.font_size from the config (in
+  // --font, set by the server; 14 is the unscaled size) times this browser's
+  // Ctrl+= / Ctrl+- zoom.
+  try { document.documentElement.style.setProperty("--zoom", localStorage.getItem("cl-board-zoom") || 1); } catch {}
+</script>
 <style>
   :root {
+    --u: calc(1px * var(--font, 14) / 14 * var(--zoom, 1));
     --bg: #111214; --panel: #16171a; --card: #1f2024; --line: #2c2e33; --line2: #24262a;
     --fg: #ececec; --muted: #a0a3a8; --dim: #b4b6ba; --accent: #2a4f86; --accent-fg: #fff;
     --input: #ffc861; --input-bg: #3a2a0b; --question: #cdb8ff; --question-bg: #2c2440;
@@ -17,78 +25,78 @@
     --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
   * { box-sizing: border-box; }
-  html, body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.4 var(--sans); }
+  html, body { margin: 0; background: var(--bg); color: var(--fg); font: calc(14 * var(--u))/1.4 var(--sans); }
   button, input, select, textarea { font: inherit; color: inherit; }
   a { color: #8fbcff; }
   .mono { font-family: var(--mono); }
   .muted { color: var(--muted); }
-  header { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--line2); }
-  header .title { font: 500 17px var(--mono); }
-  header .grow { flex: 1 1 40px; }
-  .btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 36px; padding: 0 12px;
-         border-radius: 8px; border: 1px solid var(--line); background: #26282d; color: #e6e7e9; cursor: pointer; text-decoration: none; white-space: nowrap; }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: calc(10 * var(--u)); padding: calc(12 * var(--u)) calc(16 * var(--u)); border-bottom: 1px solid var(--line2); }
+  header .title { font: 500 calc(17 * var(--u)) var(--mono); }
+  header .grow { flex: 1 1 calc(40 * var(--u)); }
+  .btn { display: inline-flex; align-items: center; justify-content: center; gap: calc(6 * var(--u)); min-height: calc(36 * var(--u)); padding: 0 calc(12 * var(--u));
+         border-radius: calc(8 * var(--u)); border: 1px solid var(--line); background: #26282d; color: #e6e7e9; cursor: pointer; text-decoration: none; white-space: nowrap; }
   .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
   .btn.danger { border-color: #6b2b2b; color: #ffb4b4; }
   .btn:disabled { opacity: .5; cursor: default; }
-  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
-  .seg button { min-height: 36px; padding: 0 12px; border: 0; background: #18191c; color: #c4c6ca; cursor: pointer; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: calc(10 * var(--u)); overflow: hidden; }
+  .seg button { min-height: calc(36 * var(--u)); padding: 0 calc(12 * var(--u)); border: 0; background: #18191c; color: #c4c6ca; cursor: pointer; }
   .seg button.on { background: var(--line); color: #fff; }
   input[type=search], input[type=text], select, textarea {
-    min-height: 36px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px; background: #18191c; }
+    min-height: calc(36 * var(--u)); padding: calc(6 * var(--u)) calc(10 * var(--u)); border: 1px solid var(--line); border-radius: calc(8 * var(--u)); background: #18191c; }
   textarea { width: 100%; resize: vertical; }
-  #search { min-width: 0; flex: 1 1 180px; max-width: 320px; }
+  #search { min-width: 0; flex: 1 1 calc(180 * var(--u)); max-width: calc(320 * var(--u)); }
 
-  #needs { margin: 12px 16px 0; border: 1px solid #3a2f1a; background: #17150f; border-radius: 14px; }
-  #needs > button { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 46px; padding: 0 14px; border: 0;
-                    background: transparent; cursor: pointer; text-align: left; font-weight: 600; font-size: 15px; }
+  #needs { margin: calc(12 * var(--u)) calc(16 * var(--u)) 0; border: 1px solid #3a2f1a; background: #17150f; border-radius: calc(14 * var(--u)); }
+  #needs > button { display: flex; align-items: center; gap: calc(10 * var(--u)); width: 100%; min-height: calc(46 * var(--u)); padding: 0 calc(14 * var(--u)); border: 0;
+                    background: transparent; cursor: pointer; text-align: left; font-weight: 600; font-size: calc(15 * var(--u)); }
   #needs .count { font-family: var(--mono); color: var(--input); }
   #needs > button > span:first-child { white-space: nowrap; }
-  #needs .sum { font-weight: 400; font-size: 13px; color: #b9ad94; }
-  #needs .strip { display: flex; gap: 12px; overflow-x: auto; padding: 0 14px 14px; scroll-snap-type: x mandatory; }
+  #needs .sum { font-weight: 400; font-size: calc(13 * var(--u)); color: #b9ad94; }
+  #needs .strip { display: flex; gap: calc(12 * var(--u)); overflow-x: auto; padding: 0 calc(14 * var(--u)) calc(14 * var(--u)); scroll-snap-type: x mandatory; }
   #needs.closed .strip { display: none; }
-  .ask { flex: none; width: 300px; max-width: 85vw; scroll-snap-align: start; background: #1a1b1e; border: 1px solid var(--line);
-         border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
-  .ask .what { font-size: 12.5px; color: var(--dim); line-height: 1.45; overflow-wrap: anywhere; }
-  .ask .acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: auto; }
+  .ask { flex: none; width: calc(300 * var(--u)); max-width: 85vw; scroll-snap-align: start; background: #1a1b1e; border: 1px solid var(--line);
+         border-radius: calc(12 * var(--u)); padding: calc(12 * var(--u)); display: flex; flex-direction: column; gap: calc(8 * var(--u)); }
+  .ask .what { font-size: calc(12.5 * var(--u)); color: var(--dim); line-height: 1.45; overflow-wrap: anywhere; }
+  .ask .acts { display: flex; flex-wrap: wrap; gap: calc(6 * var(--u)); margin-top: auto; }
 
-  nav#filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px 16px; }
-  .chip { display: inline-flex; align-items: center; gap: 7px; min-height: 34px; padding: 0 12px; border-radius: 17px;
+  nav#filters { display: flex; flex-wrap: wrap; align-items: center; gap: calc(8 * var(--u)); padding: calc(12 * var(--u)) calc(16 * var(--u)); }
+  .chip { display: inline-flex; align-items: center; gap: calc(7 * var(--u)); min-height: calc(34 * var(--u)); padding: 0 calc(12 * var(--u)); border-radius: calc(17 * var(--u));
           border: 1px solid var(--line); background: #18191c; color: #d6d7da; cursor: pointer; white-space: nowrap; flex: none; }
   .chip.on { background: #ececec; color: #111214; border-color: #ececec; }
-  .chip .n { font: 12px var(--mono); opacity: .8; }
+  .chip .n { font: calc(12 * var(--u)) var(--mono); opacity: .8; }
 
-  main { padding: 0 16px 32px; }
-  .cols { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(230px, 1fr); gap: 12px; overflow-x: auto;
-          align-items: start; scroll-snap-type: x mandatory; padding-bottom: 8px; }
-  .col { background: var(--panel); border: 1px solid #222428; border-radius: 12px; padding: 10px; display: flex; flex-direction: column;
-         gap: 8px; min-height: 160px; scroll-snap-align: start; }
-  .col h2 { margin: 0; font-size: 13px; font-weight: 600; display: flex; gap: 8px; align-items: center; padding: 2px 4px; }
-  .col h2 .n { font: 12px var(--mono); color: var(--muted); }
-  .card { width: 100%; text-align: left; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 11px;
-          display: flex; flex-direction: column; gap: 6px; cursor: pointer; color: var(--fg); }
+  main { padding: 0 calc(16 * var(--u)) calc(32 * var(--u)); }
+  .cols { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(calc(230 * var(--u)), 1fr); gap: calc(12 * var(--u)); overflow-x: auto;
+          align-items: start; scroll-snap-type: x mandatory; padding-bottom: calc(8 * var(--u)); }
+  .col { background: var(--panel); border: 1px solid #222428; border-radius: calc(12 * var(--u)); padding: calc(10 * var(--u)); display: flex; flex-direction: column;
+         gap: calc(8 * var(--u)); min-height: calc(160 * var(--u)); scroll-snap-align: start; }
+  .col h2 { margin: 0; font-size: calc(13 * var(--u)); font-weight: 600; display: flex; gap: calc(8 * var(--u)); align-items: center; padding: calc(2 * var(--u)) calc(4 * var(--u)); }
+  .col h2 .n { font: calc(12 * var(--u)) var(--mono); color: var(--muted); }
+  .card { width: 100%; text-align: left; background: var(--card); border: 1px solid var(--line); border-radius: calc(10 * var(--u)); padding: calc(11 * var(--u));
+          display: flex; flex-direction: column; gap: calc(6 * var(--u)); cursor: pointer; color: var(--fg); }
   .card.hot { border-color: #f5a524; }
-  .card .top { display: flex; gap: 8px; font: 11.5px var(--mono); color: var(--muted); }
+  .card .top { display: flex; gap: calc(8 * var(--u)); font: calc(11.5 * var(--u)) var(--mono); color: var(--muted); }
   .card .top .grow { flex: 1; }
-  .card .t { font-size: 14px; font-weight: 500; line-height: 1.35; }
-  .card .meta { font: 11.5px var(--mono); color: var(--dim); overflow-wrap: anywhere; }
-  .card .sub { font: 11.5px var(--mono); color: var(--question); }
+  .card .t { font-size: calc(14 * var(--u)); font-weight: 500; line-height: 1.35; }
+  .card .meta { font: calc(11.5 * var(--u)) var(--mono); color: var(--dim); overflow-wrap: anywhere; }
+  .card .sub { font: calc(11.5 * var(--u)) var(--mono); color: var(--question); }
   .card[data-drag] { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
   .card.lifted { opacity: .35; }
-  #ghost { position: fixed; z-index: 20; pointer-events: none; margin: 0; box-shadow: 0 12px 32px rgba(0,0,0,.55); transform: rotate(1.5deg); opacity: .95; }
-  .drop-on { outline: 2px dashed #60a5fa; outline-offset: -2px; background: #16202e; }
-  .lanes td.drop-on { border-radius: 10px; }
+  #ghost { position: fixed; z-index: 20; pointer-events: none; margin: 0; box-shadow: 0 calc(12 * var(--u)) calc(32 * var(--u)) rgba(0,0,0,.55); transform: rotate(1.5deg); opacity: .95; }
+  .drop-on { outline: calc(2 * var(--u)) dashed #60a5fa; outline-offset: calc(-2 * var(--u)); background: #16202e; }
+  .lanes td.drop-on { border-radius: calc(10 * var(--u)); }
   /* Where a dragged card would land in its column: a line in the gap between cards. */
   .card { position: relative; }
-  .card.ins-above::before, .card.ins-below::after { content: ""; position: absolute; left: 4px; right: 4px; height: 3px; border-radius: 2px;
+  .card.ins-above::before, .card.ins-below::after { content: ""; position: absolute; left: calc(4 * var(--u)); right: calc(4 * var(--u)); height: calc(3 * var(--u)); border-radius: calc(2 * var(--u));
     background: #60a5fa; pointer-events: none; z-index: 21; box-shadow: 0 0 0 1px #0b0b0c; } /* over the ghost */
-  .card.ins-above::before { top: -6px; } .card.ins-below::after { bottom: -6px; }
-  .lanes .card.ins-above::before { top: -5px; } .lanes .card.ins-below::after { bottom: -5px; }
-  .status { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; color: #d6d7da; }
-  .dot { width: 8px; height: 8px; border-radius: 4px; flex: none; display: inline-block; background: #5d6168; }
+  .card.ins-above::before { top: calc(-6 * var(--u)); } .card.ins-below::after { bottom: calc(-6 * var(--u)); }
+  .lanes .card.ins-above::before { top: calc(-5 * var(--u)); } .lanes .card.ins-below::after { bottom: calc(-5 * var(--u)); }
+  .status { display: inline-flex; align-items: center; gap: calc(7 * var(--u)); font-size: calc(12.5 * var(--u)); color: #d6d7da; }
+  .dot { width: calc(8 * var(--u)); height: calc(8 * var(--u)); border-radius: calc(4 * var(--u)); flex: none; display: inline-block; background: #5d6168; }
   .s-busy { background: #60a5fa; } .s-waiting, .s-blocked { background: #f5a524; } .s-idle { background: #a0a3a8; }
   .s-shell { background: #2dd4bf; } .s-gone { background: #f87171; } .s-starting { background: #a78bfa; } .s-none { background: transparent; border: 1px solid #5d6168; }
-  .pills { display: flex; flex-wrap: wrap; gap: 5px; }
-  .pill { display: inline-flex; align-items: center; height: 22px; padding: 0 8px; border-radius: 11px; font-size: 11.5px;
+  .pills { display: flex; flex-wrap: wrap; gap: calc(5 * var(--u)); }
+  .pill { display: inline-flex; align-items: center; height: calc(22 * var(--u)); padding: 0 calc(8 * var(--u)); border-radius: calc(11 * var(--u)); font-size: calc(11.5 * var(--u));
           background: var(--other-bg); color: var(--other); white-space: nowrap; }
   .f-input { background: var(--input-bg); color: var(--input); } .f-question { background: var(--question-bg); color: var(--question); }
   .f-review { background: var(--review-bg); color: var(--review); } .f-testing { background: var(--testing-bg); color: var(--testing); }
@@ -96,61 +104,61 @@
   .f-finishing { background: var(--finishing-bg); color: var(--finishing); }
 
   .lanes { overflow-x: auto; }
-  .lanes table { border-collapse: separate; border-spacing: 8px 0; min-width: 1100px; width: 100%; }
-  .lanes th { text-align: left; font-size: 11.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); padding: 4px 0; }
-  .lanes td { vertical-align: top; padding: 10px 0; border-top: 1px solid var(--line2); }
-  .lanes td.lane { width: 150px; }
-  .lanes td > div { display: flex; flex-direction: column; gap: 6px; }
+  .lanes table { border-collapse: separate; border-spacing: calc(8 * var(--u)) 0; min-width: calc(1100 * var(--u)); width: 100%; }
+  .lanes th { text-align: left; font-size: calc(11.5 * var(--u)); font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); padding: calc(4 * var(--u)) 0; }
+  .lanes td { vertical-align: top; padding: calc(10 * var(--u)) 0; border-top: 1px solid var(--line2); }
+  .lanes td.lane { width: calc(150 * var(--u)); }
+  .lanes td > div { display: flex; flex-direction: column; gap: calc(6 * var(--u)); }
 
-  .list { overflow-x: auto; border: 1px solid var(--line2); border-radius: 12px; }
-  .list table { border-collapse: collapse; width: 100%; min-width: 900px; }
-  .list th { text-align: left; font-size: 11.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted);
-             background: #18191c; padding: 9px 12px; }
-  .list td { padding: 9px 12px; border-top: 1px solid var(--line2); vertical-align: top; }
+  .list { overflow-x: auto; border: 1px solid var(--line2); border-radius: calc(12 * var(--u)); }
+  .list table { border-collapse: collapse; width: 100%; min-width: calc(900 * var(--u)); }
+  .list th { text-align: left; font-size: calc(11.5 * var(--u)); font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted);
+             background: #18191c; padding: calc(9 * var(--u)) calc(12 * var(--u)); }
+  .list td { padding: calc(9 * var(--u)) calc(12 * var(--u)); border-top: 1px solid var(--line2); vertical-align: top; }
   .list tr.row { cursor: pointer; }
   .list tr.row:hover td { background: #17181b; }
 
-  dialog { padding: 0; border: 1px solid var(--line); border-radius: 16px; background: #17181b; color: var(--fg);
-           width: min(900px, calc(100vw - 24px)); max-height: calc(100dvh - 40px); }
+  dialog { padding: 0; border: 1px solid var(--line); border-radius: calc(16 * var(--u)); background: #17181b; color: var(--fg);
+           width: min(calc(900 * var(--u)), calc(100vw - calc(24 * var(--u)))); max-height: calc(100dvh - calc(40 * var(--u))); }
   dialog::backdrop { background: rgba(5, 5, 6, .66); }
-  .dlg { padding: 18px 20px 20px; display: flex; flex-direction: column; gap: 12px; }
-  .dlg .head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
-  .dlg h1 { margin: 0; font-size: 21px; font-weight: 600; overflow-wrap: anywhere; }
-  .dlg .facts { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 13px; color: var(--dim); }
-  .dlg .actions { display: flex; flex-wrap: wrap; gap: 8px; }
-  .tabs { display: flex; gap: 18px; border-bottom: 1px solid var(--line); overflow-x: auto; }
-  .tabs button { min-height: 40px; padding: 0 2px; border: 0; border-bottom: 2px solid transparent; background: none; color: var(--muted); cursor: pointer; white-space: nowrap; }
+  .dlg { padding: calc(18 * var(--u)) calc(20 * var(--u)) calc(20 * var(--u)); display: flex; flex-direction: column; gap: calc(12 * var(--u)); }
+  .dlg .head { display: flex; flex-wrap: wrap; align-items: center; gap: calc(10 * var(--u)); }
+  .dlg h1 { margin: 0; font-size: calc(21 * var(--u)); font-weight: 600; overflow-wrap: anywhere; }
+  .dlg .facts { display: flex; flex-wrap: wrap; gap: calc(6 * var(--u)) calc(16 * var(--u)); font-size: calc(13 * var(--u)); color: var(--dim); }
+  .dlg .actions { display: flex; flex-wrap: wrap; gap: calc(8 * var(--u)); }
+  .tabs { display: flex; gap: calc(18 * var(--u)); border-bottom: 1px solid var(--line); overflow-x: auto; }
+  .tabs button { min-height: calc(40 * var(--u)); padding: 0 calc(2 * var(--u)); border: 0; border-bottom: calc(2 * var(--u)) solid transparent; background: none; color: var(--muted); cursor: pointer; white-space: nowrap; }
   .tabs button.on { color: #fff; border-bottom-color: #7fb2ff; }
-  pre.term { margin: 0; background: #0b0b0c; border: 1px solid var(--line2); border-radius: 10px; padding: 10px 12px; font: 12px/1.5 var(--mono);
+  pre.term { margin: 0; background: #0b0b0c; border: 1px solid var(--line2); border-radius: calc(10 * var(--u)); padding: calc(10 * var(--u)) calc(12 * var(--u)); font: calc(12 * var(--u))/1.5 var(--mono);
              white-space: pre-wrap; overflow-wrap: anywhere; max-height: 50vh; overflow-y: auto; }
-  .opts { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 8px; }
-  .opt { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 10px 12px; border: 1px solid var(--line);
-         border-radius: 10px; background: var(--card); cursor: pointer; text-align: left; }
+  .opts { display: grid; grid-template-columns: repeat(auto-fit, minmax(calc(200 * var(--u)), 1fr)); gap: calc(8 * var(--u)); }
+  .opt { display: flex; flex-direction: column; align-items: flex-start; gap: calc(2 * var(--u)); padding: calc(10 * var(--u)) calc(12 * var(--u)); border: 1px solid var(--line);
+         border-radius: calc(10 * var(--u)); background: var(--card); cursor: pointer; text-align: left; }
   .opt.on { border-color: #a78bfa; background: #231f33; }
   .opt small { color: var(--muted); }
-  .q { display: flex; flex-direction: column; gap: 8px; padding-bottom: 10px; }
-  .q + .q { border-top: 1px solid var(--line2); padding-top: 12px; }
-  .comment { padding: 9px 12px; border-radius: 10px; background: var(--card); }
-  .comment .who { font-size: 12px; color: var(--muted); }
+  .q { display: flex; flex-direction: column; gap: calc(8 * var(--u)); padding-bottom: calc(10 * var(--u)); }
+  .q + .q { border-top: 1px solid var(--line2); padding-top: calc(12 * var(--u)); }
+  .comment { padding: calc(9 * var(--u)) calc(12 * var(--u)); border-radius: calc(10 * var(--u)); background: var(--card); }
+  .comment .who { font-size: calc(12 * var(--u)); color: var(--muted); }
   .comment .body { white-space: pre-wrap; overflow-wrap: anywhere; }
   .comment.claude { background: #1b1f27; }
-  .form { display: grid; gap: 12px; }
-  .form label { display: flex; flex-direction: column; gap: 5px; font-size: 12.5px; color: var(--muted); }
-  .form .row2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
-  .check { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; }
-  .check .pf { display: flex; gap: 6px; }
+  .form { display: grid; gap: calc(12 * var(--u)); }
+  .form label { display: flex; flex-direction: column; gap: calc(5 * var(--u)); font-size: calc(12.5 * var(--u)); color: var(--muted); }
+  .form .row2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(calc(200 * var(--u)), 1fr)); gap: calc(12 * var(--u)); }
+  .check { display: flex; flex-direction: column; gap: calc(6 * var(--u)); padding: calc(10 * var(--u)) calc(12 * var(--u)); border: 1px solid var(--line); border-radius: calc(10 * var(--u)); }
+  .check .pf { display: flex; gap: calc(6 * var(--u)); }
   .check .pf .on.pass { background: #14532d; border-color: #14532d; }
   .check .pf .on.fail { background: #7f1d1d; border-color: #7f1d1d; }
-  #toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); background: #2c2e33; color: #fff; padding: 10px 16px;
-           border-radius: 10px; display: none; max-width: calc(100vw - 32px); z-index: 10; }
+  #toast { position: fixed; left: 50%; bottom: calc(20 * var(--u)); transform: translateX(-50%); background: #2c2e33; color: #fff; padding: calc(10 * var(--u)) calc(16 * var(--u));
+           border-radius: calc(10 * var(--u)); display: none; max-width: calc(100vw - calc(32 * var(--u))); z-index: 10; }
   #toast.err { background: #7f1d1d; }
-  .empty { color: var(--muted); padding: 24px 4px; }
+  .empty { color: var(--muted); padding: calc(24 * var(--u)) calc(4 * var(--u)); }
   @media (max-width: 640px) {
-    header { padding: 10px 12px; } main { padding: 0 12px 24px; } nav#filters { padding: 10px 12px; flex-wrap: nowrap; overflow-x: auto; }
-    #needs { margin: 10px 12px 0; } #needs .sum#needsSum { display: none; } #search { max-width: none; }
+    header { padding: calc(10 * var(--u)) calc(12 * var(--u)); } main { padding: 0 calc(12 * var(--u)) calc(24 * var(--u)); } nav#filters { padding: calc(10 * var(--u)) calc(12 * var(--u)); flex-wrap: nowrap; overflow-x: auto; }
+    #needs { margin: calc(10 * var(--u)) calc(12 * var(--u)) 0; } #needs .sum#needsSum { display: none; } #search { max-width: none; }
     .cols { grid-auto-columns: 86vw; }
     dialog { width: 100vw; max-width: 100vw; height: 100dvh; max-height: 100dvh; border-radius: 0; margin: 0; }
-    .dlg { padding: 14px; }
+    .dlg { padding: calc(14 * var(--u)); }
   }
 </style>
 </head>
@@ -179,8 +187,8 @@
 
 <dialog id="ticketDlg" aria-label="Ticket"><div class="dlg" id="ticketBody"></div></dialog>
 <dialog id="newDlg" aria-label="New ticket"><div class="dlg" id="newBody"></div></dialog>
-<dialog id="finishDlg" aria-label="Finish the ticket" style="width:min(480px, calc(100vw - 24px))"><div class="dlg" id="finishBody"></div></dialog>
-<dialog id="subsDlg" aria-label="Unfinished sub-tickets" style="width:min(520px, calc(100vw - 24px))"><div class="dlg" id="subsBody"></div></dialog>
+<dialog id="finishDlg" aria-label="Finish the ticket" style="width:min(calc(480 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="finishBody"></div></dialog>
+<dialog id="subsDlg" aria-label="Unfinished sub-tickets" style="width:min(calc(520 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="subsBody"></div></dialog>
 <div id="toast" role="status"></div>
 
 <script>
@@ -331,7 +339,7 @@ function renderNeeds() {
       : f.kind === "testing" ? `<button type="button" class="btn primary" data-open="${esc(t.key)}" data-tab="test">Test it</button>`
       : `<button type="button" class="btn primary" data-open="${esc(t.key)}" data-tab="needs">Open</button>`;
     const shell = t.tmux && r.status && r.status !== "gone" ? `<a class="btn" href="/?attach=${encodeURIComponent(t.tmux)}">Shell</a>` : "";
-    return `<div class="ask"><div class="pills"><span class="pill ${flagClass(f.kind)}">${esc(flagLabel(f))}</span><span class="mono muted" style="font-size:11.5px">${esc(t.key)} · ${ago(f.at)}</span></div>
+    return `<div class="ask"><div class="pills"><span class="pill ${flagClass(f.kind)}">${esc(flagLabel(f))}</span><span class="mono muted" style="font-size:calc(11.5 * var(--u))">${esc(t.key)} · ${ago(f.at)}</span></div>
       <div style="font-weight:500">${esc(t.title)}</div><div class="what">${esc(askText(t, f))}</div>
       ${quick ? `<div class="acts">${quick}</div>` : ""}<div class="acts">${main}${shell}</div></div>`;
   }).join(""));
@@ -369,7 +377,7 @@ function lanesHtml(rows) {
   return `<div class="lanes"><table><thead><tr><th></th>${STAGES.map((s) => `<th>${STAGE_NAME[s]}</th>`).join("")}</tr></thead><tbody>
     ${projects.map((p) => { const mine = rows.filter((r) => r.ticket.project === p.name);
       const running = mine.filter((r) => ["running", "planning"].includes(r.ticket.stage) && r.status && r.status !== "gone").length;
-      return `<tr><td class="lane"><div><strong>${esc(p.name)}</strong><span class="mono muted" style="font-size:11.5px">${p.mode === "worktree" ? `${running} of ${p.slots} running` : "queue"}</span></div></td>
+      return `<tr><td class="lane"><div><strong>${esc(p.name)}</strong><span class="mono muted" style="font-size:calc(11.5 * var(--u))">${p.mode === "worktree" ? `${running} of ${p.slots} running` : "queue"}</span></div></td>
         ${STAGES.map((s) => `<td data-drop="${s}" data-project="${esc(p.name)}"><div>${inColumn(mine, s).map((r) => cardHtml(r, true)).join("")}</div></td>`).join("")}</tr>`; }).join("")}
   </tbody></table></div>`;
 }
@@ -377,8 +385,8 @@ function listHtml(rows) {
   if (!rows.length) return `<p class="empty">Nothing matches.</p>`;
   return `<div class="list"><table><thead><tr><th>Key</th><th>Ticket</th><th>Stage</th><th>Session</th><th>Flags</th><th>Workspace</th><th>Updated</th></tr></thead><tbody>
     ${rows.map((r) => { const t = r.ticket; return `<tr class="row" data-open="${esc(t.key)}"><td class="mono muted">${esc(t.key)}</td>
-      <td><div style="font-weight:500">${esc(t.title)}</div><div class="muted" style="font-size:12px">${esc(t.project)}${t.parent ? " · sub-ticket of " + esc(t.parent) : ""}</div></td>
-      <td>${STAGE_NAME[t.stage]}</td><td>${statusHtml(r)}</td><td>${pills(t)}</td><td class="mono" style="font-size:12px">${esc(where(t))}</td><td class="muted">${ago(t.updated)}</td></tr>`; }).join("")}
+      <td><div style="font-weight:500">${esc(t.title)}</div><div class="muted" style="font-size:calc(12 * var(--u))">${esc(t.project)}${t.parent ? " · sub-ticket of " + esc(t.parent) : ""}</div></td>
+      <td>${STAGE_NAME[t.stage]}</td><td>${statusHtml(r)}</td><td>${pills(t)}</td><td class="mono" style="font-size:calc(12 * var(--u))">${esc(where(t))}</td><td class="muted">${ago(t.updated)}</td></tr>`; }).join("")}
   </tbody></table></div>`;
 }
 
@@ -433,7 +441,7 @@ function renderDetailInner() {
   const parent = t.parent ? `<button type="button" class="btn" data-open="${esc(t.parent)}">Parent ${esc(t.parent)}</button>` : "";
   document.getElementById("ticketBody").innerHTML = `
     <div class="head"><span class="mono muted">${esc(t.key)} · ${esc(t.project)}</span>${pills(t)}<span style="flex:1"></span>
-      <label class="muted" style="display:flex;gap:6px;align-items:center;font-size:13px">Stage
+      <label class="muted" style="display:flex;gap:calc(6 * var(--u));align-items:center;font-size:calc(13 * var(--u))">Stage
         <select id="stageSel">${STAGES.map((s) => `<option value="${s}" ${s === t.stage ? "selected" : ""}>${STAGE_NAME[s]}</option>`).join("")}</select></label>
       <button type="button" class="btn" id="closeDlg">Close</button></div>
     <h1>${esc(t.title)}</h1>
@@ -451,10 +459,10 @@ function tabHtml(d) {
     case "test": return testTab(d);
     case "comments": return commentsTab(d);
     case "session": return `<pre class="term">${esc(d.tail || (t.tmux ? "(the session is gone)" : "(not started yet)"))}</pre>
-      ${t.tmux ? `<div style="display:flex;gap:8px;margin-top:10px"><input type="text" id="msg" placeholder="Message Claude" style="flex:1;min-width:0"><button type="button" class="btn primary" id="sendMsg">Send</button></div>` : ""}`;
-    case "subs": return `<div style="display:flex;flex-direction:column;gap:8px">${d.subtickets.map((r) => cardHtml(r)).join("")}</div>`;
-    case "activity": return `<ol class="muted" style="margin:0;padding-left:20px;display:flex;flex-direction:column;gap:4px">${d.events.map((e) =>
-      `<li>${esc(e.kind)}${e.detail ? " · " + esc(e.detail) : ""} <span class="mono" style="font-size:11.5px">${new Date(e.at * 1000).toLocaleString()}</span></li>`).join("")}</ol>`;
+      ${t.tmux ? `<div style="display:flex;gap:calc(8 * var(--u));margin-top:calc(10 * var(--u))"><input type="text" id="msg" placeholder="Message Claude" style="flex:1;min-width:0"><button type="button" class="btn primary" id="sendMsg">Send</button></div>` : ""}`;
+    case "subs": return `<div style="display:flex;flex-direction:column;gap:calc(8 * var(--u))">${d.subtickets.map((r) => cardHtml(r)).join("")}</div>`;
+    case "activity": return `<ol class="muted" style="margin:0;padding-left:calc(20 * var(--u));display:flex;flex-direction:column;gap:calc(4 * var(--u))">${d.events.map((e) =>
+      `<li>${esc(e.kind)}${e.detail ? " · " + esc(e.detail) : ""} <span class="mono" style="font-size:calc(11.5 * var(--u))">${new Date(e.at * 1000).toLocaleString()}</span></li>`).join("")}</ol>`;
     case "details": return detailsTab(d);
   }
   return "";
@@ -463,14 +471,14 @@ function needsTab(d) {
   const t = d.ticket; const f = t.flags.find((x) => x.kind === "question") || t.flags.find((x) => x.kind === "input"); const det = flagDetail(f) || {};
   const shell = `<a class="btn" href="/?attach=${encodeURIComponent(t.tmux)}">Answer in the shell</a>`;
   if (f.kind === "question" && det.questions?.length) {
-    return det.questions.map((q, qi) => `<div class="q"><span class="muted" style="font-size:12px">${esc(q.header || "Question")}${q.multiSelect ? " · pick in the shell for several" : ""}</span>
-        <div style="font-size:15px">${esc(q.question)}</div>
+    return det.questions.map((q, qi) => `<div class="q"><span class="muted" style="font-size:calc(12 * var(--u))">${esc(q.header || "Question")}${q.multiSelect ? " · pick in the shell for several" : ""}</span>
+        <div style="font-size:calc(15 * var(--u))">${esc(q.question)}</div>
         <div class="opts">${(q.options || []).map((o, oi) => `<button type="button" class="opt ${state.picks[qi] === String(oi + 1) ? "on" : ""}" data-pick="${qi}" data-n="${oi + 1}">
           <span>${esc(o.label)}</span>${o.description ? `<small>${esc(o.description)}</small>` : ""}</button>`).join("")}</div>
         <input type="text" data-other="${qi}" placeholder="Or your own answer" value="${esc(state.other[qi] || "")}"></div>`).join("")
       + `<div class="actions"><button type="button" class="btn primary" id="sendAnswers">Send ${det.questions.length > 1 ? "answers" : "answer"}</button>${shell}</div>`;
   }
-  return `<div class="q"><span class="muted" style="font-size:12px">${esc(det.tool || "Permission prompt")}</span>
+  return `<div class="q"><span class="muted" style="font-size:calc(12 * var(--u))">${esc(det.tool || "Permission prompt")}</span>
       ${det.summary ? `<pre class="term">${esc(det.summary)}</pre>` : ""}
       <div class="opts">${(det.options || []).map((o) => `<button type="button" class="opt" data-perm="${o.n}"><span>${o.n}. ${esc(o.label)}</span></button>`).join("")}</div>
       ${det.options?.length ? "" : `<p class="muted">The options aren't on screen; answer it in the shell.</p>`}</div><div class="actions">${shell}</div>`;
@@ -478,7 +486,7 @@ function needsTab(d) {
 function sessionLive(d) { return d.ticket.tmux && d.status && d.status !== "gone"; }
 function reviewTab(d) {
   const t = d.ticket;
-  return `<div style="display:flex;flex-direction:column;gap:10px">
+  return `<div style="display:flex;flex-direction:column;gap:calc(10 * var(--u))">
     ${t.summary ? `<div class="comment claude"><div class="who">Claude's summary</div><div class="body">${esc(t.summary)}</div></div>` : ""}
     <p class="muted" style="margin:0">${d.guide ? "Claude wrote a review guide for gutter." : "No review guide yet; gutter still shows the diff."}
       ${d.gutter_port ? " gutter's window is open: submit your review there and it goes straight to Claude." : sessionLive(d) ? " gutter opens in a window; the review you submit there goes straight to Claude." : " Start the session again to review in gutter."}</p>
@@ -486,33 +494,33 @@ function reviewTab(d) {
         <button type="button" class="btn" data-act="gutter-stop">Close gutter</button>`
       : sessionLive(d) ? `<button type="button" class="btn primary" data-act="gutter">Open in gutter</button>` : ""}
       ${t.stage === "review" ? `<button type="button" class="btn" data-act="approve">Approve, to testing</button>` : ""}</div>
-    <label class="muted" style="display:flex;flex-direction:column;gap:5px;font-size:12.5px">Or say what to change (sends it back for another round)
+    <label class="muted" style="display:flex;flex-direction:column;gap:calc(5 * var(--u));font-size:calc(12.5 * var(--u))">Or say what to change (sends it back for another round)
       <textarea id="backText" rows="3"></textarea></label>
     <div class="actions"><button type="button" class="btn" id="sendBack">Send back to Claude</button></div></div>`;
 }
 function testTab(d) {
   const p = d.test_plan; const l = d.launch;
-  return `<div style="display:flex;flex-direction:column;gap:12px">
-    ${p.setup.length ? `<div><strong>Setup</strong><ol style="margin:6px 0 0;padding-left:20px">${p.setup.map((s, i) =>
-      `<li><label style="display:flex;gap:8px;align-items:flex-start"><input type="checkbox" data-setup="${i}" ${state.checks["s" + i] ? "checked" : ""}> ${esc(s)}</label></li>`).join("")}</ol></div>` : ""}
-    ${p.launch ? `<div><strong>Launch</strong><pre class="term" style="margin-top:6px">${esc(p.launch)}</pre>${p.open ? `<p style="margin:6px 0">${esc(p.open)}</p>` : ""}
+  return `<div style="display:flex;flex-direction:column;gap:calc(12 * var(--u))">
+    ${p.setup.length ? `<div><strong>Setup</strong><ol style="margin:calc(6 * var(--u)) 0 0;padding-left:calc(20 * var(--u))">${p.setup.map((s, i) =>
+      `<li><label style="display:flex;gap:calc(8 * var(--u));align-items:flex-start"><input type="checkbox" data-setup="${i}" ${state.checks["s" + i] ? "checked" : ""}> ${esc(s)}</label></li>`).join("")}</ol></div>` : ""}
+    ${p.launch ? `<div><strong>Launch</strong><pre class="term" style="margin-top:calc(6 * var(--u))">${esc(p.launch)}</pre>${p.open ? `<p style="margin:calc(6 * var(--u)) 0">${esc(p.open)}</p>` : ""}
       <div class="actions"><button type="button" class="btn primary" data-act="launch">${l ? "Restart" : "Launch"}</button>${l ? `<button type="button" class="btn" data-act="launch-stop">Stop</button>` : ""}</div>
-      ${l ? `<p class="muted" style="margin:8px 0 4px">${l.running ? "Running" : "Exited"}</p><pre class="term">${esc(l.output || "(no output yet)")}</pre>` : ""}</div>` : ""}
-    <div><strong>Checks</strong><div style="display:flex;flex-direction:column;gap:8px;margin-top:6px">${p.checks.map((c, i) => { const r = state.checks["c" + i] || {};
+      ${l ? `<p class="muted" style="margin:calc(8 * var(--u)) 0 calc(4 * var(--u))">${l.running ? "Running" : "Exited"}</p><pre class="term">${esc(l.output || "(no output yet)")}</pre>` : ""}</div>` : ""}
+    <div><strong>Checks</strong><div style="display:flex;flex-direction:column;gap:calc(8 * var(--u));margin-top:calc(6 * var(--u))">${p.checks.map((c, i) => { const r = state.checks["c" + i] || {};
       return `<div class="check"><span>${esc(c)}</span><div class="pf"><button type="button" class="btn pass ${r.pass === true ? "on" : ""}" data-check="${i}" data-pass="1">Pass</button>
         <button type="button" class="btn fail ${r.pass === false ? "on" : ""}" data-check="${i}" data-pass="0">Fail</button></div>
         ${r.pass === false ? `<input type="text" data-note="${i}" placeholder="What happened?" value="${esc(r.note || "")}">` : ""}</div>`; }).join("")}</div></div>
-    <label class="muted" style="display:flex;flex-direction:column;gap:5px;font-size:12.5px">Anything else for Claude<textarea id="testNote" rows="2">${esc(state.checks.note || "")}</textarea></label>
+    <label class="muted" style="display:flex;flex-direction:column;gap:calc(5 * var(--u));font-size:calc(12.5 * var(--u))">Anything else for Claude<textarea id="testNote" rows="2">${esc(state.checks.note || "")}</textarea></label>
     <div class="actions"><button type="button" class="btn primary" id="sendResults">Submit results</button></div></div>`;
 }
 function commentsTab(d) {
   const t = d.ticket; const back = t.stage === "review" || t.stage === "testing";
-  return `<div style="display:flex;flex-direction:column;gap:8px">${d.comments.map((c) =>
+  return `<div style="display:flex;flex-direction:column;gap:calc(8 * var(--u))">${d.comments.map((c) =>
       `<div class="comment ${c.author === "claude" ? "claude" : ""}"><div class="who">${c.author === "claude" ? "Claude" : "You"} · ${ago(c.at)}${c.sent ? " · sent" : ""}</div><div class="body">${esc(c.body)}</div></div>`).join("")}
     <textarea id="commentText" rows="3" aria-label="Comment" placeholder="Comment"></textarea>
     <div class="actions"><button type="button" class="btn" id="saveNote">Save note</button>
       <button type="button" class="btn primary" id="saveSend" ${t.tmux ? "" : "disabled"}>${back ? "Send back to Claude" : "Save and send to Claude"}</button></div>
-    ${back ? `<p class="muted" style="margin:0;font-size:12.5px">Sending a comment now starts another round: the ticket goes back to Running.</p>` : ""}</div>`;
+    ${back ? `<p class="muted" style="margin:0;font-size:calc(12.5 * var(--u))">Sending a comment now starts another round: the ticket goes back to Running.</p>` : ""}</div>`;
 }
 function detailsTab(d) {
   const t = d.ticket; const sessions = state.data.sessions;
@@ -662,9 +670,9 @@ function confirmDone(key) {
   const subs = openSubs(key);
   if (!subs.length) return Promise.resolve({});
   const dlg = document.getElementById("subsDlg");
-  document.getElementById("subsBody").innerHTML = `<h2 style="margin:0;font-size:17px">${esc(key)} can't be done yet</h2>
+  document.getElementById("subsBody").innerHTML = `<h2 style="margin:0;font-size:calc(17 * var(--u))">${esc(key)} can't be done yet</h2>
     <p class="muted" style="margin:0">It has ${subs.length} sub-ticket${subs.length > 1 ? "s" : ""} that ${subs.length > 1 ? "aren't" : "isn't"} done:</p>
-    <div style="display:flex;flex-direction:column;gap:6px">${subs.map((r) => `<div><span class="mono muted">${esc(r.ticket.key)}</span> ${esc(r.ticket.title)}
+    <div style="display:flex;flex-direction:column;gap:calc(6 * var(--u))">${subs.map((r) => `<div><span class="mono muted">${esc(r.ticket.key)}</span> ${esc(r.ticket.title)}
       <span class="muted">· ${STAGE_NAME[r.ticket.stage]}</span></div>`).join("")}</div>
     <p class="muted" style="margin:0">Spinning them off makes them tickets of their own. They keep their stage and session, and ${esc(key)} goes to Done.</p>
     <div class="actions"><button type="button" class="btn primary" id="spinOff">Spin off and finish</button><button type="button" class="btn" id="spinCancel">Cancel</button></div>`;
@@ -680,14 +688,14 @@ async function chooseFinish(key) {
   let main = state.detail?.ticket.key === key ? state.detail.main_branch : "";
   if (!main) main = (await api(`ticket/${encodeURIComponent(key)}`).catch(() => ({}))).main_branch || "master";
   const dlg = document.getElementById("finishDlg");
-  document.getElementById("finishBody").innerHTML = `<h2 style="margin:0;font-size:17px">Finish ${esc(key)}</h2>
+  document.getElementById("finishBody").innerHTML = `<h2 style="margin:0;font-size:calc(17 * var(--u))">Finish ${esc(key)}</h2>
     <p class="muted" style="margin:0">Its work is on <span class="mono">${esc(t.branch || "its jj change " + t.change.slice(0, 12))}</span>. What should happen to it?</p>
-    <div style="display:flex;flex-direction:column;gap:8px">
+    <div style="display:flex;flex-direction:column;gap:calc(8 * var(--u))">
       <button type="button" class="btn primary" data-finish="merge">Merge into ${esc(main)}</button>
       <button type="button" class="btn" data-finish="pr">Open a PR</button>
       <button type="button" class="btn" data-finish="close">Just close</button>
       <button type="button" class="btn" data-finish="">Cancel</button></div>
-    <p class="muted" style="margin:0;font-size:12.5px">${t.change ? "Merge: cl rebases its jj change onto " + esc(main) + " and moves " + esc(main) + " to it; Claude settles any conflicts and restarts what runs from the checkout. PR: Claude pushes it and opens the PR." : "Merge and PR ask Claude to do it in the ticket's session."} It stays where it is, marked Finishing, until Claude is through; then it goes to Done and the session closes.</p>`;
+    <p class="muted" style="margin:0;font-size:calc(12.5 * var(--u))">${t.change ? "Merge: cl rebases its jj change onto " + esc(main) + " and moves " + esc(main) + " to it; Claude settles any conflicts and restarts what runs from the checkout. PR: Claude pushes it and opens the PR." : "Merge and PR ask Claude to do it in the ticket's session."} It stays where it is, marked Finishing, until Claude is through; then it goes to Done and the session closes.</p>`;
   dlg.returnValue = ""; dlg.showModal();
   return new Promise((res) => { dlg.onclose = () => res(dlg.returnValue || null); });
 }
@@ -813,6 +821,23 @@ document.addEventListener("change", (e) => {
 });
 document.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && e.target.id === "msg") { e.preventDefault(); document.getElementById("sendMsg").click(); }
+});
+// Ctrl+= / Ctrl+- / Ctrl+0 zoom the board, as browser zoom would (and in
+// place of it), in the browser's own steps. Remembered per browser; 0 goes
+// back to web.font_size.
+const ZOOMS = [0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3];
+document.addEventListener("keydown", (e) => {
+  if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+  const dir = e.key === "=" || e.key === "+" ? 1 : e.key === "-" ? -1 : e.key === "0" ? 0 : null;
+  if (dir === null) return;
+  e.preventDefault();
+  const now = Number(store("cl-board-zoom")) || 1;
+  let i = ZOOMS.findIndex((z) => z >= now - 0.001);
+  if (i < 0) i = ZOOMS.length - 1;
+  const next = dir === 0 ? 1 : ZOOMS[Math.max(0, Math.min(ZOOMS.length - 1, ZOOMS[i] > now + 0.001 && dir > 0 ? i : i + dir))];
+  store("cl-board-zoom", String(next));
+  document.documentElement.style.setProperty("--zoom", next);
+  toast(`Board size ${Math.round(next * 100)}%`);
 });
 document.addEventListener("submit", async (e) => {
   e.preventDefault();

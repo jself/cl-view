@@ -168,6 +168,7 @@ window to it, and redraw).
 web.autostart = true            # start it whenever cl launches, lists or attaches
 web.listen = 127.0.0.1:8421, tailscale:8421   # one or more host:port
 web.password = $argon2id$...    # written by `cl web password`
+web.font_size = 16              # text size of the board and terminal pages, in px (default 16)
 ```
 
 - `cl web password` asks for a password and writes its hash to the config. The
@@ -187,8 +188,47 @@ web.password = $argon2id$...    # written by `cl web password`
   hash, so it survives restarts and a new password signs everyone out. Failed
   logins are limited to five a minute, and the terminal WebSocket only accepts
   same-origin connections.
+- `web.font_size` scales the whole board (cards, columns, dialogs, the ticket
+  view) and sets the terminal page's font; 14 is the size before it existed.
+  On the board, Ctrl+= / Ctrl+- / Ctrl+0 make it bigger, smaller, or back to
+  `web.font_size`, like browser zoom; each browser (and `cl window`)
+  remembers its own.
 - Attaching from the phone resizes that session to the phone's width
   (`window-size latest`); it switches back when you use it at the desk.
+
+## Window
+
+`cl window` opens the web UI (board, session terminals, chat) in its own
+desktop window, so terminal keys aren't taken by a browser. It starts `cl web`
+first if nothing answers on its port (from `web.listen`, or `CL_PORT`), and
+opens the board. Closing the window leaves `cl web` and every session running;
+reopening it comes back to the page, size and zoom you left. A second
+`cl window` raises the open one.
+
+`cl window install` adds it to the app launcher (a `.desktop` entry and icon
+under `~/.local/share`, pointing at the `cl` you ran it with).
+
+The window is `cl-window`, a small GTK 4 / WebKitGTK program that the build
+makes next to `cl` when `webkitgtk-6.0` is installed (Arch: `webkitgtk-6.0`;
+force it on or off with `-Dwindow=true|false`). Install it beside `cl`:
+
+```
+zig build -Doptimize=ReleaseSafe
+install -m755 zig-out/bin/cl zig-out/bin/cl-window ~/.local/bin/
+cl window install
+```
+
+- The web view has no browser shortcuts, so Ctrl+W, Ctrl+T, Ctrl+L, Ctrl+R
+  and the rest go to the terminal. The window's own keys use Ctrl+Shift:
+  R reloads, + / - / 0 zoom the page (terminal included), I opens the web
+  inspector. On the board, Ctrl+= / Ctrl+- resize it too (see `web.font_size`).
+- Sign in once; the cookie and page storage are kept in
+  `~/.local/share/cl/window`. Its log is `~/.local/state/cl/window.log`.
+- Links to other sites and "open in the browser" links (gutter) open in the
+  default browser.
+- Without `cl-window` (release binaries are static and don't include it),
+  `cl window` opens a Chromium-family browser with `--app`, or else the default
+  browser. Those keep Ctrl+W, Ctrl+T and Ctrl+N for themselves.
 
 ## Board
 

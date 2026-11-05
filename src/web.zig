@@ -232,7 +232,7 @@ fn pipe(ctx: Ctx, from: std.Io.net.Stream, to: std.Io.net.Stream) void {
 /// standalone installs don't put it on PATH).
 const tailscale_clis = [_][]const u8{ "tailscale", "/Applications/Tailscale.app/Contents/MacOS/Tailscale" };
 
-fn tailscaleIp(ctx: Ctx, buf: []u8) ![]const u8 {
+pub fn tailscaleIp(ctx: Ctx, buf: []u8) ![]const u8 {
     for (tailscale_clis) |cli| {
         const r = std.process.run(ctx.gpa, ctx.io, .{ .argv = &.{ cli, "ip", "-4" } }) catch continue;
         defer ctx.gpa.free(r.stdout);
@@ -308,7 +308,13 @@ fn handleRequest(state: *State, req: *std.http.Server.Request) !bool {
         return false;
     }
     if (std.mem.eql(u8, path, "/")) {
-        try req.respond(if (authed) index_html else loginPage(""), .{ .extra_headers = &html_headers });
+        if (!authed) {
+            try req.respond(loginPage(""), .{ .extra_headers = &html_headers });
+            return false;
+        }
+        const page = try withFontSize(state.ctx.gpa, index_html, state.cfg.web.font_size);
+        defer state.ctx.gpa.free(page);
+        try req.respond(page, .{ .extra_headers = &html_headers });
         return false;
     }
     if (try web_board.handle(state.ctx, state.cfg, req, path, authed)) return false;
@@ -322,6 +328,20 @@ const html_headers = [_]std.http.Header{
     .{ .name = "x-frame-options", .value = "DENY" },
     .{ .name = "referrer-policy", .value = "no-referrer" },
 };
+
+/// `html` with web.font_size set as --font on its <html> element, which the
+/// board and terminal pages size their text from. Caller frees.
+pub fn withFontSize(alloc: std.mem.Allocator, comptime html: []const u8, size: u8) ![]u8 {
+    const tag = "<html lang=\"en\">";
+    const at = comptime std.mem.indexOf(u8, html, tag).?;
+    return std.fmt.allocPrint(alloc, "{s}<html lang=\"en\" style=\"--font:{d}\">{s}", .{ html[0..at], size, html[at + tag.len ..] });
+}
+
+test withFontSize {
+    const page = try withFontSize(std.testing.allocator, "<!doctype html>\n<html lang=\"en\">\n<body>", 18);
+    defer std.testing.allocator.free(page);
+    try std.testing.expectEqualStrings("<!doctype html>\n<html lang=\"en\" style=\"--font:18\">\n<body>", page);
+}
 
 fn loginPage(comptime err: []const u8) []const u8 {
     const marker = "<!--error-->";

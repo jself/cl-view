@@ -5,6 +5,7 @@ pub fn build(b: *std.Build) void {
     // Linux builds default to musl: static binaries that run anywhere, and
     // linking libc (for SQLite) doesn't depend on the host's glibc.
     var query = b.standardTargetOptionsQueryOnly(.{});
+    const native = query.isNative();
     if (query.abi == null and (query.os_tag orelse builtin.os.tag) == .linux) query.abi = .musl;
     const target = b.resolveTargetQuery(query);
     const optimize = b.standardOptimizeOption(.{});
@@ -48,6 +49,26 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addIncludePath(sqlite.path(""));
     b.installArtifact(exe);
 
+    // cl-window, the desktop window for `cl window`: GTK 4 + WebKitGTK 6 from
+    // the system, so it is built for the host's own libc, and only when
+    // webkitgtk-6.0 is installed (or -Dwindow=true insists). Without it,
+    // `cl window` falls back to a browser in app mode.
+    const want_window = b.option(bool, "window", "Build cl-window (default: when webkitgtk-6.0 is found)") orelse
+        (native and builtin.os.tag == .linux and hasPkg(b, "webkitgtk-6.0"));
+    if (want_window) {
+        const win = b.addExecutable(.{
+            .name = "cl-window",
+            .root_module = b.createModule(.{
+                .target = b.graph.host,
+                .optimize = optimize,
+                .link_libc = true,
+            }),
+        });
+        win.root_module.addCSourceFile(.{ .file = b.path("src/window/cl-window.c"), .flags = &.{ "-std=c11", "-Wall" } });
+        win.root_module.linkSystemLibrary("webkitgtk-6.0", .{});
+        b.installArtifact(win);
+    }
+
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);
@@ -55,4 +76,10 @@ pub fn build(b: *std.Build) void {
 
     const tests = b.addTest(.{ .root_module = exe.root_module });
     b.step("test", "Run unit tests").dependOn(&b.addRunArtifact(tests).step);
+}
+
+fn hasPkg(b: *std.Build, name: []const u8) bool {
+    var code: u8 = undefined;
+    _ = b.runAllowFail(&.{ "pkg-config", "--exists", name }, &code, .ignore) catch return false;
+    return true;
 }

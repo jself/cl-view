@@ -50,7 +50,9 @@ pub fn handle(ctx: Ctx, cfg: config.Config, req: *std.http.Server.Request, path:
         return true;
     }
     if (!is_api) {
-        try req.respond(board_html, .{ .extra_headers = &html_headers });
+        const page = try web.withFontSize(ctx.gpa, board_html, cfg.web.font_size);
+        defer ctx.gpa.free(page);
+        try req.respond(page, .{ .extra_headers = &html_headers });
         return true;
     }
 

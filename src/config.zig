@@ -8,6 +8,7 @@
 //!   web.autostart = true
 //!   web.listen = 127.0.0.1:8421, tailscale:8421
 //!   web.password = $argon2id$...      (from `cl web hash`)
+//!   web.font_size = 16                  (board and terminal text, px)
 //!
 //!   board.dir = ~/.local/state/cl       (where board.db lives)
 //!   board.worktrees = ~/.local/share/cl/worktrees
@@ -54,6 +55,9 @@ pub const Web = struct {
     listen: []const u8 = "127.0.0.1:8421",
     /// argon2id PHC string; the server refuses to start without one.
     password: []const u8 = "",
+    /// Base text size of the board and the terminal page, in px; the board's
+    /// whole layout scales with it. 14 was the size before this setting.
+    font_size: u8 = 16,
 };
 
 pub const Board = struct {
@@ -97,6 +101,9 @@ pub fn load(ctx: Ctx) !Config {
             web.listen = val;
         } else if (std.mem.eql(u8, key, "web.password")) {
             web.password = val;
+        } else if (std.mem.eql(u8, key, "web.font_size")) {
+            const size = std.fmt.parseInt(u8, val, 10) catch web.font_size;
+            web.font_size = std.math.clamp(size, 8, 40);
         } else if (std.mem.eql(u8, key, "board.dir")) {
             board.dir = try expandHomePerm(ctx, val);
         } else if (std.mem.eql(u8, key, "board.worktrees")) {

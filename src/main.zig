@@ -8,6 +8,7 @@ const ui = @import("ui.zig");
 const operator = @import("operator.zig");
 const history = @import("history.zig");
 const web = @import("web.zig");
+const window = @import("window.zig");
 const board = @import("board.zig");
 const ticket_cli = @import("ticket_cli.zig");
 
@@ -31,6 +32,7 @@ const usage =
     \\  cl web                    serve the chooser to a browser (see web.* in the config)
     \\  cl web password | start | stop
     \\                            set the web password, or run the server in the background
+    \\  cl window [install]       the web UI in its own desktop window (install: app launcher entry)
     \\  cl ticket | t <command>   the ticket board (cl ticket for the commands)
     \\  cl project <command>      projects tickets belong to (cl project for the commands)
     \\
@@ -72,6 +74,7 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, cmd, "operator")) return cmdOperator(ctx, cfg);
         if (std.mem.eql(u8, cmd, "alert")) return cmdAlert(ctx, argv[1..]);
         if (std.mem.eql(u8, cmd, "web")) return web.main(ctx, cfg, argv[1..]);
+        if (std.mem.eql(u8, cmd, "window")) return window.main(ctx, cfg, argv[1..]);
         if (std.mem.eql(u8, cmd, "ticket") or std.mem.eql(u8, cmd, "t")) return ticket_cli.ticketMain(ctx, cfg, argv[1..]);
         if (std.mem.eql(u8, cmd, "project")) return ticket_cli.projectMain(ctx, cfg, argv[1..]);
         if (std.mem.eql(u8, cmd, "help") or std.mem.eql(u8, cmd, "-h") or std.mem.eql(u8, cmd, "--help")) return out(usage);
@@ -341,5 +344,6 @@ test {
     std.testing.refAllDecls(@import("signals.zig"));
     std.testing.refAllDecls(@import("actions.zig"));
     std.testing.refAllDecls(@import("review.zig"));
+    std.testing.refAllDecls(window);
     std.testing.refAllDecls(@import("web_board.zig"));
 }

@@ -53,7 +53,8 @@
   const narrow = window.matchMedia("(max-width: 600px)").matches;
   const term = new Terminal({
     fontFamily: 'ui-monospace, SFMono-Regular, Menlo, "DejaVu Sans Mono", monospace',
-    fontSize: narrow ? 12 : 14,
+    // web.font_size, set by the server; 14 is the size it scales from.
+    fontSize: Math.round((narrow ? 12 : 14) * (Number(document.documentElement.style.getPropertyValue("--font")) || 14) / 14),
     cursorBlink: true,
     scrollback: 0,
     theme: { background: "#111111" },
