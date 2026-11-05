@@ -47,10 +47,14 @@
   #search { min-width: 0; flex: 1 1 calc(180 * var(--u)); max-width: calc(320 * var(--u)); }
 
   #needs { margin: calc(12 * var(--u)) calc(16 * var(--u)) 0; border: 1px solid #3a2f1a; background: #17150f; border-radius: calc(14 * var(--u)); }
-  #needs > button { display: flex; align-items: center; gap: calc(10 * var(--u)); width: 100%; min-height: calc(46 * var(--u)); padding: 0 calc(14 * var(--u)); border: 0;
+  #needs > .nhd { display: flex; align-items: center; }
+  #needsToggle { flex: 1; display: flex; align-items: center; gap: calc(10 * var(--u)); width: 100%; min-height: calc(46 * var(--u)); padding: 0 calc(14 * var(--u)); border: 0;
                     background: transparent; cursor: pointer; text-align: left; font-weight: 600; font-size: calc(15 * var(--u)); }
   #needs .count { font-family: var(--mono); color: var(--input); }
-  #needs > button > span:first-child { white-space: nowrap; }
+  #needsToggle > span:first-child { white-space: nowrap; }
+  #needsHiddenBtn { flex: none; min-height: calc(46 * var(--u)); padding: 0 calc(14 * var(--u)); border: 0; background: transparent; cursor: pointer;
+                    font-size: calc(13 * var(--u)); color: #b9ad94; text-decoration: underline dotted; text-underline-offset: 3px; }
+  .ask.hidden { opacity: .6; }
   #needs .sum { font-weight: 400; font-size: calc(13 * var(--u)); color: #b9ad94; }
   #needs .strip { display: flex; gap: calc(12 * var(--u)); overflow-x: auto; padding: 0 calc(14 * var(--u)) calc(14 * var(--u)); scroll-snap-type: x mandatory; }
   #needs.closed .strip { display: none; }
@@ -106,7 +110,7 @@
   /* Session status colors, the same hues as `cl list`: --sc for the label and dot, --sbg tints a card's title band, stronger on the left and faint on the right. */
   .s-busy { --sc: #facc15; --sbg: var(--sc); } .s-waiting { --sc: #e879f9; --sbg: var(--sc); } .s-blocked { --sc: #f87171; --sbg: var(--sc); }
   .s-idle { --sc: #4ade80; --sbg: var(--sc); } .s-shell { --sc: #22d3ee; --sbg: var(--sc); } .s-starting { --sc: #60a5fa; --sbg: var(--sc); }
-  .s-gone { --sc: #8b8e94; --sbg: var(--sc); } .s-unknown, .s-none { --sc: #a0a3a8; }
+  .s-gone, .s-killed { --sc: #8b8e94; --sbg: var(--sc); } .s-unknown, .s-none { --sc: #a0a3a8; }
   .status { display: inline-flex; align-items: center; gap: calc(7 * var(--u)); font-size: calc(12.5 * var(--u)); color: var(--sc, #d6d7da); }
   .status.s-none { color: #d6d7da; }
   .dot { width: calc(8 * var(--u)); height: calc(8 * var(--u)); border-radius: calc(4 * var(--u)); flex: none; display: inline-block; background: var(--sc, #5d6168); }
@@ -195,8 +199,9 @@
 </header>
 
 <section id="needs" aria-label="Needs you">
-  <button type="button" id="needsToggle" aria-expanded="true"><span>Needs you</span><span class="count" id="needsCount">0</span>
+  <div class="nhd"><button type="button" id="needsToggle" aria-expanded="true"><span>Needs you</span><span class="count" id="needsCount">0</span>
     <span class="sum" id="needsSum"></span><span style="flex:1"></span><span class="sum" id="needsHint">Collapse</span></button>
+    <button type="button" id="needsHiddenBtn" aria-pressed="false" hidden></button></div>
   <div class="strip" id="needsStrip"></div>
 </section>
 
@@ -207,6 +212,7 @@
 <dialog id="newDlg" aria-label="New ticket"><div class="dlg" id="newBody"></div></dialog>
 <dialog id="finishDlg" aria-label="Finish the ticket" style="width:min(calc(480 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="finishBody"></div></dialog>
 <dialog id="subsDlg" aria-label="Unfinished sub-tickets" style="width:min(calc(520 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="subsBody"></div></dialog>
+<dialog id="killDlg" aria-label="Kill the session" style="width:min(calc(480 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="killBody"></div></dialog>
 <div id="toast" role="status"></div>
 
 <script>
@@ -214,12 +220,12 @@
 const STAGES = ["backlog", "planning", "queued", "running", "review", "testing", "done"];
 const STAGE_NAME = { backlog: "Backlog", planning: "Planning", queued: "Queued", running: "Running", review: "Review", testing: "Testing", done: "Done" };
 const FLAG_NAME = { input: "Needs input", question: "Question", review: "Ready for review", testing: "Needs testing", ended: "Session ended", "start-failed": "Didn't start", conflict: "Conflicts" };
-const STATUS_NAME = { busy: "Working", waiting: "Waiting on you", blocked: "Waiting on you", idle: "Idle", shell: "Idle · background task", starting: "Starting", gone: "Session ended", unknown: "Unknown" };
+const STATUS_NAME = { busy: "Working", waiting: "Waiting on you", blocked: "Waiting on you", idle: "Idle", shell: "Idle · background task", starting: "Starting", gone: "Session ended", killed: "Killed · restart it", unknown: "Unknown" };
 
 const store = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch { return null; } };
 const state = {
   data: null, view: store("cl-view") || "board", filter: "all", project: "", subs: store("cl-subs") === "1", done: store("cl-done") === "1",
-  search: "", needsOpen: store("cl-needs") !== "0", open: null, detail: null, tab: null, picks: {}, other: {}, checks: {},
+  search: "", needsOpen: store("cl-needs") !== "0", needsHidden: store("cl-needs-hidden") === "1", open: null, detail: null, tab: null, picks: {}, other: {}, checks: {},
   sending: false,
 };
 
@@ -254,8 +260,10 @@ async function sendAnswer(key, answers, btn) {
 }
 
 const flagDetail = (f) => { try { return JSON.parse(f.detail); } catch { return null; } };
-// The human is holding it up: it has a flag and Claude isn't working on it.
-const needsMe = (row) => row.ticket.flags.length > 0 && row.ticket.stage !== "done" && !row.working;
+// The human is holding it up: it has a flag they haven't hidden, and Claude isn't working on it.
+const needsMe = (row) => row.ticket.flags.some((f) => !f.hidden) && row.ticket.stage !== "done" && !row.working;
+// Hidden from Needs you: every flag it has is hidden (a new one brings it back).
+const hiddenNeeds = (row) => row.ticket.flags.length > 0 && row.ticket.flags.every((f) => f.hidden) && row.ticket.stage !== "done" && !row.working;
 const asks = (t) => t.flags.filter((f) => f.kind !== "testing" || t.stage === "testing");
 function askText(t, f) {
   const d = flagDetail(f);
@@ -283,7 +291,8 @@ const finishPill = (t) => t.finishing ? `<span class="pill f-finishing" title="$
 const pills = (t) => t.flags.length || t.finishing ? `<span class="pills">${finishPill(t)}${t.flags.map((f) => `<span class="pill ${flagClass(f.kind)}">${esc(flagLabel(f))}</span>`).join("")}</span>` : "";
 // "(starting)" is the dispatcher's claim while it opens the session.
 // A Backlog or Queued ticket whose session is gone hasn't ended: it's waiting to start.
-const statusOf = (row) => row.status || (row.ticket.tmux.startsWith("(") ? "starting" : row.ticket.tmux && !["backlog", "queued"].includes(row.ticket.stage) ? "gone" : "none");
+// A killed one waits for you to restart it.
+const statusOf = (row) => row.status || (row.ticket.tmux.startsWith("(") ? "starting" : row.ticket.killed ? "killed" : row.ticket.tmux && !["backlog", "queued"].includes(row.ticket.stage) ? "gone" : "none");
 const statusHtml = (row) => { const s = statusOf(row); const label = s === "none" ? (row.ticket.stage === "queued" ? "Waiting for a slot" : "Not started") : (STATUS_NAME[s] || s);
   return `<span class="status s-${esc(s)}"><span class="dot"></span>${esc(label)}</span>`; };
 // A live session's shell icon. In a card (a button) it's a span the click handler follows.
@@ -353,17 +362,23 @@ function render() {
 
 function renderNeeds() {
   const rows = state.data.tickets.filter(needsMe);
+  const hidden = state.data.tickets.filter(hiddenNeeds);
   rows.sort((a, b) => Math.min(...a.ticket.flags.map((f) => f.at)) - Math.min(...b.ticket.flags.map((f) => f.at)));
   const box = document.getElementById("needs");
-  box.style.display = rows.length ? "" : "none";
+  box.style.display = rows.length || hidden.length ? "" : "none";
+  const hb = document.getElementById("needsHiddenBtn");
+  hb.hidden = !hidden.length; hb.textContent = state.needsHidden ? `Hide ${hidden.length} hidden` : `${hidden.length} hidden`;
+  hb.setAttribute("aria-pressed", state.needsHidden);
+  hb.title = state.needsHidden ? "Stop showing the items you hid" : "Show the items you hid";
+  const shown = state.needsHidden ? [...rows, ...hidden] : rows;
   box.classList.toggle("closed", !state.needsOpen);
   document.getElementById("needsToggle").setAttribute("aria-expanded", state.needsOpen);
   document.getElementById("needsHint").textContent = state.needsOpen ? "Collapse" : "Expand";
   document.getElementById("needsCount").textContent = rows.length;
   const counts = {}; for (const r of rows) for (const f of r.ticket.flags) counts[f.kind] = (counts[f.kind] || 0) + 1;
   document.getElementById("needsSum").textContent = Object.entries(counts).map(([k, n]) => `${n} ${(FLAG_NAME[k] || k).toLowerCase()}`).join(" · ");
-  setHtml(document.getElementById("needsStrip"), rows.map((r) => {
-    const t = r.ticket; const f = t.flags[0]; const d = flagDetail(f);
+  setHtml(document.getElementById("needsStrip"), shown.map((r) => {
+    const t = r.ticket; const isHidden = hiddenNeeds(r); const f = isHidden ? t.flags[0] : t.flags.find((x) => !x.hidden); const d = flagDetail(f);
     let quick = "";
     if (f.kind === "question" && d?.questions?.length === 1 && !d.questions[0].multiSelect)
       quick = (d.questions[0].options || []).slice(0, 3).map((o, i) => `<button type="button" class="btn" data-answer="${esc(t.key)}" data-n="${i + 1}">${esc(o.label)}</button>`).join("");
@@ -374,9 +389,12 @@ function renderNeeds() {
       : f.kind === "testing" ? `<button type="button" class="btn primary" data-open="${esc(t.key)}" data-tab="test">Test it</button>`
       : `<button type="button" class="btn primary" data-open="${esc(t.key)}" data-tab="needs">Open</button>`;
     const shell = t.tmux && r.status && r.status !== "gone" ? `<a class="btn" href="${shellHref(t)}">Shell</a>` : "";
-    return `<div class="ask"><div class="pills"><span class="pill ${flagClass(f.kind)}">${esc(flagLabel(f))}</span><span class="mono muted" style="font-size:calc(11.5 * var(--u))">${esc(t.key)} · ${ago(f.at)}</span></div>
+    // Hiding keeps the flags (the card still shows them); a new flag brings it back.
+    const hide = isHidden ? `<button type="button" class="btn" data-unhide="${esc(t.key)}" title="Put it back in Needs you">Unhide</button>`
+      : `<button type="button" class="btn" data-hide="${esc(t.key)}" title="Take it out of Needs you until it raises a new flag; its card keeps the flag">Hide</button>`;
+    return `<div class="ask${isHidden ? " hidden" : ""}"><div class="pills"><span class="pill ${flagClass(f.kind)}">${esc(flagLabel(f))}</span>${isHidden ? `<span class="pill">Hidden</span>` : ""}<span class="mono muted" style="font-size:calc(11.5 * var(--u))">${esc(t.key)} · ${ago(f.at)}</span></div>
       <div style="font-weight:500">${esc(t.title)}</div><div class="what" title="${esc(askText(t, f))}">${esc(askLine(t, f, quick))}</div>
-      ${quick ? `<div class="acts">${quick}</div>` : ""}<div class="acts">${main}${shell}</div></div>`;
+      ${quick ? `<div class="acts">${quick}</div>` : ""}<div class="acts">${main}${shell}${hide}</div></div>`;
   }).join(""));
 }
 
@@ -474,10 +492,12 @@ function renderDetailInner() {
   const approve = planReady ? "Approve plan" : t.stage === "review" ? "Approve, to testing" : t.stage === "testing" && !t.finishing ? "Tested, done" : "";
   const acts = [];
   if (liveSession) acts.push(`<a class="btn primary" href="${shellHref(t)}">Open shell</a>`);
-  if (!liveSession && t.stage !== "done") acts.push(`<button type="button" class="btn primary" data-act="start">${t.tmux ? "Start again" : "Start now"}</button>`);
+  // Ran before (killed, or its session ended): a fresh session, resuming its conversation where Claude still has it.
+  const ranBefore = t.killed || t.tmux || t.session_id;
+  if (!liveSession && t.stage !== "done") acts.push(`<button type="button" class="btn primary" data-act="start"${ranBefore ? ` title="A fresh session for it${t.session_id ? ", resuming its conversation where Claude still has it" : ""}"` : ""}>${ranBefore ? "Restart" : "Start now"}</button>`);
   if (liveSession && (d.guide || t.worktree)) acts.push(`<button type="button" class="btn" data-act="gutter">Open in gutter</button>`);
   if (approve) acts.push(`<button type="button" class="btn" data-act="approve">${approve}</button>`);
-  if (liveSession) acts.push(`<button type="button" class="btn" data-key="esc">Esc</button><button type="button" class="btn" data-key="interrupt">Interrupt</button>`);
+  if (liveSession) acts.push(`<button type="button" class="btn danger" data-act="kill" title="End its session; it keeps its stage and can be restarted">Kill</button>`);
   if (t.stage === "backlog") acts.push(`<button type="button" class="btn" data-move="queued">Queue it</button>`);
   // Moves it (with its change and conversation, once under way) to a worktree of its own or back.
   if (t.stage !== "done") acts.push(t.mode === "queue"
@@ -749,6 +769,23 @@ async function chooseFinish(key) {
   dlg.returnValue = ""; dlg.showModal();
   return new Promise((res) => { dlg.onclose = () => res(dlg.returnValue || null); });
 }
+// ---- killing a session ----
+// Says what goes: the session (shared, for a queue ticket, with any other
+// ticket on it) and Claude in it. Resolves to true to go ahead.
+function confirmKill(d) {
+  const t = d.ticket;
+  const others = state.data.tickets.filter((r) => r.ticket.tmux === t.tmux && r.ticket.key !== t.key && r.ticket.stage !== "done").map((r) => r.ticket.key);
+  const dlg = document.getElementById("killDlg");
+  document.getElementById("killBody").innerHTML = `<h2 style="margin:0;font-size:calc(17 * var(--u))">Kill ${esc(t.key)}'s session?</h2>
+    <p style="margin:0">This ends the tmux session <span class="mono">${esc(t.tmux)}</span> and Claude in it, as <span class="mono">cl kill</span> does.</p>
+    ${t.mode === "queue" ? `<p style="margin:0">It's a queue ticket, so this is the project's shared session${others.length ? `: ${others.map(esc).join(", ")} ${others.length > 1 ? "are" : "is"} on it too and will need restarting as well` : ""}.
+      Uncommitted work in the checkout${d.dir ? ` at <span class="mono">${esc(d.dir)}</span>` : ""} stays where it is.</p>`
+      : `<p style="margin:0">Its worktree and the work in it stay where they are.</p>`}
+    <p class="muted" style="margin:0">${esc(t.key)} stays in ${STAGE_NAME[t.stage]} with no flag, so it doesn't land in Needs you. Restart starts a fresh session for it${t.session_id ? ", resuming this conversation" : ""}.</p>
+    <div class="actions"><button type="button" class="btn danger" data-kill="yes">Kill session</button><button type="button" class="btn" data-kill="">Cancel</button></div>`;
+  dlg.returnValue = ""; dlg.showModal();
+  return new Promise((res) => { dlg.onclose = () => res(dlg.returnValue === "yes"); });
+}
 // Everything going to Done asks: sub-tickets first, then how to finish.
 // The extra request fields, or null when cancelled.
 async function doneExtras(key) {
@@ -809,6 +846,10 @@ document.addEventListener("click", async (e) => {
   if (el.id === "closeDlg") { document.getElementById("ticketDlg").close(); return; }
   if (ds.finish !== undefined) { document.getElementById("finishDlg").close(ds.finish); return; }
   if (el.id === "spinOff" || el.id === "spinCancel") { document.getElementById("subsDlg").close(el.id === "spinOff" ? "spin" : ""); return; }
+  if (ds.kill !== undefined) { document.getElementById("killDlg").close(ds.kill); return; }
+  if (el.id === "needsHiddenBtn") { state.needsHidden = !state.needsHidden; store("cl-needs-hidden", state.needsHidden ? "1" : "0"); renderNeeds(); return; }
+  if (ds.hide) return act(ds.hide, "hide", {}, `${ds.hide} hidden from Needs you; a new flag brings it back`);
+  if (ds.unhide) return act(ds.unhide, "unhide", {}, `${ds.unhide} is back in Needs you`);
   if (ds.answer) { e.stopPropagation(); return sendAnswer(ds.answer, [ds.n], el); }
   if (ds.approve) {
     const extra = state.data.tickets.find((r) => r.ticket.key === ds.approve)?.ticket.stage === "testing" ? await doneExtras(ds.approve) : {};
@@ -818,7 +859,6 @@ document.addEventListener("click", async (e) => {
   if (ds.open) return openTicket(ds.open, ds.tab);
   const key = state.open; if (!key) return;
   if (ds.tab) { state.tab = ds.tab; renderDetail(); return; }
-  if (ds.key) return act(key, "key", { key: ds.key });
   if (ds.move) return act(key, "move", { stage: ds.move }, "Moved");
   if (ds.relocate) {
     let r; try { r = await act(key, "relocate", { mode: ds.relocate }); } catch { return; }
@@ -837,7 +877,12 @@ document.addEventListener("click", async (e) => {
     try { const r = await act(key, "gutter"); toast("gutter's window is open"); } catch {}
     return;
   }
-  if (ds.act === "start") return act(key, "start", {}, "Started");
+  if (ds.act === "start") return act(key, "start", {}, state.detail?.ticket.killed || state.detail?.ticket.session_id ? "Restarted" : "Started");
+  if (ds.act === "kill") {
+    const d = state.detail; if (!d || !await confirmKill(d)) return;
+    try { await act(key, "kill", {}, `Killed ${d.ticket.tmux}; Restart brings it back`); } catch {}
+    return;
+  }
   if (ds.act === "approve" && state.detail?.ticket.stage === "testing") {
     const extra = await doneExtras(key); if (!extra) return;
     return act(key, "approve", extra, finishMsg(key, extra) || "Done");

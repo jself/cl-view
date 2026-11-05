@@ -607,9 +607,10 @@ pub fn tick(ctx: Ctx, cfg: config.Config, db: board.Db) !usize {
     try releaseGone(ctx, db, a, view);
 
     // Queued tickets, and planning tickets that never started, in board order.
+    // A killed one waits for you to restart it.
     var waiting: std.ArrayList(board.Ticket) = .empty;
-    for (try board.listTickets(db, a, .{ .stage = .queued })) |t| if (t.tmux.len == 0) try waiting.append(a, t);
-    for (try board.listTickets(db, a, .{ .stage = .planning })) |t| if (t.tmux.len == 0) try waiting.append(a, t);
+    for (try board.listTickets(db, a, .{ .stage = .queued })) |t| if (t.tmux.len == 0 and !t.killed) try waiting.append(a, t);
+    for (try board.listTickets(db, a, .{ .stage = .planning })) |t| if (t.tmux.len == 0 and !t.killed) try waiting.append(a, t);
     std.mem.sort(board.Ticket, waiting.items, {}, struct {
         fn lt(_: void, x: board.Ticket, y: board.Ticket) bool {
             return x.rank < y.rank or (x.rank == y.rank and x.id < y.id);

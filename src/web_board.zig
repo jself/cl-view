@@ -7,8 +7,9 @@
 //!   GET  /api/ticket/<key>              one ticket in full (+ session tail, review, test plan)
 //!   POST /api/ticket                    new ticket
 //!   POST /api/ticket/<key>/<action>     edit move rank comment flag unflag done approve start
-//!                                       answer key rm cleanup gutter gutter-stop launch
-//!                                       launch-stop test-results relocate
+//!                                       answer key kill hide unhide rm cleanup gutter
+//!                                       gutter-stop launch launch-stop test-results
+//!                                       relocate
 //!   POST /api/project                   add a project
 //!   POST /api/project/<name>/<action>   set rm
 const std = @import("std");
@@ -276,6 +277,10 @@ fn ticketAction(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator
         try dispatch.start(ctx, cfg, db, a, t, b.now orelse false);
     } else if (eql(u8, action, "answer")) {
         try actions.answer(ctx, cfg, db, a, key, b.answers orelse return error.BadInput);
+    } else if (eql(u8, action, "kill")) {
+        return ok(req, a, try actions.kill(ctx, cfg, db, a, key));
+    } else if (eql(u8, action, "hide") or eql(u8, action, "unhide")) {
+        _ = try board.hideNeeds(ctx, db, a, key, eql(u8, action, "hide"));
     } else if (eql(u8, action, "key")) {
         try actions.press(ctx, db, a, key, std.meta.stringToEnum(actions.Key, b.key orelse "") orelse return error.BadInput);
     } else if (eql(u8, action, "rm")) {

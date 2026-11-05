@@ -11,6 +11,7 @@ const web = @import("web.zig");
 const window = @import("window.zig");
 const board = @import("board.zig");
 const ticket_cli = @import("ticket_cli.zig");
+const actions = @import("actions.zig");
 
 pub const panic = @import("vaxis").panic_handler;
 pub const std_options: std.Options = .{ .log_level = .warn };
@@ -64,7 +65,7 @@ pub fn main(init: std.process.Init) !void {
         const cmd = argv[0];
         if (std.mem.eql(u8, cmd, "list") or std.mem.eql(u8, cmd, "ls")) return cmdList(ctx, cfg, argv[1..]);
         if (std.mem.eql(u8, cmd, "attach")) return cmdAttach(ctx, cfg, argv[1..]);
-        if (std.mem.eql(u8, cmd, "kill")) return cmdKill(ctx, argv[1..]);
+        if (std.mem.eql(u8, cmd, "kill")) return cmdKill(ctx, cfg, argv[1..]);
         if (std.mem.eql(u8, cmd, "hide")) return cmdHide(ctx, argv[1..], true);
         if (std.mem.eql(u8, cmd, "unhide")) return cmdHide(ctx, argv[1..], false);
         if (std.mem.eql(u8, cmd, "send")) return cmdSend(ctx, argv[1..]);
@@ -204,12 +205,13 @@ fn cmdAttach(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void {
     try ui.run(ctx, cfg, s.tmux_name);
 }
 
-fn cmdKill(ctx: Ctx, argv: []const []const u8) !void {
+fn cmdKill(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void {
     if (argv.len != 1) fail("usage: cl kill <name>", .{});
     var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);
     defer arena_state.deinit();
     const s = (try tmux.find(ctx, arena_state.allocator(), argv[0])) orelse fail("no session named {s}", .{argv[0]});
     try tmux.kill(ctx, s.tmux_name);
+    actions.sessionKilled(ctx, cfg, s.tmux_name);
 }
 
 fn cmdHide(ctx: Ctx, argv: []const []const u8, hidden: bool) !void {

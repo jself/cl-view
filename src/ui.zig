@@ -9,6 +9,7 @@ const launch = @import("launch.zig");
 const sgr = @import("sgr.zig");
 const operator = @import("operator.zig");
 const history = @import("history.zig");
+const actions = @import("actions.zig");
 
 const Event = union(enum) {
     key_press: vaxis.Key,
@@ -210,6 +211,7 @@ const App = struct {
                 if (key.matches('y', .{}) or key.matches(vaxis.Key.enter, .{})) {
                     if (self.selected()) |s| {
                         tmux.kill(self.ctx, s.tmux_name) catch {};
+                        actions.sessionKilled(self.ctx, self.cfg, s.tmux_name);
                         self.setMessage("killed {s}", .{s.name});
                     }
                     try self.refresh();

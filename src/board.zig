@@ -66,6 +66,9 @@ pub const Flag = struct {
     source: []const u8,
     detail: []const u8,
     at: i64,
+    /// Kept out of Needs You (and `cl ticket needs`) until the ticket raises
+    /// a new flag or this one asks something new.
+    hidden: bool = false,
 };
 
 pub const Comment = struct {
@@ -126,6 +129,9 @@ pub const Ticket = struct {
     /// Priority: lower comes first. The board shows each column in rank order
     /// and the dispatcher starts waiting tickets in it.
     rank: i64 = 0,
+    /// Its session was killed on purpose (`cl ticket kill`, the board's Kill):
+    /// it waits for you to restart it rather than for the dispatcher.
+    killed: bool = false,
     flags: []Flag = &.{},
 };
 
@@ -169,6 +175,7 @@ const schema =
     \\  finishing TEXT NOT NULL DEFAULT '',
     \\  change_id TEXT NOT NULL DEFAULT '',
     \\  rank INTEGER NOT NULL DEFAULT 0,
+    \\  killed INTEGER NOT NULL DEFAULT 0,
     \\  created INTEGER NOT NULL,
     \\  updated INTEGER NOT NULL
     \\);
@@ -189,7 +196,8 @@ const schema =
     \\  source TEXT NOT NULL,
     \\  detail TEXT NOT NULL DEFAULT '',
     \\  at INTEGER NOT NULL,
-    \\  cleared INTEGER
+    \\  cleared INTEGER,
+    \\  hidden INTEGER NOT NULL DEFAULT 0
     \\);
     \\CREATE UNIQUE INDEX IF NOT EXISTS flags_active ON flags(ticket, kind) WHERE cleared IS NULL;
     \\CREATE TABLE IF NOT EXISTS events (
@@ -241,7 +249,7 @@ pub fn open(ctx: Ctx, cfg: config.Config) !Db {
     return db;
 }
 
-const version = 7;
+const version = 9;
 
 pub fn migrate(db: Db) !void {
     const have = (try db.int("PRAGMA user_version", .{})) orelse 0;
@@ -254,8 +262,19 @@ pub fn migrate(db: Db) !void {
     if (have >= 1 and have < 6) try db.execMulti("ALTER TABLE tickets ADD COLUMN change_id TEXT NOT NULL DEFAULT ''");
     // Version 6 had no priority: oldest first, as the dispatcher went.
     if (have >= 1 and have < 7) try db.execMulti(std.fmt.comptimePrint("ALTER TABLE tickets ADD COLUMN rank INTEGER NOT NULL DEFAULT 0; UPDATE tickets SET rank = id * {d}", .{rank_gap}));
+    // Version 7 had no kill, nor hiding from Needs You. Added only if missing:
+    // another branch's build may have taken version 8 for a column of its own.
+    if (have >= 1 and have < 9) {
+        try addColumn(db, "tickets", "killed", "INTEGER NOT NULL DEFAULT 0");
+        try addColumn(db, "flags", "hidden", "INTEGER NOT NULL DEFAULT 0");
+    }
     try db.execMulti(schema);
     try db.execMulti(std.fmt.comptimePrint("PRAGMA user_version = {d}", .{version}));
+}
+
+fn addColumn(db: Db, comptime table: []const u8, comptime column: []const u8, comptime decl: []const u8) !void {
+    if ((try db.int("SELECT 1 FROM pragma_table_info('" ++ table ++ "') WHERE name = '" ++ column ++ "'", .{})) != null) return;
+    try db.execMulti("ALTER TABLE " ++ table ++ " ADD COLUMN " ++ column ++ " " ++ decl);
 }
 
 fn now(ctx: Ctx) i64 {
@@ -437,7 +456,7 @@ pub fn createTicket(ctx: Ctx, db: Db, a: std.mem.Allocator, in: TicketInput) Err
 }
 
 const ticket_cols = "t.id, t.key, t.project, t.title, t.body, t.stage, t.mode, t.plan, t.target, t.worktree, t.branch, t.profile, t.tmux, t.session_id, t.summary, t.round, t.created, t.updated, " ++
-    "coalesce((SELECT p.key FROM tickets p WHERE p.id = t.parent), ''), (SELECT count(*) FROM tickets c WHERE c.parent = t.id), t.skill, t.base, t.finishing, t.change_id, t.rank";
+    "coalesce((SELECT p.key FROM tickets p WHERE p.id = t.parent), ''), (SELECT count(*) FROM tickets c WHERE c.parent = t.id), t.skill, t.base, t.finishing, t.change_id, t.rank, t.killed";
 
 fn readTicket(st: sqlite.Stmt, a: std.mem.Allocator) !Ticket {
     return .{
@@ -466,14 +485,15 @@ fn readTicket(st: sqlite.Stmt, a: std.mem.Allocator) !Ticket {
         .finishing = try st.dupe(a, 22),
         .change = try st.dupe(a, 23),
         .rank = st.int(24),
+        .killed = st.int(25) != 0,
     };
 }
 
 fn activeFlags(db: Db, a: std.mem.Allocator, id: i64) Error![]Flag {
-    var st = try db.query("SELECT kind, source, detail, at FROM flags WHERE ticket = ?1 AND cleared IS NULL ORDER BY at, id", .{id});
+    var st = try db.query("SELECT kind, source, detail, at, hidden FROM flags WHERE ticket = ?1 AND cleared IS NULL ORDER BY at, id", .{id});
     defer st.finalize();
     var out: std.ArrayList(Flag) = .empty;
-    while (try st.step()) try out.append(a, .{ .kind = try st.dupe(a, 0), .source = try st.dupe(a, 1), .detail = try st.dupe(a, 2), .at = st.int(3) });
+    while (try st.step()) try out.append(a, .{ .kind = try st.dupe(a, 0), .source = try st.dupe(a, 1), .detail = try st.dupe(a, 2), .at = st.int(3), .hidden = st.int(4) != 0 });
     return out.toOwnedSlice(a);
 }
 
@@ -510,6 +530,9 @@ pub const Filter = struct {
     flag: ?[]const u8 = null,
     /// Only tickets with any active flag (the inbox), oldest ask first.
     needs: bool = false,
+    /// With `needs`: the tickets hidden from the inbox (every active flag
+    /// hidden) instead of the ones in it.
+    hidden: bool = false,
     /// With `needs`: the tmux sessions that are busy. A ticket one of them is
     /// working on is left out; it comes back once its session stops.
     busy: []const []const u8 = &.{},
@@ -554,7 +577,10 @@ pub fn listTickets(db: Db, a: std.mem.Allocator, f: Filter) Error![]Ticket {
     if (f.top) try sql.appendSlice(a, " AND t.parent IS NULL");
     if (f.parent != null) try sql.appendSlice(a, " AND t.parent = (SELECT id FROM tickets WHERE key = ?5 COLLATE NOCASE)");
     if (f.flag != null) try sql.appendSlice(a, " AND EXISTS (SELECT 1 FROM flags g WHERE g.ticket = t.id AND g.cleared IS NULL AND g.kind = ?3)");
-    if (f.needs) try sql.appendSlice(a, " AND EXISTS (SELECT 1 FROM flags g WHERE g.ticket = t.id AND g.cleared IS NULL)");
+    if (f.needs) try sql.appendSlice(a, if (f.hidden)
+        " AND EXISTS (SELECT 1 FROM flags g WHERE g.ticket = t.id AND g.cleared IS NULL) AND NOT EXISTS (SELECT 1 FROM flags g WHERE g.ticket = t.id AND g.cleared IS NULL AND g.hidden = 0)"
+    else
+        " AND EXISTS (SELECT 1 FROM flags g WHERE g.ticket = t.id AND g.cleared IS NULL AND g.hidden = 0)");
     const fts = if (f.search) |q| try ftsQuery(a, q) else "";
     if (fts.len > 0) try sql.appendSlice(a,
         \\ AND (t.id IN (SELECT rowid FROM tickets_fts WHERE tickets_fts MATCH ?4)
@@ -624,7 +650,8 @@ pub fn updateTicket(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, in:
 
 /// Record what a session did for a ticket (set when the dispatcher starts it).
 pub fn setSession(ctx: Ctx, db: Db, id: i64, tmux_name: []const u8, session_id: []const u8, worktree: []const u8, branch: []const u8) Error!void {
-    try db.exec("UPDATE tickets SET tmux = ?2, session_id = ?3, worktree = ?4, branch = ?5 WHERE id = ?1", .{ id, tmux_name, session_id, worktree, branch });
+    // A session again: it isn't killed any more.
+    try db.exec("UPDATE tickets SET tmux = ?2, session_id = ?3, worktree = ?4, branch = ?5, killed = killed AND ?2 = '' WHERE id = ?1", .{ id, tmux_name, session_id, worktree, branch });
     try touch(ctx, db, id);
 }
 
@@ -669,7 +696,8 @@ pub fn move(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, stage: Stag
 }
 
 fn moveId(ctx: Ctx, db: Db, id: i64, from: Stage, to: Stage) Error!void {
-    try db.exec("UPDATE tickets SET stage = ?2, finishing = '' WHERE id = ?1", .{ id, @as([]const u8, @tagName(to)) });
+    // Queued again, a killed ticket waits for the dispatcher like any other.
+    try db.exec("UPDATE tickets SET stage = ?2, finishing = '', killed = killed AND ?2 != 'queued' WHERE id = ?1", .{ id, @as([]const u8, @tagName(to)) });
     var buf: [64]u8 = undefined;
     try logEvent(ctx, db, id, "moved", std.fmt.bufPrint(&buf, "{s} -> {s}", .{ @tagName(from), @tagName(to) }) catch "");
     if (from == .review) try clearFlagId(ctx, db, id, flag_review);
@@ -694,8 +722,9 @@ fn validFlag(kind: []const u8) bool {
 
 pub fn setFlagId(ctx: Ctx, db: Db, id: i64, kind: []const u8, source: []const u8, detail: []const u8) Error!void {
     if (try db.int("SELECT id FROM flags WHERE ticket = ?1 AND kind = ?2 AND cleared IS NULL", .{ id, kind })) |fid| {
-        // Keep its age (the inbox orders by it); refresh what it says.
-        try db.exec("UPDATE flags SET detail = ?2 WHERE id = ?1", .{ fid, detail });
+        // Keep its age (the inbox orders by it); refresh what it says. Asking
+        // something new brings a hidden one back.
+        try db.exec("UPDATE flags SET hidden = (hidden AND detail = ?2), detail = ?2 WHERE id = ?1", .{ fid, detail });
         return;
     }
     try db.exec("INSERT INTO flags (ticket, kind, source, detail, at) VALUES (?1, ?2, ?3, ?4, ?5)", .{ id, kind, source, detail, now(ctx) });
@@ -714,6 +743,39 @@ pub fn clearFlagId(ctx: Ctx, db: Db, id: i64, kind: []const u8) Error!void {
         try touch(ctx, db, id);
         try logEvent(ctx, db, id, "unflagged", kind);
     }
+}
+
+/// Hide the ticket from Needs You (and `cl ticket needs`), or bring it back.
+/// Its flags stay set, so its card still shows them; a new flag brings it
+/// back by itself. False when it has no flag to hide.
+pub fn hideNeeds(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, hidden: bool) Error!bool {
+    const t = try getTicket(db, a, key);
+    if (t.flags.len == 0) return false;
+    try db.exec("UPDATE flags SET hidden = ?2 WHERE ticket = ?1 AND cleared IS NULL", .{ t.id, hidden });
+    try logEvent(ctx, db, t.id, if (hidden) "hidden from needs" else "back in needs", "");
+    return true;
+}
+
+/// A session was killed on purpose: the tickets on it that aren't done let
+/// go of it and wait to be restarted (`killed`), with no flag raised. What
+/// the session was waiting on (a question, a permission prompt) went with it.
+/// The conversation id is kept, so a restart resumes it.
+pub fn sessionKilled(ctx: Ctx, db: Db, a: std.mem.Allocator, tmux_name: []const u8) Error!void {
+    var st = try db.query("SELECT id FROM tickets WHERE tmux = ?1 AND stage != 'done'", .{tmux_name});
+    defer st.finalize();
+    var ids: std.ArrayList(i64) = .empty;
+    while (try st.step()) try ids.append(a, st.int(0));
+    for (ids.items) |id| {
+        try db.exec("UPDATE tickets SET tmux = '', killed = 1 WHERE id = ?1", .{id});
+        for ([_][]const u8{ flag_question, flag_input, "ended" }) |k| try clearFlagId(ctx, db, id, k);
+        try logEvent(ctx, db, id, "killed", tmux_name);
+        try touch(ctx, db, id);
+    }
+}
+
+/// Keep the ticket's conversation id current (/clear starts a new one).
+pub fn setSessionId(db: Db, id: i64, session_id: []const u8) Error!void {
+    try db.exec("UPDATE tickets SET session_id = ?2 WHERE id = ?1", .{ id, session_id });
 }
 
 pub const CommentResult = struct {
@@ -1075,4 +1137,87 @@ test "rank: --top and --bottom go to the ends of the ticket's stage" {
     try rankInStage(db, a, b2, true);
     try testing.expect(try rank(db, a, b2) < try rank(db, a, b1));
     try testing.expectError(error.NotFound, rankInStage(db, a, "QA-99", true));
+}
+
+test "a killed session's tickets let go of it, unflagged, and wait to be restarted" {
+    const ctx = testCtx();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try Db.open(":memory:");
+    defer db.close();
+    try migrate(db);
+    try addProject(db, .{ .name = "qa", .dir = "/x/qa" });
+    const k1 = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Asking", .stage = .running });
+    const k2 = try createTicket(ctx, db, a, .{ .project = "qa", .title = "In review", .stage = .review });
+    const k3 = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Finished", .stage = .done });
+    const k4 = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Elsewhere", .stage = .running });
+    for ([_][]const u8{ k1, k2, k3 }) |k| try setSession(ctx, db, (try getTicket(db, a, k)).id, "cl_qa_1", "0e8c3f8a-0000-4000-8000-000000000001", "", "");
+    try setSession(ctx, db, (try getTicket(db, a, k4)).id, "cl_other_2", "", "", "");
+    try setFlag(ctx, db, a, k1, flag_question, "auto", "{}");
+    try setFlag(ctx, db, a, k2, flag_review, "auto", "");
+
+    try sessionKilled(ctx, db, a, "cl_qa_1");
+    const t1 = try getTicket(db, a, k1);
+    try testing.expectEqualStrings("", t1.tmux);
+    try testing.expect(t1.killed);
+    try testing.expectEqual(Stage.running, t1.stage);
+    // Its conversation id stays, for the restart to resume.
+    try testing.expectEqualStrings("0e8c3f8a-0000-4000-8000-000000000001", t1.session_id);
+    // What the session asked went with it; Review still needs you.
+    try testing.expectEqual(@as(usize, 0), t1.flags.len);
+    const t2 = try getTicket(db, a, k2);
+    try testing.expect(t2.killed);
+    try testing.expectEqualStrings(flag_review, t2.flags[0].kind);
+    // Done tickets and other sessions are left alone.
+    try testing.expectEqualStrings("cl_qa_1", (try getTicket(db, a, k3)).tmux);
+    try testing.expect(!(try getTicket(db, a, k4)).killed);
+
+    // A new session, or queueing it again, ends the wait.
+    try setSession(ctx, db, t1.id, "cl_qa_3", t1.session_id, "", "");
+    try testing.expect(!(try getTicket(db, a, k1)).killed);
+    try move(ctx, db, a, k2, .backlog);
+    try testing.expect((try getTicket(db, a, k2)).killed);
+    try move(ctx, db, a, k2, .queued);
+    try testing.expect(!(try getTicket(db, a, k2)).killed);
+}
+
+test "hiding a ticket from Needs You keeps its flags until it raises a new one" {
+    const ctx = testCtx();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try Db.open(":memory:");
+    defer db.close();
+    try migrate(db);
+    try addProject(db, .{ .name = "qa", .dir = "/x/qa" });
+    const k = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Ended", .stage = .running });
+    try testing.expect(!try hideNeeds(ctx, db, a, k, true)); // no flag: nothing to hide
+    try setFlag(ctx, db, a, k, "ended", "auto", "gone");
+    try testing.expectEqual(@as(usize, 1), (try listTickets(db, a, .{ .needs = true })).len);
+
+    try testing.expect(try hideNeeds(ctx, db, a, k, true));
+    try testing.expectEqual(@as(usize, 0), (try listTickets(db, a, .{ .needs = true })).len);
+    try testing.expectEqual(@as(usize, 1), (try listTickets(db, a, .{ .needs = true, .hidden = true })).len);
+    const t = try getTicket(db, a, k);
+    try testing.expectEqual(@as(usize, 1), t.flags.len);
+    try testing.expect(t.flags[0].hidden);
+    // The same flag set again, saying the same, stays hidden.
+    try setFlag(ctx, db, a, k, "ended", "auto", "gone");
+    try testing.expectEqual(@as(usize, 0), (try listTickets(db, a, .{ .needs = true })).len);
+
+    // A new flag brings it back; the hidden one stays hidden.
+    try setFlag(ctx, db, a, k, flag_question, "auto", "{}");
+    try testing.expectEqual(@as(usize, 1), (try listTickets(db, a, .{ .needs = true })).len);
+    try testing.expectEqual(@as(usize, 0), (try listTickets(db, a, .{ .needs = true, .hidden = true })).len);
+
+    // So does the same flag asking something new.
+    _ = try hideNeeds(ctx, db, a, k, true);
+    try setFlag(ctx, db, a, k, flag_question, "auto", "{\"q\":\"another\"}");
+    try testing.expectEqual(@as(usize, 1), (try listTickets(db, a, .{ .needs = true })).len);
+
+    // Unhiding puts it all back.
+    _ = try hideNeeds(ctx, db, a, k, true);
+    _ = try hideNeeds(ctx, db, a, k, false);
+    for ((try getTicket(db, a, k)).flags) |f| try testing.expect(!f.hidden);
 }

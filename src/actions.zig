@@ -1,5 +1,5 @@
-//! Ticket actions that reach into a session (typing, keys), shared by
-//! `cl ticket` and the web board so both do exactly the same thing.
+//! Ticket actions that reach into a session (typing, keys, killing it),
+//! shared by `cl ticket` and the web board so both do exactly the same thing.
 const std = @import("std");
 const Ctx = @import("ctx.zig");
 const tmux = @import("tmux.zig");
@@ -8,6 +8,7 @@ const review = @import("review.zig");
 const worktree = @import("worktree.zig");
 const config = @import("config.zig");
 const signals = @import("signals.zig");
+const claude = @import("claude.zig");
 
 pub const Error = error{
     /// The ticket has no live session to act on.
@@ -260,6 +261,51 @@ pub fn approve(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, sp
         }
     }
     return from;
+}
+
+pub const KillResult = struct {
+    /// The tmux session it was in.
+    session: []const u8,
+    /// Other unfinished tickets that were on the same session (a queue
+    /// project's shared one); they let go of it too.
+    others: []const []const u8,
+    /// It had a conversation of its own, which a restart picks back up.
+    resumes: bool,
+};
+
+/// End the ticket's session on purpose, as `cl kill` does. The ticket keeps
+/// its stage and lets go of the session with no flag raised (a kill you chose
+/// doesn't need you); `cl ticket start` restarts it, resuming its conversation
+/// where Claude still has it. Work in the checkout or worktree stays put.
+pub fn kill(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, key: []const u8) !KillResult {
+    const t = try board.getTicket(db, a, key);
+    const s = liveSession(ctx, t) orelse return error.NoSession;
+    // Its own conversation may have a new id since it started (/clear): keep
+    // the one it has now, so a restart resumes that.
+    if (t.session_id.len > 0) {
+        if (claude.readStatuses(ctx, a, cfg)) |statuses| {
+            if (statuses.get(s)) |i| if (i.session_id.len == 36 and !std.mem.eql(u8, i.session_id, t.session_id)) {
+                try board.setSessionId(db, t.id, i.session_id);
+            };
+        } else |_| {}
+    }
+    var others: std.ArrayList([]const u8) = .empty;
+    var st = try db.query("SELECT key FROM tickets WHERE tmux = ?1 AND id != ?2 AND stage != 'done' ORDER BY id", .{ s, t.id });
+    defer st.finalize();
+    while (try st.step()) try others.append(a, try st.dupe(a, 0));
+    try tmux.kill(ctx, s);
+    try board.sessionKilled(ctx, db, a, s);
+    return .{ .session = s, .others = others.items, .resumes = t.session_id.len == 36 };
+}
+
+/// A session killed outside the board (`cl kill`, the chooser): its tickets
+/// let go of it as `kill` does, rather than being flagged as ended.
+pub fn sessionKilled(ctx: Ctx, cfg: config.Config, tmux_name: []const u8) void {
+    var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);
+    defer arena_state.deinit();
+    const db = board.open(ctx, cfg) catch return;
+    defer db.close();
+    board.sessionKilled(ctx, db, arena_state.allocator(), tmux_name) catch {};
 }
 
 pub const Key = enum { esc, interrupt, enter, up, down };

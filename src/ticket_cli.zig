@@ -25,8 +25,11 @@ pub const ticket_usage =
     \\      [--top] [--parent <key>]
     \\                              tickets, newest first (--needs: oldest ask first;
     \\                              --top: no sub-tickets; --parent: its sub-tickets)
-    \\  needs                       tickets with a flag, oldest first (the inbox); a ticket
-    \\                              whose session is working on it is left out until it stops
+    \\  needs [--hidden]            tickets with a flag, oldest first (the inbox); a ticket
+    \\                              whose session is working on it is left out until it stops,
+    \\                              and a hidden one until it raises a new flag (--hidden: those)
+    \\  hide <key> / unhide <key>   keep it out of the inbox (Needs You) without clearing its
+    \\                              flags, or bring it back; a new flag brings it back too
     \\  show <key>                  details, flags, sub-tickets, comments and activity
     \\  edit <key> [--title <t>] [-m <body>] [--project <p>] [--worktree | --queue]
     \\      [--target <session>] [--plan | --no-plan] [--skill <name>] [--profile <name>]
@@ -44,7 +47,12 @@ pub const ticket_usage =
     \\                              projects (the board column). The dispatcher starts queued
     \\                              tickets of a project in this order
     \\  start <key> [--now]         start it now: a worktree and session, or typed into its
-    \\                              queue session (--now even if that session is busy)
+    \\                              queue session (--now even if that session is busy); a ticket
+    \\                              that ran before (killed, or its session ended) restarts,
+    \\                              resuming its conversation where Claude still has it
+    \\  kill <key>                  end its session, as cl kill does; it keeps its stage, raises
+    \\                              no flag, and waits for start to restart it. A queue
+    \\                              project's session is shared: other tickets on it let go too
     \\  approve <key> [--spin-off] [--merge | --pr | --close]
     \\                              plan → running (tells Claude), review → testing, testing → done
     \\  answer <key> <answer>...    answer the question (one per question: an option number or
@@ -331,14 +339,15 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         return out(try std.fmt.allocPrint(a, "{s}\n", .{key}));
     }
     if (std.mem.eql(u8, cmd, "list") or std.mem.eql(u8, cmd, "ls") or std.mem.eql(u8, cmd, "needs")) {
-        args.only(&.{ "--stage", "--project", "--flag", "--needs", "--search", "--open", "--top", "--parent", "--json" }, ticket_usage);
+        args.only(&.{ "--stage", "--project", "--flag", "--needs", "--hidden", "--search", "--open", "--top", "--parent", "--json" }, ticket_usage);
         if (pos.len != 0) fail("{s} takes no arguments\n{s}", .{ cmd, ticket_usage });
-        const needs = args.has("--needs") or std.mem.eql(u8, cmd, "needs");
+        const needs = args.has("--needs") or args.has("--hidden") or std.mem.eql(u8, cmd, "needs");
         const ts = board.listTickets(db, a, .{
             .stage = if (args.get("--stage")) |s| parseStage(s) else null,
             .project = args.get("--project"),
             .flag = args.get("--flag"),
             .needs = needs,
+            .hidden = args.has("--hidden"),
             // Tickets Claude is working on aren't waiting on the human.
             .busy = if (needs) claude.busySessions(ctx, a, cfg) catch &.{} else &.{},
             .search = args.get("--search"),
@@ -479,6 +488,28 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         return out(try std.fmt.allocPrint(a, "{s} started in {s}{s}{s}\n", .{
             after.key, after.tmux, if (after.worktree.len > 0) " at " else "", try ctx.shortenHomeIn(a, after.worktree),
         }));
+    }
+    if (std.mem.eql(u8, cmd, "kill")) {
+        args.only(&.{}, ticket_usage);
+        if (pos.len != 1) fail("usage: cl ticket kill <key>", .{});
+        const r = actions.kill(ctx, cfg, db, a, pos[0]) catch |e| switch (e) {
+            error.NoSession => fail("{s} has no live session", .{pos[0]}),
+            else => boardFail(db, e, "ticket"),
+        };
+        const t = board.getTicket(db, a, pos[0]) catch |e| boardFail(db, e, "ticket");
+        var aw: std.Io.Writer.Allocating = .init(a);
+        try aw.writer.print("killed {s}; {s} stays in {s}. `cl ticket start {s}` restarts it{s}.\n", .{
+            r.session, t.key, @tagName(t.stage), t.key, if (r.resumes) ", resuming its conversation" else "",
+        });
+        if (r.others.len > 0) try aw.writer.print("it was shared: {s} let go of it too\n", .{try std.mem.join(a, ", ", r.others)});
+        return out(aw.writer.buffered());
+    }
+    if (std.mem.eql(u8, cmd, "hide") or std.mem.eql(u8, cmd, "unhide")) {
+        args.only(&.{}, ticket_usage);
+        const key = keyArg(pos, 0, env_key, try std.fmt.allocPrint(a, "cl ticket {s} <key>", .{cmd}));
+        const any = board.hideNeeds(ctx, db, a, key, std.mem.eql(u8, cmd, "hide")) catch |e| boardFail(db, e, "ticket");
+        if (!any) fail("{s} has no flag, so it isn't in the inbox", .{key});
+        return;
     }
     if (std.mem.eql(u8, cmd, "approve")) {
         args.only(&.{ "--spin-off", "--merge", "--pr", "--close" }, ticket_usage);
@@ -712,6 +743,7 @@ fn showText(ctx: Ctx, a: std.mem.Allocator, t: board.Ticket, subs: []const board
     });
     if (t.parent.len > 0) try w.print("sub-ticket of: {s}\n", .{t.parent});
     if (t.tmux.len > 0) try w.print("session: {s}\n", .{t.tmux});
+    if (t.killed) try w.print("session: killed; `cl ticket start {s}` restarts it\n", .{t.key});
     if (t.finishing.len > 0) try w.print("finishing: {s} (Claude is {s}; it goes to done after)\n", .{ t.finishing, if (std.mem.eql(u8, t.finishing, "pr")) "opening a PR" else "merging its branch" });
     if (t.worktree.len > 0) try w.print("worktree: {s}   branch: {s}\n", .{ try ctx.shortenHomeIn(a, t.worktree), t.branch });
     if (t.change.len > 0) try w.print("change: {s}{s}{s}\n", .{ t.change[0..@min(t.change.len, 12)], if (t.branch.len > 0) "   bookmark: " else "", t.branch });
