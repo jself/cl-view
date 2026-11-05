@@ -95,6 +95,8 @@ pub fn handle(ctx: Ctx, cfg: config.Config, req: *std.http.Server.Request, path:
             error.OpenSubtickets => .{ .conflict, "it has sub-tickets that aren't done yet; finish them or spin them off" },
             error.NoTestPlan => .{ .not_found, "no test plan (.claude/test-plan.md)" },
             error.NoLaunch => .{ .not_found, "the test plan has no launch command" },
+            error.Conflicts => .{ .conflict, "merging it back conflicts (the files are on the ticket); it stays in Testing" },
+            error.MergeFailed => .{ .internal_server_error, worktree.lastError() },
             error.Sqlite => .{ .internal_server_error, db.message() },
             else => .{ .internal_server_error, @errorName(err) },
         };
@@ -356,6 +358,6 @@ fn getTicket(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, r
         .test_plan = if (dir.len > 0) review.readTestPlan(ctx, a, dir) else null,
         .launch = try review.launchState(ctx, a, t.key),
         .gutter_port = try review.gutterPort(ctx, a, t.key),
-        .main_branch = if (t.branch.len > 0) worktree.mainBranch(ctx, a, (try board.getProject(db, a, t.project)).dir) else "",
+        .main_branch = if (t.branch.len > 0 or t.change.len > 0) worktree.mainBranch(ctx, a, (try board.getProject(db, a, t.project)).dir) else "",
     });
 }

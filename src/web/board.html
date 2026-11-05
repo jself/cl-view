@@ -12,6 +12,7 @@
     --input: #ffc861; --input-bg: #3a2a0b; --question: #cdb8ff; --question-bg: #2c2440;
     --review: #9cc6ff; --review-bg: #11294a; --testing: #7ee6d6; --testing-bg: #0f3330;
     --other: #d6d7da; --other-bg: #2c2e33; --finishing: #b6e3a0; --finishing-bg: #1b3317;
+    --conflict: #ffb4b4; --conflict-bg: #3d1a1a;
     --mono: ui-monospace, SFMono-Regular, Menlo, "DejaVu Sans Mono", monospace;
     --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
@@ -85,6 +86,7 @@
           background: var(--other-bg); color: var(--other); white-space: nowrap; }
   .f-input { background: var(--input-bg); color: var(--input); } .f-question { background: var(--question-bg); color: var(--question); }
   .f-review { background: var(--review-bg); color: var(--review); } .f-testing { background: var(--testing-bg); color: var(--testing); }
+  .f-conflict { background: var(--conflict-bg); color: var(--conflict); }
   .f-finishing { background: var(--finishing-bg); color: var(--finishing); }
 
   .lanes { overflow-x: auto; }
@@ -179,7 +181,7 @@
 "use strict";
 const STAGES = ["backlog", "planning", "queued", "running", "review", "testing", "done"];
 const STAGE_NAME = { backlog: "Backlog", planning: "Planning", queued: "Queued", running: "Running", review: "Review", testing: "Testing", done: "Done" };
-const FLAG_NAME = { input: "Needs input", question: "Question", review: "Ready for review", testing: "Needs testing", ended: "Session ended", "start-failed": "Didn't start" };
+const FLAG_NAME = { input: "Needs input", question: "Question", review: "Ready for review", testing: "Needs testing", ended: "Session ended", "start-failed": "Didn't start", conflict: "Conflicts" };
 const STATUS_NAME = { busy: "Working", waiting: "Waiting on you", blocked: "Waiting on you", idle: "Idle", shell: "Idle · background task", starting: "Starting", gone: "Session ended", unknown: "Unknown" };
 
 const store = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch { return null; } };
@@ -215,10 +217,11 @@ function askText(t, f) {
   if (f.kind === "input") return d ? `${d.tool || "Permission"}: ${d.summary || "wants permission"}` : (f.detail || "Waiting on a prompt");
   if (f.kind === "review") return (d === null && f.detail === "plan") || f.detail === "plan" ? "The plan is ready for approval" : (t.summary || "Claude says it's done");
   if (f.kind === "testing") return "Ready to try";
+  if (f.kind === "conflict") return "Merging it back conflicts in: " + f.detail.split("\n").map((l) => l.trim().split(/\s+/)[0]).join(", ");
   return f.detail || FLAG_NAME[f.kind] || f.kind;
 }
 const flagLabel = (f) => f.kind === "review" && f.detail === "plan" ? "Plan ready" : (FLAG_NAME[f.kind] || f.kind);
-const flagClass = (k) => ["input", "question", "review", "testing"].includes(k) ? "f-" + k : "";
+const flagClass = (k) => ["input", "question", "review", "testing", "conflict"].includes(k) ? "f-" + k : "";
 // Finishing: Claude is merging the branch or opening a PR before it goes to Done.
 const finishPill = (t) => t.finishing ? `<span class="pill f-finishing" title="${t.finishing === "pr" ? "Claude is opening a PR" : "Claude is merging its branch"}; it goes to Done after">Finishing</span>` : "";
 const pills = (t) => t.flags.length || t.finishing ? `<span class="pills">${finishPill(t)}${t.flags.map((f) => `<span class="pill ${flagClass(f.kind)}">${esc(flagLabel(f))}</span>`).join("")}</span>` : "";
@@ -227,7 +230,7 @@ const pills = (t) => t.flags.length || t.finishing ? `<span class="pills">${fini
 const statusOf = (row) => row.status || (row.ticket.tmux.startsWith("(") ? "starting" : row.ticket.tmux && !["backlog", "queued"].includes(row.ticket.stage) ? "gone" : "none");
 const statusHtml = (row) => { const s = statusOf(row); const label = s === "none" ? (row.ticket.stage === "queued" ? "Waiting for a slot" : "Not started") : (STATUS_NAME[s] || s);
   return `<span class="status"><span class="dot s-${esc(s)}"></span>${esc(label)}</span>`; };
-const where = (t) => t.worktree ? t.branch : t.mode === "worktree" ? "worktree on start" : t.target ? "queue: " + t.target : "queue";
+const where = (t) => t.worktree || t.branch ? t.branch || "worktree" : t.mode === "worktree" ? "worktree on start" : t.target ? "queue: " + t.target : "queue";
 
 // ---- board data ----
 async function refresh() {
@@ -593,18 +596,18 @@ function confirmDone(key) {
 // Resolves to "close", "merge", "pr", or null when cancelled.
 async function chooseFinish(key) {
   const t = state.data.tickets.find((r) => r.ticket.key === key)?.ticket || (state.detail?.ticket.key === key ? state.detail.ticket : null);
-  if (!t?.branch) return "close";
+  if (!t?.branch && !t?.change) return "close";
   let main = state.detail?.ticket.key === key ? state.detail.main_branch : "";
   if (!main) main = (await api(`ticket/${encodeURIComponent(key)}`).catch(() => ({}))).main_branch || "master";
   const dlg = document.getElementById("finishDlg");
   document.getElementById("finishBody").innerHTML = `<h2 style="margin:0;font-size:17px">Finish ${esc(key)}</h2>
-    <p class="muted" style="margin:0">Its work is on <span class="mono">${esc(t.branch)}</span>. What should happen to it?</p>
+    <p class="muted" style="margin:0">Its work is on <span class="mono">${esc(t.branch || "its jj change " + t.change.slice(0, 12))}</span>. What should happen to it?</p>
     <div style="display:flex;flex-direction:column;gap:8px">
       <button type="button" class="btn primary" data-finish="merge">Merge into ${esc(main)}</button>
       <button type="button" class="btn" data-finish="pr">Open a PR</button>
       <button type="button" class="btn" data-finish="close">Just close</button>
       <button type="button" class="btn" data-finish="">Cancel</button></div>
-    <p class="muted" style="margin:0;font-size:12.5px">Merge and PR ask Claude to do it in the ticket's session. It stays where it is, marked Finishing, until Claude is through; then it goes to Done and the session closes.</p>`;
+    <p class="muted" style="margin:0;font-size:12.5px">${t.change ? "Merge: cl rebases its jj change onto " + esc(main) + " and moves " + esc(main) + " to it; Claude settles any conflicts and restarts what runs from the checkout. PR: Claude pushes it and opens the PR." : "Merge and PR ask Claude to do it in the ticket's session."} It stays where it is, marked Finishing, until Claude is through; then it goes to Done and the session closes.</p>`;
   dlg.returnValue = ""; dlg.showModal();
   return new Promise((res) => { dlg.onclose = () => res(dlg.returnValue || null); });
 }

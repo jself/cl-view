@@ -82,7 +82,7 @@ pub fn startGutter(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket
     std.Io.Dir.cwd().createDirPath(ctx.io, try std.fmt.allocPrint(a, "{s}/.claude", .{dir})) catch {};
     // A previous review was sent already; start a fresh one.
     std.Io.Dir.cwd().deleteFile(ctx.io, try reviewPath(a, dir)) catch {};
-    const rev = try worktree.reviewRev(ctx, a, dir, t.base);
+    const rev = try worktree.reviewRev(ctx, a, dir, t.base, t.change);
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(a, &.{ "new-session", "-d", "-s", name, "-c", dir, "--", "gutter", "-open=false", "-port", "0", "-dir", ".claude" });
     if (rev.len > 0) try argv.appendSlice(a, &.{ "-r", rev });

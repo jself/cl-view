@@ -46,6 +46,7 @@ pub const flag_input = "input"; // blocked on a permission prompt
 pub const flag_question = "question"; // Claude asked something
 pub const flag_review = "review"; // Claude said done; review it
 pub const flag_testing = "testing"; // try it out
+pub const flag_conflict = "conflict"; // merging it back conflicts
 
 pub const Project = struct {
     name: []const u8,
@@ -100,7 +101,11 @@ pub const Ticket = struct {
     /// Queue mode: the tmux session it runs in.
     target: []const u8,
     worktree: []const u8,
+    /// Its branch (git) or bookmark (jj).
     branch: []const u8,
+    /// jj: the change its work goes in (change ids survive rewrites), "" for
+    /// none (git, or a sub-ticket going on in its parent's change).
+    change: []const u8 = "",
     profile: []const u8,
     /// The tmux session working on it, once started.
     tmux: []const u8,
@@ -155,6 +160,7 @@ const schema =
     \\  skill TEXT NOT NULL DEFAULT '',
     \\  base TEXT NOT NULL DEFAULT '',
     \\  finishing TEXT NOT NULL DEFAULT '',
+    \\  change_id TEXT NOT NULL DEFAULT '',
     \\  created INTEGER NOT NULL,
     \\  updated INTEGER NOT NULL
     \\);
@@ -227,7 +233,7 @@ pub fn open(ctx: Ctx, cfg: config.Config) !Db {
     return db;
 }
 
-const version = 5;
+const version = 6;
 
 pub fn migrate(db: Db) !void {
     const have = (try db.int("PRAGMA user_version", .{})) orelse 0;
@@ -237,6 +243,7 @@ pub fn migrate(db: Db) !void {
     if (have >= 1 and have < 3) try db.execMulti("ALTER TABLE tickets ADD COLUMN skill TEXT NOT NULL DEFAULT ''");
     if (have >= 1 and have < 4) try db.execMulti("ALTER TABLE tickets ADD COLUMN base TEXT NOT NULL DEFAULT ''");
     if (have >= 1 and have < 5) try db.execMulti("ALTER TABLE tickets ADD COLUMN finishing TEXT NOT NULL DEFAULT ''");
+    if (have >= 1 and have < 6) try db.execMulti("ALTER TABLE tickets ADD COLUMN change_id TEXT NOT NULL DEFAULT ''");
     try db.execMulti(schema);
     try db.execMulti(std.fmt.comptimePrint("PRAGMA user_version = {d}", .{version}));
 }
@@ -420,7 +427,7 @@ pub fn createTicket(ctx: Ctx, db: Db, a: std.mem.Allocator, in: TicketInput) Err
 }
 
 const ticket_cols = "t.id, t.key, t.project, t.title, t.body, t.stage, t.mode, t.plan, t.target, t.worktree, t.branch, t.profile, t.tmux, t.session_id, t.summary, t.round, t.created, t.updated, " ++
-    "coalesce((SELECT p.key FROM tickets p WHERE p.id = t.parent), ''), (SELECT count(*) FROM tickets c WHERE c.parent = t.id), t.skill, t.base, t.finishing";
+    "coalesce((SELECT p.key FROM tickets p WHERE p.id = t.parent), ''), (SELECT count(*) FROM tickets c WHERE c.parent = t.id), t.skill, t.base, t.finishing, t.change_id";
 
 fn readTicket(st: sqlite.Stmt, a: std.mem.Allocator) !Ticket {
     return .{
@@ -447,6 +454,7 @@ fn readTicket(st: sqlite.Stmt, a: std.mem.Allocator) !Ticket {
         .skill = try st.dupe(a, 20),
         .base = try st.dupe(a, 21),
         .finishing = try st.dupe(a, 22),
+        .change = try st.dupe(a, 23),
     };
 }
 
@@ -768,6 +776,11 @@ pub fn releaseStart(db: Db, id: i64) Error!void {
 /// Move without the key lookup (the dispatcher has the ticket already).
 pub fn moveTicket(ctx: Ctx, db: Db, t: Ticket, stage: Stage) Error!void {
     if (t.stage != stage) try moveId(ctx, db, t.id, t.stage, stage);
+}
+
+/// The ticket's jj change and its bookmark ("" and "" to forget them).
+pub fn setChange(db: Db, id: i64, change: []const u8, bookmark: []const u8) Error!void {
+    try db.exec("UPDATE tickets SET change_id = ?2, branch = ?3 WHERE id = ?1", .{ id, change, bookmark });
 }
 
 pub fn setBase(db: Db, id: i64, base: []const u8) Error!void {

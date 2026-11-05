@@ -217,6 +217,14 @@ Every project gets jj: adding one, or starting its first ticket, runs
 working, and worktree tickets get `jj workspace`s. A directory inside a bigger
 git repo is left alone, and so is everything when jj isn't installed.
 
+With jj, every ticket gets a change of its own on top of trunk (the default
+branch), described `QA-1: <title>`, with a bookmark of its key and title on
+it so git sees a branch; `cl t show` lists both. Its work goes into that change
+by itself (jj snapshots the files), so nothing is committed by hand, and the
+review in gutter shows that change. cl's own files in `.claude/` (review guide,
+review, test plan) are kept out through `.git/info/exclude`; everything
+gitignored, like `node_modules`, stays out as usual.
+
 Stages are the workflow: backlog, planning (optional), queued, running,
 review, testing, done. Flags say what needs you and are separate from the
 stage: `input` (a permission prompt), `question`, `review`, `testing`, or any
@@ -257,7 +265,13 @@ A ticket runs one of two ways (`--queue` is the default, a project can set
   ticket in progress (planning, running, review or testing; it is free once
   that ticket is done): `--target <tmux name>`, else the parent's session for
   a sub-ticket, else the session of the project's ticket in progress, else a
-  new session in the project's directory.
+  new session in the project's directory. The project's checkout is shared,
+  so when a session takes a ticket up on its own (idle, not a sub-ticket going
+  on in its parent's conversation) the checkout switches to that ticket's
+  change (`jj edit`), and each ticket's files come back with its resumed
+  conversation. Claude is told first thing when the files changed, so it
+  restarts what runs from the checkout. A sub-ticket in its parent's
+  conversation works in the parent's change.
 - **worktree**: its own worktree at `<board.worktrees>/<project>/<key-title>`
   (a `git worktree` with a branch of that name, or a `jj workspace`) and its
   own session, up to the project's `--slots` in progress at once.
@@ -319,12 +333,12 @@ failure sends them to Claude for another round.
 ### Finishing
 
 Done closes the ticket's session. For a ticket with a branch of its own
-(worktree mode) you choose what happens to the branch first: the board asks
+(a jj change, or a git worktree's branch) you choose what happens to the branch first: the board asks
 when a card is dropped on Done (or Done is picked, or it is approved out of
 testing), and the CLI takes a flag:
 
 ```
-cl t move QA-1 done --merge        Claude merges its branch into the main branch
+cl t move QA-1 done --merge        merge it into the main branch (see below)
 cl t move QA-1 done --pr           Claude pushes it and opens a PR
 cl t move QA-1 done [--close]      just close (the default; also approve and test)
 ```
@@ -333,8 +347,18 @@ With `--merge` or `--pr` the instruction is typed into the ticket's session
 and the ticket stays where it is with a Finishing pill; questions and
 conflicts come back through the board as usual. When Claude is through it
 runs `cl t done QA-1 --close [--pr-url <url>]`: the ticket moves to done, the
-PR link becomes a comment, and then the session closes. Queue tickets work
-in the project's own checkout, so they just close.
+PR link becomes a comment, and then the session closes.
+
+A jj change is merged by cl itself: it rebases the change onto trunk and,
+with no conflicts, moves trunk to it and drops the bookmark (a change with no
+edits is dropped instead). A checkout left on the merged change gets a new one
+on top, and one with nothing of its own moves up to trunk. When the checkout's
+files changed and the session is still there, Claude is asked to restart what
+runs from it before Done. Conflicts are recorded by jj in the change and put on
+the ticket as a `conflict` flag listing the files; trunk stays put, and Claude
+is asked to settle them in the change and run `cl t done QA-1 --close`, which
+merges it then (and refuses while any are left). Git branches are merged by
+Claude as before.
 
 ### The web board
 

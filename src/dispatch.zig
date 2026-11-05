@@ -61,9 +61,22 @@ pub fn prompt(a: std.mem.Allocator, t: board.Ticket, notes: []const board.Commen
         \\  3. {s}Run `cl ticket done {s} --summary "<what changed, in a sentence or two>"`.
         \\  Don't run it while you still need anything from me. When I send feedback, finish the same way.
         \\
-    , .{ t.key, if (t.mode == .worktree) "Commit your work on this branch (the review shows commits and new files that way). " else "", t.key });
+    , .{ t.key, if (t.change.len == 0 and t.mode == .worktree) "Commit your work on this branch (the review shows commits and new files that way). " else "", t.key });
+    if (t.change.len > 0) try w.print(
+        \\- This is a jj repo, and your work goes into the ticket's jj change {s}{s}{s} by itself:
+        \\  don't commit (git or jj), start other changes or switch branches. When it's done, cl merges it.
+        \\
+    , .{ t.change[0..@min(t.change.len, 12)], if (t.branch.len > 0) ", bookmark " else "", t.branch });
     return aw.written();
 }
+
+/// Told before anything else when the checkout was just switched to the
+/// ticket's change: its files are not what was running.
+const switched_note =
+    \\The project's checkout was just switched to this ticket's change, so its files differ from what was there before. Before anything else, if something runs from this checkout (an installed build, a server; the project's CLAUDE.md may say what and how), rebuild and restart it so it serves this ticket's code.
+    \\
+    \\
+;
 
 /// What a resumed conversation is told: it already has the ticket.
 fn resumePrompt(a: std.mem.Allocator, t: board.Ticket, notes: []const board.Comment) ![]const u8 {
@@ -280,19 +293,48 @@ fn startIn(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: 
     if (t.mode == .queue and !can_force and !free and (live or busy)) return error.TargetBusy;
     if (!try board.claimStart(db, t.id)) return error.AlreadyStarted;
     errdefer board.releaseStart(db, t.id) catch {};
-    const notes = try board.unsentNotes(db, a, t.id);
-    const text = if (resume_id != null) try resumePrompt(a, t, notes) else try prompt(a, t, notes);
-    var sid: [36]u8 = undefined;
     // Projects added before jj was set up on add get it on their first start.
     if (worktree.ensureJj(ctx, a, p.dir)) try board.logEvent(ctx, db, t.id, "jj init", p.dir);
     // What gutter will diff against: the repo as it is now.
     try board.setBase(db, t.id, worktree.baseRev(ctx, a, p.dir));
+    // jj: the ticket's own change, on top of trunk. A queue ticket takes the
+    // project's checkout over only when it gets the session to itself.
+    const trunk = worktree.trunkBookmark(ctx, a, p.dir);
+    if (trunk != null) worktree.excludeClFiles(ctx, a, p.dir);
+    const desc = try std.fmt.allocPrint(a, "{s}: {s}", .{ t.key, t.title });
+    var tc = t;
+    var wt: worktree.Worktree = .{ .path = "", .branch = "" };
+    var switched = false;
     switch (t.mode) {
         .worktree => {
-            const wt = worktree.create(ctx, a, cfg, p.dir, p.name, t.key, t.title) catch |err| {
+            wt = worktree.create(ctx, a, cfg, p.dir, p.name, t.key, t.title, trunk orelse "", desc) catch |err| {
                 try board.logEvent(ctx, db, t.id, "start failed", worktree.lastError());
                 return if (err == error.OutOfMemory) err else error.WorktreeFailed;
             };
+            // A worktree made earlier keeps the change it has.
+            if (wt.change.len > 0) {
+                try board.setChange(db, t.id, wt.change, wt.branch);
+                tc.change = wt.change;
+                tc.branch = wt.branch;
+            } else if (t.change.len > 0) wt.branch = t.branch;
+        },
+        // Never while another ticket of the project is in progress (a
+        // forced start): its files would go from under it. A ticket that ran
+        // before tickets had changes keeps working on what the checkout has.
+        .queue => if (trunk != null and !in_parent and (free or !live) and (t.change.len > 0 or t.base.len == 0) and !try projectBusy(db, a, view, t)) {
+            if (try ticketChange(ctx, db, a, p.dir, t, trunk.?, desc)) |c| {
+                tc.change = c.change.id;
+                tc.branch = c.change.bookmark;
+                switched = c.switched;
+            }
+        },
+    }
+    const notes = try board.unsentNotes(db, a, t.id);
+    const body = if (resume_id != null) try resumePrompt(a, tc, notes) else try prompt(a, tc, notes);
+    const text = if (switched) try std.mem.concat(a, u8, &.{ switched_note, body }) else body;
+    var sid: [36]u8 = undefined;
+    switch (t.mode) {
+        .worktree => {
             const name = try newSession(ctx, cfg, a, t, wt.path, try std.ascii.allocLowerString(a, t.key), text, &sid, true, resume_id);
             try board.setSession(ctx, db, t.id, name, &sid, wt.path, wt.branch);
         },
@@ -316,12 +358,46 @@ fn startIn(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: 
             try board.setSession(ctx, db, t.id, name, &sid, "", "");
         },
     }
+    // setSession cleared it for a queue ticket.
+    if (tc.change.len > 0) try board.setChange(db, t.id, tc.change, tc.branch);
     try board.markNotesSent(db, t.id);
     try board.clearFlagId(ctx, db, t.id, "start-failed");
     try board.clearFlagId(ctx, db, t.id, "ended");
     if (t.stage != .planning) try board.moveTicket(ctx, db, t, .running);
     const now_t = try board.getTicket(db, a, t.key);
     try board.logEvent(ctx, db, t.id, "started", now_t.tmux);
+}
+
+/// Put the project's checkout `dir` on the ticket's change: its own when it
+/// has one still open, else a new one on top of `trunk`. `switched` is true
+/// when the checkout's files changed. null (logged) when jj refused.
+fn ticketChange(ctx: Ctx, db: board.Db, a: std.mem.Allocator, dir: []const u8, t: board.Ticket, trunk: []const u8, desc: []const u8) !?struct { change: worktree.Change, switched: bool } {
+    const before = worktree.workingCommit(ctx, a, dir) catch "";
+    const c: worktree.Change = blk: {
+        if (t.change.len > 0) switch (worktree.changeState(ctx, a, dir, t.change, trunk)) {
+            .open => {
+                _ = worktree.editChange(ctx, a, dir, t.change) catch {
+                    try board.logEvent(ctx, db, t.id, "no change", worktree.lastError());
+                    return null;
+                };
+                break :blk .{ .id = t.change, .bookmark = t.branch };
+            },
+            // Merged already (reopened after Done), or abandoned: start over.
+            .merged, .gone => {},
+        };
+        const c = worktree.newChange(ctx, a, dir, trunk, desc, try worktree.slug(a, t.key, t.title)) catch {
+            try board.logEvent(ctx, db, t.id, "no change", worktree.lastError());
+            return null;
+        };
+        // Kept at once: a start that fails later on finds it next time.
+        try board.setChange(db, t.id, c.id, c.bookmark);
+        try board.logEvent(ctx, db, t.id, "change", c.id);
+        break :blk c;
+    };
+    const switched = before.len > 0 and worktree.filesDiffer(ctx, a, dir, before);
+    // Where the checkout was, in case it held work of someone's own (jj keeps it there).
+    if (switched) try board.logEvent(ctx, db, t.id, "checkout switched from", before[0..@min(before.len, 12)]);
+    return .{ .change = c, .switched = switched };
 }
 
 /// Worktree tickets of `project` with a live session in progress.

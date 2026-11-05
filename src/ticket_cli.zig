@@ -33,7 +33,8 @@ pub const ticket_usage =
     \\                              (done also closes the ticket's session; it's refused while
     \\                              sub-tickets are unfinished, --spin-off makes them top-level;
     \\                              --merge / --pr: Claude first merges the ticket's branch or
-    \\                              opens a PR, then it goes to done; --close, the default, and
+    \\                              opens a PR, then it goes to done (a jj change cl merges
+    \\                              itself; Claude settles conflicts); --close, the default, and
     \\                              tickets without a branch of their own go straight there)
     \\  start <key> [--now]         start it now: a worktree and session, or typed into its
     \\                              queue session (--now even if that session is busy)
@@ -148,6 +149,8 @@ fn boardFail(db: board.Db, err: anyerror, what: []const u8) noreturn {
         error.BadInput => fail("invalid {s}", .{what}),
         error.NoSession => fail("its session isn't running, so Claude can't merge or open a PR; use --close", .{}),
         error.OpenSubtickets => fail("it has sub-tickets that aren't done yet; finish them, or make them tickets of their own with `cl ticket move <key> done --spin-off`", .{}),
+        error.Conflicts => fail("merging it back conflicts (see `cl ticket show`); resolve them in its change, then try again", .{}),
+        error.MergeFailed => fail("jj couldn't merge it: {s}", .{worktree.lastError()}),
         error.Sqlite => fail("board database: {s}", .{db.message()}),
         else => fail("{s}: {s}", .{ what, @errorName(err) }),
     }
@@ -377,6 +380,8 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         // While finishing, a plain `done` means the merge or PR is done too.
         if (args.has("--close") or t0.finishing.len > 0) {
             if (t0.finishing.len == 0) fail("{s} isn't finishing (--close is for after a merge or PR the board asked for); use done without it", .{t0.key});
+            // Settled conflicts merge first, so a refusal comes before the message.
+            actions.mergeSettled(ctx, db, a, t0) catch |e| boardFail(db, e, "ticket");
             // Printed first: closing kills the session this may be running in.
             try out(try std.fmt.allocPrint(a, "{s}: done; its session closes now.\n", .{t0.key}));
             actions.finished(ctx, db, a, key, args.get("--summary") orelse "", args.get("--pr-url") orelse "") catch |e| boardFail(db, e, "ticket");
@@ -567,9 +572,9 @@ fn walkTest(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8) !void
     const cur = board.getTicket(db, a, key) catch |e| boardFail(db, e, "ticket");
     for (checks.items) |c| {
         if (!c.pass) break;
-    } else if (cur.stage == .testing and cur.branch.len > 0) {
+    } else if (cur.stage == .testing and (cur.branch.len > 0 or cur.change.len > 0)) {
         const main = worktree.mainBranch(ctx, a, (board.getProject(db, a, cur.project) catch |e| boardFail(db, e, "project")).dir);
-        const ans = try ask.line(&in, a, try std.fmt.allocPrint(a, "\nAll passed. [m]erge {s} into {s}, open a [p]R, or just [c]lose? ", .{ cur.branch, main }));
+        const ans = try ask.line(&in, a, try std.fmt.allocPrint(a, "\nAll passed. [m]erge {s} into {s}, open a [p]R, or just [c]lose? ", .{ if (cur.branch.len > 0) cur.branch else "its change", main }));
         if (ans.len > 0) finish = switch (std.ascii.toLower(ans[0])) {
             'm' => .merge,
             'p' => .pr,
@@ -649,6 +654,7 @@ fn showText(ctx: Ctx, a: std.mem.Allocator, t: board.Ticket, subs: []const board
     if (t.tmux.len > 0) try w.print("session: {s}\n", .{t.tmux});
     if (t.finishing.len > 0) try w.print("finishing: {s} (Claude is {s}; it goes to done after)\n", .{ t.finishing, if (std.mem.eql(u8, t.finishing, "pr")) "opening a PR" else "merging its branch" });
     if (t.worktree.len > 0) try w.print("worktree: {s}   branch: {s}\n", .{ try ctx.shortenHomeIn(a, t.worktree), t.branch });
+    if (t.change.len > 0) try w.print("change: {s}{s}{s}\n", .{ t.change[0..@min(t.change.len, 12)], if (t.branch.len > 0) "   bookmark: " else "", t.branch });
     for (t.flags) |f| try w.print("flag: {s} ({s}, {s}){s}{s}\n", .{ f.kind, f.source, try stamp(a, f.at), if (f.detail.len > 0) ": " else "", f.detail });
     if (t.body.len > 0) try w.print("\n{s}\n", .{t.body});
     if (subs.len > 0) {
