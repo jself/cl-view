@@ -136,6 +136,7 @@
          border-radius: calc(10 * var(--u)); background: var(--card); cursor: pointer; text-align: left; }
   .opt.on { border-color: #a78bfa; background: #231f33; }
   .opt small { color: var(--muted); }
+  .opt .box { color: #a78bfa; }
   .q { display: flex; flex-direction: column; gap: calc(8 * var(--u)); padding-bottom: calc(10 * var(--u)); }
   .q + .q { border-top: 1px solid var(--line2); padding-top: calc(12 * var(--u)); }
   .comment { padding: calc(9 * var(--u)) calc(12 * var(--u)); border-radius: calc(10 * var(--u)); background: var(--card); }
@@ -331,7 +332,7 @@ function renderNeeds() {
   setHtml(document.getElementById("needsStrip"), rows.map((r) => {
     const t = r.ticket; const f = t.flags[0]; const d = flagDetail(f);
     let quick = "";
-    if (f.kind === "question" && d?.questions?.length === 1)
+    if (f.kind === "question" && d?.questions?.length === 1 && !d.questions[0].multiSelect)
       quick = (d.questions[0].options || []).slice(0, 3).map((o, i) => `<button type="button" class="btn" data-answer="${esc(t.key)}" data-n="${i + 1}">${esc(o.label)}</button>`).join("");
     if (f.kind === "input" && d?.options?.length)
       quick = d.options.slice(0, 2).map((o) => `<button type="button" class="btn" data-answer="${esc(t.key)}" data-n="${o.n}">${esc(o.label)}</button>`).join("");
@@ -472,11 +473,13 @@ function needsTab(d) {
   const t = d.ticket; const f = t.flags.find((x) => x.kind === "question") || t.flags.find((x) => x.kind === "input"); const det = flagDetail(f) || {};
   const shell = `<a class="btn" href="/?attach=${encodeURIComponent(t.tmux)}">Answer in the shell</a>`;
   if (f.kind === "question" && det.questions?.length) {
-    return det.questions.map((q, qi) => `<div class="q"><span class="muted" style="font-size:calc(12 * var(--u))">${esc(q.header || "Question")}${q.multiSelect ? " · pick in the shell for several" : ""}</span>
+    return det.questions.map((q, qi) => `<div class="q"><span class="muted" style="font-size:calc(12 * var(--u))">${esc(q.header || "Question")}${q.multiSelect ? " · pick any" : ""}</span>
         <div style="font-size:calc(15 * var(--u))">${esc(q.question)}</div>
-        <div class="opts">${(q.options || []).map((o, oi) => `<button type="button" class="opt ${state.picks[qi] === String(oi + 1) ? "on" : ""}" data-pick="${qi}" data-n="${oi + 1}">
-          <span>${esc(o.label)}</span>${o.description ? `<small>${esc(o.description)}</small>` : ""}</button>`).join("")}</div>
-        <input type="text" data-other="${qi}" placeholder="Or your own answer" value="${esc(state.other[qi] || "")}"></div>`).join("")
+        <div class="opts">${(q.options || []).map((o, oi) => { const n = String(oi + 1);
+          const on = q.multiSelect ? (state.picks[qi] || []).includes(n) : state.picks[qi] === n;
+          return `<button type="button" class="opt ${on ? "on" : ""}" data-pick="${qi}" data-n="${n}" ${q.multiSelect ? `data-multi="1" role="checkbox" aria-checked="${on}"` : ""}>
+          <span>${q.multiSelect ? `<span class="box" aria-hidden="true">${on ? "☑" : "☐"}</span> ` : ""}${esc(o.label)}</span>${o.description ? `<small>${esc(o.description)}</small>` : ""}</button>`; }).join("")}</div>
+        <input type="text" data-other="${qi}" placeholder="${q.multiSelect ? "And your own answer" : "Or your own answer"}" value="${esc(state.other[qi] || "")}"></div>`).join("")
       + `<div class="actions"><button type="button" class="btn primary" id="sendAnswers">Send ${det.questions.length > 1 ? "answers" : "answer"}</button>${shell}</div>`;
   }
   return `<div class="q"><span class="muted" style="font-size:calc(12 * var(--u))">${esc(det.tool || "Permission prompt")}</span>
@@ -767,6 +770,9 @@ document.addEventListener("click", async (e) => {
   if (ds.tab) { state.tab = ds.tab; renderDetail(); return; }
   if (ds.key) return act(key, "key", { key: ds.key });
   if (ds.move) return act(key, "move", { stage: ds.move }, "Moved");
+  if (ds.pick !== undefined && ds.multi) {
+    const p = state.picks[ds.pick] || []; state.picks[ds.pick] = p.includes(ds.n) ? p.filter((x) => x !== ds.n) : [...p, ds.n]; renderDetail(); return;
+  }
   if (ds.pick !== undefined) { state.picks[ds.pick] = ds.n; state.other[ds.pick] = ""; renderDetail(); return; }
   if (ds.perm) return sendAnswer(key, [ds.perm], el);
   if (ds.check !== undefined) { const c = state.checks["c" + ds.check] || {}; c.pass = ds.pass === "1"; state.checks["c" + ds.check] = c; renderDetail(); return; }
@@ -782,7 +788,11 @@ document.addEventListener("click", async (e) => {
   if (ds.act) return act(key, ds.act, {}, "Done");
   if (el.id === "sendAnswers") {
     const qs = flagDetail(state.detail.ticket.flags.find((f) => f.kind === "question"))?.questions || [];
-    const answers = qs.map((_, i) => (state.other[i] || "").trim() || state.picks[i]);
+    // A multi-select answer is its picks, then ";" and your own words (see `cl ticket answer`).
+    const answers = qs.map((q, i) => { const own = (state.other[i] || "").trim();
+      if (!q.multiSelect) return own || state.picks[i];
+      const picks = [...(state.picks[i] || [])].sort((a, b) => a - b).join(",");
+      return own ? `${picks};${own}` : picks; });
     if (answers.some((x) => !x)) return toast("Answer every question first", true);
     return sendAnswer(key, answers, el);
   }

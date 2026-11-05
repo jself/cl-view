@@ -43,7 +43,11 @@ pub const ticket_usage =
     \\  approve <key> [--spin-off] [--merge | --pr | --close]
     \\                              plan → running (tells Claude), review → testing, testing → done
     \\  answer <key> <answer>...    answer the question (one per question: an option number or
-    \\                              your own words) or permission prompt (a number) it waits on
+    \\                              your own words) or permission prompt (a number) it waits on;
+    \\                              a multi-select question takes several numbers, maybe then
+    \\                              your own words: "1,3", "1 3", "2,4,something else" or
+    \\                              "1;2 more" (after ";" it's all your own words); a lone one
+    \\                              also takes them as separate answers: answer <key> 1 3
     \\  key <key> esc|interrupt|enter|up|down
     \\                              press a key in its session
     \\  gutter <key> [--stop]       review its changes in gutter's window (with Claude's review
@@ -439,7 +443,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         actions.answer(ctx, cfg, db, a, pos[0], pos[1..]) catch |e| switch (e) {
             error.NoSession => fail("{s} has no live session", .{pos[0]}),
             error.NothingAsked => fail("{s} isn't waiting on a question or permission prompt", .{pos[0]}),
-            error.BadAnswer => fail("give one answer per question: an option number or your own words (permission prompts take a number)", .{}),
+            error.BadAnswer => fail("give one answer per question: an option number or your own words; for a multi-select one, option numbers like 1,3 (permission prompts take a number)", .{}),
             error.NotDelivered => fail("{s}: the answer was typed, but Claude is still waiting on the same thing; check the session", .{pos[0]}),
             else => boardFail(db, e, "ticket"),
         };

@@ -260,12 +260,163 @@ fn isNumber(s: []const u8) bool {
     return true;
 }
 
+/// One AskUserQuestion question, as the flag detail holds it.
+pub const Question = struct {
+    multiSelect: bool = false,
+    options: ?[]const struct { label: []const u8 = "" } = null,
+};
+
+/// A step of an answer typed into the session.
+pub const Press = union(enum) {
+    /// Typed as is (send-keys -l).
+    text: []const u8,
+    /// A named key (Enter, Down).
+    key: []const u8,
+    pause: u32,
+};
+
+/// The keypresses that answer AskUserQuestion's menu, one answer per
+/// question. A single-select answer is an option's number (pressing it picks
+/// it and moves on) or your own words (typed after "Type something"). A
+/// multi-select answer lists option numbers, by commas or spaces, and may end
+/// in your own words ("1,3", "2 4 something else", "1;3 more"): each number toggles its
+/// option without moving the cursor, Down from the first row reaches "Type
+/// something", where typing checks it, and one more Down is Next (or Submit),
+/// taken with Enter. Several questions, or a multi-select one, end on the
+/// review screen, whose first option submits.
+pub fn questionKeys(a: std.mem.Allocator, qs: []const Question, answers: []const []const u8) ![]const Press {
+    var out: std.ArrayList(Press) = .empty;
+    const count = if (qs.len > 0) qs.len else 1;
+    if (answers.len != count) return error.BadAnswer;
+    var review_screen = count > 1;
+    for (answers, 0..) |ans, i| {
+        if (i > 0) try out.append(a, .{ .pause = 500 });
+        const n_opts = if (i < qs.len) (if (qs[i].options) |o| o.len else 0) else 0;
+        if (i < qs.len and qs[i].multiSelect) {
+            review_screen = true;
+            if (n_opts == 0) return error.BadAnswer;
+            const m = try multiAnswer(a, ans, n_opts);
+            for (m.picks) |p| {
+                try out.append(a, .{ .text = p });
+                try out.append(a, .{ .pause = 200 });
+            }
+            for (0..n_opts) |_| try out.append(a, .{ .key = "Down" });
+            if (m.own.len > 0) {
+                try out.append(a, .{ .pause = 200 });
+                try out.append(a, .{ .text = m.own });
+            }
+            try out.append(a, .{ .pause = 200 });
+            try out.append(a, .{ .key = "Down" });
+            try out.append(a, .{ .key = "Enter" });
+        } else if (isNumber(ans)) {
+            try out.append(a, .{ .text = ans });
+        } else {
+            if (n_opts == 0) return error.BadAnswer;
+            try out.append(a, .{ .text = try std.fmt.allocPrint(a, "{d}", .{n_opts + 1}) });
+            try out.append(a, .{ .pause = 300 });
+            try out.append(a, .{ .text = ans });
+            try out.append(a, .{ .pause = 200 });
+            try out.append(a, .{ .key = "Enter" });
+        }
+    }
+    if (review_screen) {
+        try out.append(a, .{ .pause = 500 });
+        try out.append(a, .{ .text = "1" }); // Submit answers
+    }
+    return out.items;
+}
+
+/// A multi-select answer split into the options picked (leading numbers,
+/// each once) and your own words after them. A ";" after the numbers marks
+/// where your own words start, so they can begin with a number ("1;2 more").
+fn multiAnswer(a: std.mem.Allocator, ans: []const u8, n_opts: usize) !struct { picks: []const []const u8, own: []const u8 } {
+    var picks: std.ArrayList([]const u8) = .empty;
+    var nums = ans;
+    var own: ?[]const u8 = null;
+    if (std.mem.indexOfScalar(u8, ans, ';')) |semi| {
+        if (std.mem.indexOfNone(u8, ans[0..semi], "0123456789 ,") == null) {
+            nums = ans[0..semi];
+            own = std.mem.trim(u8, ans[semi + 1 ..], " ");
+        }
+    }
+    var rest = std.mem.trim(u8, nums, " ,");
+    while (rest.len > 0) {
+        const end = std.mem.indexOfAny(u8, rest, " ,") orelse rest.len;
+        const tok = rest[0..end];
+        if (!isNumber(tok)) break;
+        const n = std.fmt.parseInt(usize, tok, 10) catch break;
+        if (n < 1 or n > n_opts) return error.BadAnswer;
+        for (picks.items) |p| {
+            if (std.mem.eql(u8, p, tok)) break;
+        } else try picks.append(a, tok);
+        rest = std.mem.trimStart(u8, rest[end..], " ,");
+    }
+    const words = own orelse rest;
+    if (picks.items.len == 0 and words.len == 0) return error.BadAnswer;
+    return .{ .picks = picks.items, .own = words };
+}
+
+test "questionKeys: single-select keeps the old keys" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const qs = try std.json.parseFromSliceLeaky([]const Question, a,
+        \\[{"question":"Color?","options":[{"label":"Red"},{"label":"Blue"}]}]
+    , .{ .ignore_unknown_fields = true });
+    try std.testing.expectEqualDeep(@as([]const Press, &.{.{ .text = "2" }}), try questionKeys(a, qs, &.{"2"}));
+    try std.testing.expectEqualDeep(@as([]const Press, &.{
+        .{ .text = "3" }, .{ .pause = 300 }, .{ .text = "green" }, .{ .pause = 200 }, .{ .key = "Enter" },
+    }), try questionKeys(a, qs, &.{"green"}));
+}
+
+test "questionKeys: multi-select toggles each pick, types its own words, then Next and Submit" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const qs = try std.json.parseFromSliceLeaky([]const Question, a,
+        \\[{"question":"Fruits?","multiSelect":true,"options":[{"label":"Apple"},{"label":"Banana"},{"label":"Cherry"}]},
+        \\ {"question":"Color?","multiSelect":false,"options":[{"label":"Red"},{"label":"Blue"}]}]
+    , .{ .ignore_unknown_fields = true });
+    // The sequence that answered "Apple, Cherry, kiwi" and "Blue" in a live session.
+    try std.testing.expectEqualDeep(@as([]const Press, &.{
+        .{ .text = "1" },   .{ .pause = 200 },   .{ .text = "3" },    .{ .pause = 200 },
+        .{ .key = "Down" }, .{ .key = "Down" },  .{ .key = "Down" },  .{ .pause = 200 },
+        .{ .text = "kiwi" }, .{ .pause = 200 },  .{ .key = "Down" },  .{ .key = "Enter" },
+        .{ .pause = 500 },  .{ .text = "2" },    .{ .pause = 500 },   .{ .text = "1" },
+    }), try questionKeys(a, qs, &.{ "1,3,kiwi", "2" }));
+    // Spaces work too, repeats count once, and no own words skips straight to Next.
+    try std.testing.expectEqualDeep(@as([]const Press, &.{
+        .{ .text = "2" },   .{ .pause = 200 },  .{ .key = "Down" },  .{ .key = "Down" },
+        .{ .key = "Down" }, .{ .pause = 200 },  .{ .key = "Down" },  .{ .key = "Enter" },
+        .{ .pause = 500 },  .{ .text = "1" },   .{ .pause = 500 },   .{ .text = "1" },
+    }), try questionKeys(a, qs, &.{ "2 2", "1" }));
+    try std.testing.expectError(error.BadAnswer, questionKeys(a, qs, &.{ "4", "1" }));
+    try std.testing.expectError(error.BadAnswer, questionKeys(a, qs, &.{ ",", "1" }));
+}
+
+test "questionKeys: a lone multi-select question still submits on the review screen" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const qs = try std.json.parseFromSliceLeaky([]const Question, a,
+        \\[{"question":"Pets?","multiSelect":true,"options":[{"label":"Cat"},{"label":"Dog"},{"label":"Fish"}]}]
+    , .{ .ignore_unknown_fields = true });
+    const keys = try questionKeys(a, qs, &.{"hamster"});
+    try std.testing.expectEqualDeep(Press{ .text = "hamster" }, keys[4]);
+    try std.testing.expectEqualDeep(Press{ .text = "1" }, keys[keys.len - 1]);
+    // After ";" it's all your own words, numbers too.
+    const semi = try questionKeys(a, qs, &.{"3;2 goldfish"});
+    try std.testing.expectEqualDeep(Press{ .text = "3" }, semi[0]);
+    try std.testing.expectEqualDeep(Press{ .text = "2 goldfish" }, semi[6]);
+    try std.testing.expectEqualDeep(Press{ .text = "hamster; gerbil" }, (try questionKeys(a, qs, &.{"hamster; gerbil"}))[4]);
+}
+
 /// Answer what the session is waiting on, by keypress, as you would in the
-/// terminal. Questions: one answer per question, each an option's number or
-/// your own words (typed as "Type something"); several questions end with
-/// Submit. Permission prompts: the option's number. It returns once the
-/// session has taken the answer, or fails with NotDelivered.
-pub fn answer(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, key: []const u8, answers: []const []const u8) !void {
+/// terminal. Questions: one answer per question (see `questionKeys`); a lone
+/// multi-select question also takes its picks as separate answers. Permission
+/// prompts: the option's number. It returns once the session has taken the
+/// answer, or fails with NotDelivered.
+pub fn answer(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, key: []const u8, answers_in: []const []const u8) !void {
     const t = try board.getTicket(db, a, key);
     const s = liveSession(ctx, t) orelse return error.NoSession;
     var flag: ?board.Flag = null;
@@ -273,40 +424,26 @@ pub fn answer(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, 
         flag = f;
     };
     const f = flag orelse return error.NothingAsked;
-    if (answers.len == 0) return error.BadAnswer;
+    if (answers_in.len == 0) return error.BadAnswer;
+    var answers = answers_in;
     const before = signals.Waiting.of(ctx, cfg, a, s);
 
     if (std.mem.eql(u8, f.kind, board.flag_input)) {
         if (answers.len != 1 or !isNumber(answers[0])) return error.BadAnswer;
         try tmux.runQuiet(ctx, &.{ "send-keys", "-l", "-t", s, answers[0] });
     } else {
-        // How many options each question has, for its "Type something" number.
-        const Detail = struct {
-            questions: ?[]const struct { options: ?[]const struct { label: []const u8 = "" } = null } = null,
-        };
+        const Detail = struct { questions: ?[]const Question = null };
         const d = std.json.parseFromSliceLeaky(Detail, a, f.detail, .{ .ignore_unknown_fields = true }) catch Detail{};
         const qs = d.questions orelse &.{};
-        const count = if (qs.len > 0) qs.len else 1;
-        if (answers.len != count) return error.BadAnswer;
-        for (answers, 0..) |ans, i| {
-            if (i > 0) ctx.sleepMs(500);
-            if (isNumber(ans)) {
-                try tmux.runQuiet(ctx, &.{ "send-keys", "-l", "-t", s, ans });
-            } else {
-                const n_opts = if (i < qs.len) (if (qs[i].options) |o| o.len else 0) else 0;
-                if (n_opts == 0) return error.BadAnswer;
-                var buf: [4]u8 = undefined;
-                try tmux.runQuiet(ctx, &.{ "send-keys", "-l", "-t", s, try std.fmt.bufPrint(&buf, "{d}", .{n_opts + 1}) });
-                ctx.sleepMs(300);
-                try tmux.runQuiet(ctx, &.{ "send-keys", "-l", "-t", s, ans });
-                ctx.sleepMs(200);
-                try tmux.runQuiet(ctx, &.{ "send-keys", "-t", s, "Enter" });
-            }
+        if (qs.len == 1 and qs[0].multiSelect and answers.len > 1) {
+            const joined = try std.mem.join(a, ",", answers);
+            answers = try a.dupe([]const u8, &.{joined});
         }
-        if (count > 1) {
-            ctx.sleepMs(500);
-            try tmux.runQuiet(ctx, &.{ "send-keys", "-l", "-t", s, "1" }); // Submit answers
-        }
+        for (try questionKeys(a, qs, answers)) |p| switch (p) {
+            .text => |x| try tmux.runQuiet(ctx, &.{ "send-keys", "-l", "-t", s, x }),
+            .key => |x| try tmux.runQuiet(ctx, &.{ "send-keys", "-t", s, x }),
+            .pause => |ms| ctx.sleepMs(ms),
+        };
     }
     if (!before.answered(ctx, cfg, s, 6000)) return error.NotDelivered;
     // Keep the answer in the ticket's history (this also clears the flag; the

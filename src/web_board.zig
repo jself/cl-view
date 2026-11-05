@@ -87,7 +87,7 @@ pub fn handle(ctx: Ctx, cfg: config.Config, req: *std.http.Server.Request, path:
             error.BadInput => .{ .bad_request, "invalid input" },
             error.NoSession => .{ .conflict, "the ticket has no live session" },
             error.NothingAsked => .{ .conflict, "nothing is waiting for an answer" },
-            error.BadAnswer => .{ .bad_request, "one answer per question: an option number or your own words" },
+            error.BadAnswer => .{ .bad_request, "one answer per question: an option number or your own words (several numbers for a multi-select one)" },
             error.GutterFailed => .{ .internal_server_error, "gutter didn't start (is it installed?)" },
             error.NotDelivered => .{ .conflict, "Claude didn't take the answer; it's still waiting. Check the session" },
             error.AlreadyStarted => .{ .conflict, "it already has a session" },
