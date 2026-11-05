@@ -41,11 +41,11 @@
 </head>
 <body>
 <div id="head" hidden><span class="key" id="headKey"></span><span class="title" id="headTitle"></span>
-  <a href="/board" id="close" title="Back to the board (the session keeps running)" aria-label="Close and go back to the board">✕</a></div>
+  <a href="/board" id="close" title="Close (Ctrl-Q or Alt-Q): back to the board, the session keeps running" aria-label="Close and go back to the board">✕</a></div>
 <div id="term"></div>
 <div id="keys">
   <a href="/board" title="The ticket board">Board</a>
-  <button class="back" data-send="\x11" title="Back to the list (Ctrl-Q)" aria-label="Back to the list">⇦</button>
+  <button class="back" data-send="\x11" title="Back to the list (Ctrl-Q or Alt-Q)" aria-label="Back to the list">⇦</button>
   <button data-send="\x1b">Esc</button>
   <button data-send="\t">Tab</button>
   <button data-send="\x1b[A">↑</button>
@@ -148,6 +148,19 @@
     document.getElementById("head").hidden = false;
     document.querySelector('#keys a[href="/board"]').remove();
   }
+  // Opened from the board, Ctrl-Q or Alt-Q does what the X does. In the
+  // chooser, Alt-Q sends Ctrl-Q (back to the list), since Firefox keeps
+  // Ctrl-Q for quitting. Caught on the way down, before xterm.js sees it, so
+  // the session never gets ESC q, nor the XON (0x11) when it's closing.
+  // Alt-Q goes by the key's position: with Option on a Mac, e.key is "œ".
+  window.addEventListener("keydown", (e) => {
+    if (e.shiftKey || e.metaKey || e.ctrlKey === e.altKey) return;
+    if (e.ctrlKey ? !attach || (e.key !== "q" && e.key !== "Q") : e.code !== "KeyQ") return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    if (attach) document.getElementById("close").click();
+    else send("0", "\x11");
+  }, true);
 
   let retries = 0;
   let retryTimer = 0;

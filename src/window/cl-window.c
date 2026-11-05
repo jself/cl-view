@@ -4,8 +4,10 @@
 //
 // `cl window` starts it; it isn't meant to be run by hand. The web view has
 // no browser shortcuts of its own, so keys like Ctrl+W, Ctrl+T, Ctrl+L and
-// Ctrl+R reach the page (the terminal). The window's own keys all use
-// Ctrl+Shift: R reloads, +/-/0 zoom, I opens the web inspector.
+// Ctrl+R reach the page (the terminal). Ctrl+Q doesn't quit either: an
+// opened session's terminal takes it (and Alt+Q) as "back to the board".
+// The window's own keys all use Ctrl+Shift: R reloads, +/-/0 zoom, I opens
+// the web inspector.
 //
 // Cookies (the sign-in) and local storage live in <data dir>, and the window
 // remembers its page, size and zoom there, so reopening it comes back to the
