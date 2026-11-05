@@ -30,6 +30,41 @@ pub fn detect(ctx: Ctx, a: std.mem.Allocator, dir: []const u8) Error!Vcs {
     return .git;
 }
 
+/// Give a project jj: `jj git init --colocate` when `dir` isn't in a jj repo
+/// yet, so git keeps working and worktrees become jj workspaces. Left alone
+/// when `dir` sits inside a bigger git repo (that would nest a new repo) or
+/// jj isn't installed. True when it ran.
+pub fn ensureJj(ctx: Ctx, a: std.mem.Allocator, dir: []const u8) bool {
+    if (run(ctx, a, &.{ "jj", "root", "-R", dir })) |_| return false else |_| {}
+    if (run(ctx, a, &.{ "git", "-C", dir, "rev-parse", "--show-toplevel" })) |top| {
+        if (!std.mem.eql(u8, std.mem.trim(u8, top, " \n"), dir)) return false;
+    } else |_| {}
+    _ = run(ctx, a, &.{ "jj", "git", "init", "--colocate", dir }) catch return false;
+    return true;
+}
+
+test ensureJj {
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp" };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    _ = run(ctx, a, &.{ "jj", "--version" }) catch return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const repo = try tmp.dir.realPathFileAlloc(ctx.io, ".", a);
+    _ = run(ctx, a, &.{ "git", "init", "-q", "-b", "master", repo }) catch return error.SkipZigTest;
+    try tmp.dir.createDirPath(ctx.io, "sub");
+    // A directory inside the git repo is left alone.
+    try std.testing.expect(!ensureJj(ctx, a, try std.fmt.allocPrint(a, "{s}/sub", .{repo})));
+    try std.testing.expectEqual(Vcs.git, try detect(ctx, a, repo));
+    // The repo itself gets jj, once.
+    try std.testing.expect(ensureJj(ctx, a, repo));
+    try std.testing.expectEqual(Vcs.jj, try detect(ctx, a, repo));
+    try std.testing.expect(!ensureJj(ctx, a, repo));
+    // Colocated, so the merge target is still a git branch.
+    try std.testing.expectEqualStrings("master", mainBranch(ctx, a, repo));
+}
+
 /// `<key>-<title words>`, lower case, at most 48 characters.
 pub fn slug(a: std.mem.Allocator, key: []const u8, title: []const u8) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
@@ -73,7 +108,8 @@ pub fn baseRev(ctx: Ctx, a: std.mem.Allocator, dir: []const u8) []const u8 {
 /// itself may be on a ticket's branch, so that comes last. jj: trunk().
 pub fn mainBranch(ctx: Ctx, a: std.mem.Allocator, dir: []const u8) []const u8 {
     const vcs = detect(ctx, a, dir) catch return "master";
-    if (vcs == .jj) return "trunk()";
+    // A colocated jj repo still has git's branches; only pure jj needs trunk().
+    if (vcs == .jj) _ = run(ctx, a, &.{ "git", "-C", dir, "rev-parse", "--git-dir" }) catch return "trunk()";
     if (run(ctx, a, &.{ "git", "-C", dir, "symbolic-ref", "--short", "refs/remotes/origin/HEAD" })) |outp| {
         const b = std.mem.trim(u8, outp, " \n");
         if (std.mem.startsWith(u8, b, "origin/") and b.len > "origin/".len) return b["origin/".len..];

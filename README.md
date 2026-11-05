@@ -212,6 +212,11 @@ cl project add boats ~/devel/boats --prefix BOAT
 cl project list | set <name> [options] | rm <name>
 ```
 
+Every project gets jj: adding one, or starting its first ticket, runs
+`jj git init --colocate` when the directory has no jj repo yet. Git keeps
+working, and worktree tickets get `jj workspace`s. A directory inside a bigger
+git repo is left alone, and so is everything when jj isn't installed.
+
 Stages are the workflow: backlog, planning (optional), queued, running,
 review, testing, done. Flags say what needs you and are separate from the
 stage: `input` (a permission prompt), `question`, `review`, `testing`, or any

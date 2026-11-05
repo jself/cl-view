@@ -215,7 +215,8 @@ pub fn projectMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void
             .profile = args.get("--profile"),
         }) catch |e| boardFail(db, e, "project (name or prefix)");
         const p = board.getProject(db, a, args.pos.items[0]) catch |e| boardFail(db, e, "project");
-        return out(try std.fmt.allocPrint(a, "{s}: tickets are {s}-1, {s}-2, ...\n", .{ p.name, p.prefix, p.prefix }));
+        const jj = worktree.ensureJj(ctx, a, dir);
+        return out(try std.fmt.allocPrint(a, "{s}: tickets are {s}-1, {s}-2, ...{s}\n", .{ p.name, p.prefix, p.prefix, if (jj) "\n(set up jj alongside git: jj git init --colocate)" else "" }));
     }
     if (std.mem.eql(u8, cmd, "set")) {
         args.only(&.{ "--prefix", "--slots", "--mode", "--profile", "--name", "--dir" }, project_usage);

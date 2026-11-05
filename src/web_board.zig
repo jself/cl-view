@@ -185,14 +185,16 @@ fn route(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: 
     }
     if (std.mem.eql(u8, what, "project")) {
         if (name.len == 0) {
+            const dir = try realDir(ctx, a, b.dir orelse return error.BadInput);
             try board.addProject(db, .{
                 .name = b.name orelse "",
-                .dir = try realDir(ctx, a, b.dir orelse return error.BadInput),
+                .dir = dir,
                 .prefix = nonEmpty(b.prefix),
                 .slots = b.slots,
                 .mode = if (b.mode) |m| board.Mode.parse(m) orelse return error.BadInput else null,
                 .profile = b.profile,
             });
+            _ = worktree.ensureJj(ctx, a, dir);
             return ok(req, a, .{ .ok = true });
         }
         if (std.mem.eql(u8, action, "set")) {

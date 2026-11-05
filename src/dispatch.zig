@@ -272,6 +272,8 @@ fn startIn(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: 
     const notes = try board.unsentNotes(db, a, t.id);
     const text = if (resume_id != null) try resumePrompt(a, t, notes) else try prompt(a, t, notes);
     var sid: [36]u8 = undefined;
+    // Projects added before jj was set up on add get it on their first start.
+    if (worktree.ensureJj(ctx, a, p.dir)) try board.logEvent(ctx, db, t.id, "jj init", p.dir);
     // What gutter will diff against: the repo as it is now.
     try board.setBase(db, t.id, worktree.baseRev(ctx, a, p.dir));
     switch (t.mode) {
