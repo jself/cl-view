@@ -89,7 +89,8 @@ pub const project_usage =
     \\  rm <name>
     \\  list [--json]
     \\
-;
+    \\
+++ std.fmt.comptimePrint("--slots: worktree tickets in progress at once (default {d})\n", .{board.default_slots});
 
 fn out(text: []const u8) !void {
     try std.Io.File.stdout().writeStreamingAll(std.Io.Threaded.global_single_threaded.io(), text);

@@ -325,7 +325,8 @@ A ticket runs one of two ways (`--queue` is the default, a project can set
   conversation works in the parent's change.
 - **worktree**: its own worktree at `<board.worktrees>/<project>/<key-title>`
   (a `git worktree` with a branch of that name, or a `jj workspace`) and its
-  own session, up to the project's `--slots` in progress at once.
+  own session, up to the project's `--slots` in progress at once (3 by
+  default).
 
 ```
 cl t move QA-1 queued      the dispatcher starts it when it can

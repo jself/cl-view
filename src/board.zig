@@ -131,13 +131,17 @@ pub const Ticket = struct {
 
 pub const Error = error{ Sqlite, NotFound, Exists, BadInput, OutOfMemory };
 
+/// Worktree slots a new project gets when none are given.
+pub const default_slots = 3;
+
 const schema =
     \\PRAGMA journal_mode = WAL;
     \\CREATE TABLE IF NOT EXISTS projects (
     \\  name TEXT PRIMARY KEY,
     \\  dir TEXT NOT NULL,
     \\  prefix TEXT NOT NULL UNIQUE,
-    \\  slots INTEGER NOT NULL DEFAULT 1,
+    \\  slots INTEGER NOT NULL DEFAULT
+++ std.fmt.comptimePrint(" {d},\n", .{default_slots}) ++
     \\  mode TEXT NOT NULL DEFAULT 'queue',
     \\  profile TEXT NOT NULL DEFAULT '',
     \\  next_num INTEGER NOT NULL DEFAULT 1
@@ -329,7 +333,7 @@ pub fn addProject(db: Db, in: ProjectInput) Error!void {
     if (!validPrefix(prefix)) return error.BadInput;
     if (try db.int("SELECT 1 FROM projects WHERE name = ?1 OR prefix = ?2", .{ in.name, prefix }) != null) return error.Exists;
     try db.exec("INSERT INTO projects (name, dir, prefix, slots, mode, profile) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", .{
-        in.name, in.dir, prefix, in.slots orelse 1, @tagName(in.mode orelse .queue), in.profile orelse "",
+        in.name, in.dir, prefix, in.slots orelse default_slots, @tagName(in.mode orelse .queue), in.profile orelse "",
     });
 }
 
@@ -903,6 +907,11 @@ test "projects, tickets, flags, comments, done" {
     try migrate(db);
 
     try addProject(db, .{ .name = "qa-tool", .dir = "/x/qa-tool", .slots = 2 });
+    try testing.expectEqual(@as(i64, 2), (try getProject(db, a, "qa-tool")).slots);
+    try addProject(db, .{ .name = "boats", .dir = "/x/boats" });
+    try testing.expectEqual(@as(i64, default_slots), (try getProject(db, a, "boats")).slots);
+    try db.exec("INSERT INTO projects (name, dir, prefix) VALUES ('raw', '/x/raw', 'RAW')", .{});
+    try testing.expectEqual(@as(i64, default_slots), (try getProject(db, a, "raw")).slots);
     try testing.expectError(error.Exists, addProject(db, .{ .name = "qa-thing", .dir = "/x", .prefix = "QA" }));
 
     const k1 = try createTicket(ctx, db, a, .{ .project = "qa-tool", .title = "Flaky login spec", .body = "fails on CI" });
