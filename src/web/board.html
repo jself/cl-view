@@ -253,6 +253,27 @@ const statusHtml = (row) => { const s = statusOf(row); const label = s === "none
 const where = (t) => t.worktree || t.branch ? t.branch || "worktree" : t.mode === "worktree" ? "worktree on start" : t.target ? "queue: " + t.target : "queue";
 
 // ---- board data ----
+// Redraws from the 3-second refresh must not move anything: each scrolled
+// element under root (found again by its child-index path) and the page keep
+// their scroll, and a focused control keeps focus.
+function pathTo(root, el) { const p = []; for (; el !== root; el = el.parentElement) p.unshift([...el.parentElement.children].indexOf(el)); return p; }
+const atPath = (root, p) => p.reduce((el, i) => el?.children[i], root);
+function keepScroll(root, draw) {
+  const saved = [root, ...root.querySelectorAll("*")].filter((el) => el.scrollLeft || el.scrollTop)
+    .map((el) => [pathTo(root, el), el.scrollLeft, el.scrollTop]);
+  const page = [scrollX, scrollY]; const a = document.activeElement;
+  const focus = a && a !== root && root.contains(a) ? pathTo(root, a) : null;
+  draw();
+  for (const [p, l, t] of saved) { const el = atPath(root, p); if (el) { el.scrollLeft = l; el.scrollTop = t; } }
+  if (focus) atPath(root, focus)?.focus({ preventScroll: true });
+  scrollTo(page[0], page[1]);
+}
+// Set el's HTML, leaving it alone when nothing changed.
+function setHtml(el, html) {
+  if (el.drawn === html) return;
+  keepScroll(el, () => { el.innerHTML = html; });
+  el.drawn = html;
+}
 async function refresh() {
   try { state.data = await api("board"); } catch (e) { if (e.message !== "log in") toast(e.message, true); return; }
   if (!drag) render();
@@ -281,10 +302,10 @@ function render() {
   renderNeeds(); renderFilters();
   const main = document.getElementById("main");
   if (!d.projects.length) {
-    main.innerHTML = `<p class="empty">No projects yet. Add one with <span class="mono">cl project add &lt;name&gt; &lt;dir&gt;</span>, or with New ticket.</p>`; return;
+    setHtml(main, `<p class="empty">No projects yet. Add one with <span class="mono">cl project add &lt;name&gt; &lt;dir&gt;</span>, or with New ticket.</p>`); return;
   }
   const rows = visible();
-  main.innerHTML = state.view === "lanes" ? lanesHtml(rows) : state.view === "list" ? listHtml(rows) : boardHtml(rows);
+  setHtml(main, state.view === "lanes" ? lanesHtml(rows) : state.view === "list" ? listHtml(rows) : boardHtml(rows));
 }
 
 function renderNeeds() {
@@ -298,7 +319,7 @@ function renderNeeds() {
   document.getElementById("needsCount").textContent = rows.length;
   const counts = {}; for (const r of rows) for (const f of r.ticket.flags) counts[f.kind] = (counts[f.kind] || 0) + 1;
   document.getElementById("needsSum").textContent = Object.entries(counts).map(([k, n]) => `${n} ${(FLAG_NAME[k] || k).toLowerCase()}`).join(" · ");
-  document.getElementById("needsStrip").innerHTML = rows.map((r) => {
+  setHtml(document.getElementById("needsStrip"), rows.map((r) => {
     const t = r.ticket; const f = t.flags[0]; const d = flagDetail(f);
     let quick = "";
     if (f.kind === "question" && d?.questions?.length === 1)
@@ -313,17 +334,17 @@ function renderNeeds() {
     return `<div class="ask"><div class="pills"><span class="pill ${flagClass(f.kind)}">${esc(flagLabel(f))}</span><span class="mono muted" style="font-size:11.5px">${esc(t.key)} · ${ago(f.at)}</span></div>
       <div style="font-weight:500">${esc(t.title)}</div><div class="what">${esc(askText(t, f))}</div>
       ${quick ? `<div class="acts">${quick}</div>` : ""}<div class="acts">${main}${shell}</div></div>`;
-  }).join("");
+  }).join(""));
 }
 
 function renderFilters() {
   const d = state.data; const all = d.tickets.filter((r) => state.subs || !r.ticket.parent);
   const n = (f) => all.filter((r) => f === "all" || (f === "me" ? needsMe(r) : f === "working" ? r.status === "busy" : r.ticket.flags.some((x) => x.kind === f))).length;
   const chips = [["all", "All"], ["me", "Needs me"], ["input", "Needs input"], ["question", "Questions"], ["review", "Review"], ["testing", "Testing"], ["working", "Working"]];
-  document.getElementById("filters").innerHTML = chips.map(([k, l]) =>
+  setHtml(document.getElementById("filters"), chips.map(([k, l]) =>
       `<button type="button" class="chip ${state.filter === k ? "on" : ""}" data-filter="${k}" aria-pressed="${state.filter === k}">${l}<span class="n">${n(k)}</span></button>`).join("")
     + `<select id="projectSel" aria-label="Project"><option value="">All projects</option>${d.projects.map((p) => `<option ${p.name === state.project ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select>`
-    + `<button type="button" class="chip ${state.subs ? "on" : ""}" id="subsBtn" aria-pressed="${state.subs}">Sub-tickets<span class="n">${state.subs ? "shown" : "hidden"}</span></button>`;
+    + `<button type="button" class="chip ${state.subs ? "on" : ""}" id="subsBtn" aria-pressed="${state.subs}">Sub-tickets<span class="n">${state.subs ? "shown" : "hidden"}</span></button>`);
 }
 
 function cardHtml(row, compact) {
@@ -375,7 +396,8 @@ async function loadDetail(key, quiet) {
   const focused = document.activeElement && document.getElementById("ticketDlg").contains(document.activeElement) && /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName);
   if (quiet && state.sending) return;
   if (quiet && focused) { const pre = document.querySelector("#ticketBody pre.term"); if (pre && state.tab === "session") pre.textContent = state.detail.tail || "(no session)"; return; }
-  renderDetail();
+  // A refresh keeps the popup's scroll and the session tail's.
+  if (quiet) keepScroll(document.getElementById("ticketDlg"), renderDetail); else renderDetail();
 }
 function tabsFor(d) {
   const t = d.ticket; const tabs = [];
