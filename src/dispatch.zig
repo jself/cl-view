@@ -189,12 +189,21 @@ const in_progress = "('planning', 'running', 'review', 'testing')";
 /// the project's own session (see `homeSession`).
 fn queueTarget(db: board.Db, a: std.mem.Allocator, t: board.Ticket, view: View, p: board.Project) ![]const u8 {
     if (t.target.len > 0) return t.target;
-    if (t.parent.len > 0) {
-        const parent = board.getTicket(db, a, t.parent) catch return "";
-        if (parent.tmux.len > 0 and parent.tmux[0] != '(') return parent.tmux;
-        return "";
-    }
+    if (try parentSession(db, a, t, view)) |s| return s;
     return if (homeSession(view, p)) |s| s.tmux_name else "";
+}
+
+/// The live session of `t`'s parent while the parent is in progress: a
+/// sub-ticket goes on in that conversation. With the parent finished or its
+/// session gone, the sub-ticket waits its turn like a top-level ticket.
+fn parentSession(db: board.Db, a: std.mem.Allocator, t: board.Ticket, view: View) !?[]const u8 {
+    if (t.parent.len == 0) return null;
+    const parent = board.getTicket(db, a, t.parent) catch |err| return if (err == error.NotFound) null else err;
+    if (parent.tmux.len == 0 or parent.tmux[0] == '(' or !view.alive(parent.tmux)) return null;
+    return switch (parent.stage) {
+        .planning, .running, .review, .testing => parent.tmux,
+        else => null,
+    };
 }
 
 /// The project's session in the cl list: a live session in its directory,
@@ -209,10 +218,10 @@ fn homeSession(view: View, p: board.Project) ?tmux.Session {
     return best;
 }
 
-/// Another top-level queue ticket of the project is in progress with a
-/// session: one Claude works on a queue project at a time.
+/// Another queue ticket of the project is in progress with a session: one
+/// Claude works on a queue project at a time.
 fn projectBusy(db: board.Db, a: std.mem.Allocator, view: View, t: board.Ticket) !bool {
-    var st = try db.query("SELECT tmux FROM tickets WHERE project = ?1 AND id != ?2 AND mode = 'queue' AND parent IS NULL AND tmux != '' AND stage IN " ++ in_progress, .{ t.project, t.id });
+    var st = try db.query("SELECT tmux FROM tickets WHERE project = ?1 AND id != ?2 AND mode = 'queue' AND tmux != '' AND stage IN " ++ in_progress, .{ t.project, t.id });
     defer st.finalize();
     while (try st.step()) {
         const name = st.text(0);
@@ -251,8 +260,10 @@ fn startIn(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: 
     const p = try board.getProject(db, a, t.project);
     const target = if (t.mode == .queue) try queueTarget(db, a, t, view, p) else "";
     const live = target.len > 0 and view.alive(target);
+    // A sub-ticket going on in its parent's live conversation.
+    const in_parent = t.mode == .queue and t.target.len == 0 and (try parentSession(db, a, t, view)) != null;
     // An untargeted ticket waits for the project's other ticket wherever it runs.
-    const busy = t.mode == .queue and t.target.len == 0 and t.parent.len == 0 and try projectBusy(db, a, view, t);
+    const busy = t.mode == .queue and t.target.len == 0 and !in_parent and try projectBusy(db, a, view, t);
     // Free: idle, with no other ticket in progress there or in the project.
     const free = live and !busy and view.idle(ctx, target) and !try targetHasTicket(db, target, t.id);
     // A ticket that had a conversation of its own picks it back up.
@@ -289,7 +300,7 @@ fn startIn(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: 
             // Its own conversation is still open there: carry on in it.
             try tmux.sendLine(ctx, target, text);
             try board.setSession(ctx, db, t.id, target, resume_id.?, "", "");
-        } else if (live and resume_id == null and (t.parent.len > 0 or !free)) {
+        } else if (live and resume_id == null and (in_parent or !free)) {
             // A sub-ticket goes on in its parent's conversation, and a forced
             // start into a busy session is typed (Claude queues it).
             try tmux.sendLine(ctx, target, text);
@@ -513,6 +524,51 @@ test "queue tickets run one at a time in the project's session" {
     try db.exec("UPDATE tickets SET stage = 'done' WHERE id = ?1", .{t1.id});
     try std.testing.expect(!try projectBusy(db, a, view, t2));
     try std.testing.expect(!try targetHasTicket(db, "cl_qa-1_2", t2.id));
+}
+
+test "sub-tickets of a finished parent wait their turn" {
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp" };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "qa", .dir = "/x/qa-tool" });
+    const p = try board.getProject(db, a, "qa");
+    const kp = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Parent", .stage = .running });
+    const k1 = try board.createTicket(ctx, db, a, .{ .title = "Sub one", .stage = .queued, .parent = kp });
+    const k2 = try board.createTicket(ctx, db, a, .{ .title = "Sub two", .stage = .queued, .parent = kp });
+    const k3 = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Top", .stage = .queued });
+    const mk = struct {
+        fn s(tmux_name: []const u8, name: []const u8, created: i64) tmux.Session {
+            return .{ .tmux_name = tmux_name, .name = name, .dir = "/x/qa-tool", .profile = "", .created = created, .pane_title = "", .pane_dead = false, .activity = 0, .role = "", .alert = "" };
+        }
+    }.s;
+    var sessions = [_]tmux.Session{ mk("cl_qa-tool_1", "qa-tool", 1), mk("cl_qa-2_2", "qa-2", 2) };
+    const view: View = .{ .sessions = &sessions, .statuses = .empty };
+
+    // The parent is running in its live session: a sub-ticket goes on there,
+    // and its being busy is no reason for the sub-ticket to wait.
+    try db.exec("UPDATE tickets SET tmux = 'cl_qa-2_2' WHERE key = ?1", .{kp});
+    const t1 = try board.getTicket(db, a, k1);
+    try std.testing.expectEqualStrings("cl_qa-2_2", (try parentSession(db, a, t1, view)).?);
+    try std.testing.expectEqualStrings("cl_qa-2_2", try queueTarget(db, a, t1, view, p));
+    try std.testing.expect(try projectBusy(db, a, view, t1));
+
+    // Its session gone, the parent has no conversation to go on in.
+    try db.exec("UPDATE tickets SET tmux = 'cl_gone_9' WHERE key = ?1", .{kp});
+    try std.testing.expect(try parentSession(db, a, t1, view) == null);
+
+    // The parent is done: the sub-tickets go to the project's session, one
+    // at a time, and hold back top-level tickets too.
+    try db.exec("UPDATE tickets SET tmux = 'cl_qa-2_2', stage = 'done' WHERE key = ?1", .{kp});
+    try std.testing.expect(try parentSession(db, a, t1, view) == null);
+    try std.testing.expectEqualStrings("cl_qa-tool_1", try queueTarget(db, a, t1, view, p));
+    try std.testing.expect(!try projectBusy(db, a, view, t1));
+    try db.exec("UPDATE tickets SET tmux = 'cl_qa-tool_1', stage = 'running' WHERE key = ?1", .{k1});
+    try std.testing.expect(try projectBusy(db, a, view, try board.getTicket(db, a, k2)));
+    try std.testing.expect(try projectBusy(db, a, view, try board.getTicket(db, a, k3)));
 }
 
 test resumePrompt {
