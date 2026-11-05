@@ -194,6 +194,7 @@ const store = (k, v) => { try { if (v === undefined) return localStorage.getItem
 const state = {
   data: null, view: store("cl-view") || "board", filter: "all", project: "", subs: store("cl-subs") === "1",
   search: "", needsOpen: store("cl-needs") !== "0", open: null, detail: null, tab: null, picks: {}, other: {}, checks: {},
+  sending: false,
 };
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -213,6 +214,17 @@ async function api(path, body) {
 async function act(key, action, body, msg) {
   try { const r = await api(`ticket/${encodeURIComponent(key)}/${action}`, body || {}); if (msg) toast(msg); await refresh(); return r; }
   catch (e) { toast(e.message, true); throw e; }
+}
+// The server answers once Claude has taken the answer (a few seconds at
+// most), so the button says it's sending until then; after that the popup
+// has done its job and closes.
+async function sendAnswer(key, answers, btn) {
+  if (state.sending) return;
+  const was = btn.innerHTML; btn.disabled = true; btn.textContent = "Sending…"; state.sending = true;
+  try { await act(key, "answer", { answers }, "Claude got your answer"); }
+  catch { btn.disabled = false; btn.innerHTML = was; return; }
+  finally { state.sending = false; }
+  if (state.open === key) document.getElementById("ticketDlg").close();
 }
 
 const flagDetail = (f) => { try { return JSON.parse(f.detail); } catch { return null; } };
@@ -361,6 +373,7 @@ async function loadDetail(key, quiet) {
   catch (e) { if (!quiet) toast(e.message, true); return; }
   // Keep what's being typed: only redraw when nothing in the popup has focus.
   const focused = document.activeElement && document.getElementById("ticketDlg").contains(document.activeElement) && /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName);
+  if (quiet && state.sending) return;
   if (quiet && focused) { const pre = document.querySelector("#ticketBody pre.term"); if (pre && state.tab === "session") pre.textContent = state.detail.tail || "(no session)"; return; }
   renderDetail();
 }
@@ -711,7 +724,7 @@ document.addEventListener("click", async (e) => {
   if (el.id === "closeDlg") { document.getElementById("ticketDlg").close(); return; }
   if (ds.finish !== undefined) { document.getElementById("finishDlg").close(ds.finish); return; }
   if (el.id === "spinOff" || el.id === "spinCancel") { document.getElementById("subsDlg").close(el.id === "spinOff" ? "spin" : ""); return; }
-  if (ds.answer) { e.stopPropagation(); return act(ds.answer, "answer", { answers: [ds.n] }, "Answered"); }
+  if (ds.answer) { e.stopPropagation(); return sendAnswer(ds.answer, [ds.n], el); }
   if (ds.approve) {
     const extra = state.data.tickets.find((r) => r.ticket.key === ds.approve)?.ticket.stage === "testing" ? await doneExtras(ds.approve) : {};
     if (!extra) return;
@@ -723,7 +736,7 @@ document.addEventListener("click", async (e) => {
   if (ds.key) return act(key, "key", { key: ds.key });
   if (ds.move) return act(key, "move", { stage: ds.move }, "Moved");
   if (ds.pick !== undefined) { state.picks[ds.pick] = ds.n; state.other[ds.pick] = ""; renderDetail(); return; }
-  if (ds.perm) return act(key, "answer", { answers: [ds.perm] }, "Answered");
+  if (ds.perm) return sendAnswer(key, [ds.perm], el);
   if (ds.check !== undefined) { const c = state.checks["c" + ds.check] || {}; c.pass = ds.pass === "1"; state.checks["c" + ds.check] = c; renderDetail(); return; }
   if (ds.act === "gutter") {
     const w = window.open("", "_blank");
@@ -741,7 +754,7 @@ document.addEventListener("click", async (e) => {
     const qs = flagDetail(state.detail.ticket.flags.find((f) => f.kind === "question"))?.questions || [];
     const answers = qs.map((_, i) => (state.other[i] || "").trim() || state.picks[i]);
     if (answers.some((x) => !x)) return toast("Answer every question first", true);
-    return act(key, "answer", { answers }, "Answered");
+    return sendAnswer(key, answers, el);
   }
   if (el.id === "sendMsg" || el.id === "saveNote" || el.id === "saveSend" || el.id === "sendBack") {
     const box = document.getElementById(el.id === "sendMsg" ? "msg" : el.id === "sendBack" ? "backText" : "commentText");

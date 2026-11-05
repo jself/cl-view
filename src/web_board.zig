@@ -86,6 +86,7 @@ pub fn handle(ctx: Ctx, cfg: config.Config, req: *std.http.Server.Request, path:
             error.NoSession => .{ .conflict, "the ticket has no live session" },
             error.NothingAsked => .{ .conflict, "nothing is waiting for an answer" },
             error.BadAnswer => .{ .bad_request, "one answer per question: an option number or your own words" },
+            error.NotDelivered => .{ .conflict, "Claude didn't take the answer; it's still waiting. Check the session" },
             error.AlreadyStarted => .{ .conflict, "it already has a session" },
             error.TargetBusy => .{ .conflict, "its session is busy or has another ticket in progress; it waits in Queued and starts there when the session is free" },
             error.WorktreeFailed => .{ .internal_server_error, worktree.lastError() },
@@ -265,7 +266,7 @@ fn ticketAction(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator
         const t = try board.getTicket(db, a, key);
         try dispatch.start(ctx, cfg, db, a, t, b.now orelse false);
     } else if (eql(u8, action, "answer")) {
-        try actions.answer(ctx, db, a, key, b.answers orelse return error.BadInput);
+        try actions.answer(ctx, cfg, db, a, key, b.answers orelse return error.BadInput);
     } else if (eql(u8, action, "key")) {
         try actions.press(ctx, db, a, key, std.meta.stringToEnum(actions.Key, b.key orelse "") orelse return error.BadInput);
     } else if (eql(u8, action, "rm")) {

@@ -8,10 +8,12 @@ const std = @import("std");
 const Ctx = @import("ctx.zig");
 const tmux = @import("tmux.zig");
 const claude = @import("claude.zig");
+const config = @import("config.zig");
 const board = @import("board.zig");
 
 /// A tool call in the transcript with no result yet.
 pub const Pending = struct {
+    id: []const u8 = "",
     name: []const u8,
     input: std.json.Value,
 };
@@ -44,7 +46,7 @@ pub fn pendingTool(a: std.mem.Allocator, jsonl: []const u8) ?Pending {
             const kind = str(b.get("type")) orelse continue;
             if (std.mem.eql(u8, kind, "tool_use")) {
                 const id = str(b.get("id")) orelse continue;
-                open.put(a, id, .{ .name = str(b.get("name")) orelse "", .input = b.get("input") orelse .null }) catch {};
+                open.put(a, id, .{ .id = id, .name = str(b.get("name")) orelse "", .input = b.get("input") orelse .null }) catch {};
             } else if (std.mem.eql(u8, kind, "tool_result")) {
                 _ = open.orderedRemove(str(b.get("tool_use_id")) orelse continue);
             }
@@ -73,6 +75,7 @@ test pendingTool {
     ;
     const p = pendingTool(a, data).?;
     try std.testing.expectEqualStrings("AskUserQuestion", p.name);
+    try std.testing.expectEqualStrings("t2", p.id);
     try std.testing.expect(pendingTool(a, data[0 .. std.mem.indexOf(u8, data, "\n{\"type\":\"assistant\",\"isSidechain\"").?]) == null);
 }
 
@@ -195,6 +198,55 @@ fn transcriptTail(ctx: Ctx, a: std.mem.Allocator, path: []const u8) ![]const u8 
     return data;
 }
 
+/// The tool call a session is waiting on, from its transcript; null when
+/// none is pending or there is no transcript to read.
+pub fn pendingFor(ctx: Ctx, a: std.mem.Allocator, info: claude.Info) ?Pending {
+    if (info.session_id.len == 0 or info.cwd.len == 0 or info.config_dir.len == 0) return null;
+    const path = claude.transcriptPath(a, info.config_dir, info.cwd, info.session_id) catch return null;
+    const data = transcriptTail(ctx, a, path) catch return null;
+    return pendingTool(a, data);
+}
+
+/// What a session waits on before it is answered, to tell afterwards
+/// whether the answer got through.
+pub const Waiting = struct {
+    /// The pending tool call's id, "" when the transcript can't be read.
+    tool_id: []const u8 = "",
+
+    pub fn of(ctx: Ctx, cfg: config.Config, a: std.mem.Allocator, tmux_name: []const u8) Waiting {
+        const statuses = claude.readStatuses(ctx, a, cfg) catch return .{};
+        const info = statuses.get(tmux_name) orelse return .{};
+        const p = pendingFor(ctx, a, info) orelse return .{};
+        return .{ .tool_id = p.id };
+    }
+
+    /// Whether the session took the answer typed into it: it stopped
+    /// waiting, or the tool call it waited on has its result (it may be
+    /// waiting again, on the next one). An approved command can run for a
+    /// while before it has a result, so stopping waiting counts on its own.
+    /// Checks until it has or `timeout_ms` runs out.
+    pub fn answered(self: Waiting, ctx: Ctx, cfg: config.Config, tmux_name: []const u8, timeout_ms: i64) bool {
+        var waited: i64 = 0;
+        while (true) : (waited += 250) {
+            if (self.answeredNow(ctx, cfg, tmux_name)) return true;
+            if (waited >= timeout_ms) return false;
+            ctx.sleepMs(250);
+        }
+    }
+
+    fn answeredNow(self: Waiting, ctx: Ctx, cfg: config.Config, tmux_name: []const u8) bool {
+        var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);
+        defer arena_state.deinit();
+        const a = arena_state.allocator();
+        const statuses = claude.readStatuses(ctx, a, cfg) catch return false;
+        const info = statuses.get(tmux_name) orelse return false;
+        if (info.status != .waiting and info.status != .blocked) return true;
+        if (self.tool_id.len == 0) return false;
+        const p = pendingFor(ctx, a, info) orelse return true;
+        return !std.mem.eql(u8, p.id, self.tool_id);
+    }
+};
+
 /// Flag details the board shows: what is asked and the menu's options.
 pub const Ask = struct {
     /// "question" or "permission".
@@ -221,13 +273,7 @@ pub fn sync(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, info:
     const pane = try a.dupe(u8, pane_raw);
     if (pane_raw.len > 0) ctx.gpa.free(pane_raw);
     var ask: Ask = .{ .kind = "permission", .options = try menuOptions(a, pane) };
-    var pend: ?Pending = null;
-    if (info) |inf| if (inf.session_id.len > 0 and inf.cwd.len > 0 and inf.config_dir.len > 0) {
-        const path = try claude.transcriptPath(a, inf.config_dir, inf.cwd, inf.session_id);
-        if (transcriptTail(ctx, a, path)) |data| {
-            pend = pendingTool(a, data);
-        } else |_| {}
-    };
+    const pend: ?Pending = if (info) |inf| pendingFor(ctx, a, inf) else null;
     const asking = if (pend) |p| std.mem.eql(u8, p.name, "AskUserQuestion") else (info != null and std.mem.indexOf(u8, info.?.waiting_for, "input") != null);
     if (pend) |p| {
         ask.tool = p.name;

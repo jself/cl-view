@@ -436,10 +436,11 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
     if (std.mem.eql(u8, cmd, "answer")) {
         args.only(&.{}, ticket_usage);
         if (pos.len < 2) fail("usage: cl ticket answer <key> <answer>...", .{});
-        actions.answer(ctx, db, a, pos[0], pos[1..]) catch |e| switch (e) {
+        actions.answer(ctx, cfg, db, a, pos[0], pos[1..]) catch |e| switch (e) {
             error.NoSession => fail("{s} has no live session", .{pos[0]}),
             error.NothingAsked => fail("{s} isn't waiting on a question or permission prompt", .{pos[0]}),
             error.BadAnswer => fail("give one answer per question: an option number or your own words (permission prompts take a number)", .{}),
+            error.NotDelivered => fail("{s}: the answer was typed, but Claude is still waiting on the same thing; check the session", .{pos[0]}),
             else => boardFail(db, e, "ticket"),
         };
         return;

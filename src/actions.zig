@@ -6,6 +6,8 @@ const tmux = @import("tmux.zig");
 const board = @import("board.zig");
 const review = @import("review.zig");
 const worktree = @import("worktree.zig");
+const config = @import("config.zig");
+const signals = @import("signals.zig");
 
 pub const Error = error{
     /// The ticket has no live session to act on.
@@ -14,6 +16,8 @@ pub const Error = error{
     NothingAsked,
     /// The answers don't fit what is asked.
     BadAnswer,
+    /// The answer was typed but the session still waits on the same thing.
+    NotDelivered,
     /// No review submitted in gutter yet.
     NoReview,
     /// It has sub-tickets that aren't Done; spin them off to finish it.
@@ -259,8 +263,9 @@ fn isNumber(s: []const u8) bool {
 /// Answer what the session is waiting on, by keypress, as you would in the
 /// terminal. Questions: one answer per question, each an option's number or
 /// your own words (typed as "Type something"); several questions end with
-/// Submit. Permission prompts: the option's number.
-pub fn answer(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, answers: []const []const u8) !void {
+/// Submit. Permission prompts: the option's number. It returns once the
+/// session has taken the answer, or fails with NotDelivered.
+pub fn answer(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, key: []const u8, answers: []const []const u8) !void {
     const t = try board.getTicket(db, a, key);
     const s = liveSession(ctx, t) orelse return error.NoSession;
     var flag: ?board.Flag = null;
@@ -269,6 +274,7 @@ pub fn answer(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, ans
     };
     const f = flag orelse return error.NothingAsked;
     if (answers.len == 0) return error.BadAnswer;
+    const before = signals.Waiting.of(ctx, cfg, a, s);
 
     if (std.mem.eql(u8, f.kind, board.flag_input)) {
         if (answers.len != 1 or !isNumber(answers[0])) return error.BadAnswer;
@@ -302,6 +308,7 @@ pub fn answer(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, ans
             try tmux.runQuiet(ctx, &.{ "send-keys", "-l", "-t", s, "1" }); // Submit answers
         }
     }
+    if (!before.answered(ctx, cfg, s, 6000)) return error.NotDelivered;
     // Keep the answer in the ticket's history (this also clears the flag; the
     // dispatcher sets it again if the session is still waiting).
     var text: std.ArrayList(u8) = .empty;
