@@ -863,7 +863,46 @@ document.addEventListener("submit", async (e) => {
 });
 document.getElementById("ticketDlg").addEventListener("close", () => { state.open = null; state.detail = null; });
 
-refresh();
+// ---- where you were ----
+// Leaving the board (Shell, Chat, Terminal, a reload) saves this tab's place:
+// filters, search, the open ticket and its tab, what's half typed in it, and
+// every scroll. Coming back puts it all back. Per tab, in sessionStorage.
+const DRAFTS = ["commentText", "msg", "backText", "testNote"];
+function scrolls() {
+  return [...document.body.querySelectorAll("*")].filter((el) => el.scrollLeft || el.scrollTop)
+    .map((el) => [pathTo(document.body, el), el.scrollLeft, el.scrollTop]);
+}
+function restoreScrolls(saved) {
+  for (const [p, l, t] of saved) { const el = atPath(document.body, p); if (el) { el.scrollLeft = l; el.scrollTop = t; } }
+}
+addEventListener("pagehide", () => {
+  const drafts = {}; for (const id of DRAFTS) { const el = document.getElementById(id); if (el?.value) drafts[id] = el.value; }
+  const place = { filter: state.filter, project: state.project, search: state.search, open: state.open, tab: state.tab,
+    picks: state.picks, other: state.other, checks: state.checks, drafts, scrolls: scrolls(), page: [scrollX, scrollY] };
+  try { sessionStorage.setItem("cl-board-place", JSON.stringify(place)); } catch {}
+});
+async function restorePlace() {
+  let place = null;
+  try { place = JSON.parse(sessionStorage.getItem("cl-board-place") || "null"); } catch {}
+  if (!place) return refresh();
+  Object.assign(state, { filter: place.filter || "all", project: place.project || "", search: place.search || "" });
+  document.getElementById("search").value = state.search;
+  await refresh();
+  restoreScrolls(place.scrolls || []);
+  scrollTo(...(place.page || [0, 0]));
+  if (!place.open || !state.data) return;
+  const opening = openTicket(place.open, place.tab);
+  Object.assign(state, { picks: place.picks || {}, other: place.other || {}, checks: place.checks || {} });
+  await opening;
+  if (state.open !== place.open) return;
+  // Gone since (deleted, say): don't leave an empty popup up.
+  if (!state.detail) { document.getElementById("ticketDlg").close(); return; }
+  for (const [id, v] of Object.entries(place.drafts || {})) { const el = document.getElementById(id); if (el) el.value = v; }
+  restoreScrolls(place.scrolls || []);
+  scrollTo(...(place.page || [0, 0]));
+}
+
+restorePlace();
 setInterval(() => { if (!document.hidden) refresh(); }, 3000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
 </script>
