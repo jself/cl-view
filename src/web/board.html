@@ -77,6 +77,12 @@
   #ghost { position: fixed; z-index: 20; pointer-events: none; margin: 0; box-shadow: 0 12px 32px rgba(0,0,0,.55); transform: rotate(1.5deg); opacity: .95; }
   .drop-on { outline: 2px dashed #60a5fa; outline-offset: -2px; background: #16202e; }
   .lanes td.drop-on { border-radius: 10px; }
+  /* Where a dragged card would land in its column: a line in the gap between cards. */
+  .card { position: relative; }
+  .card.ins-above::before, .card.ins-below::after { content: ""; position: absolute; left: 4px; right: 4px; height: 3px; border-radius: 2px;
+    background: #60a5fa; pointer-events: none; z-index: 21; box-shadow: 0 0 0 1px #0b0b0c; } /* over the ghost */
+  .card.ins-above::before { top: -6px; } .card.ins-below::after { bottom: -6px; }
+  .lanes .card.ins-above::before { top: -5px; } .lanes .card.ins-below::after { bottom: -5px; }
   .status { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; color: #d6d7da; }
   .dot { width: 8px; height: 8px; border-radius: 4px; flex: none; display: inline-block; background: #5d6168; }
   .s-busy { background: #60a5fa; } .s-waiting, .s-blocked { background: #f5a524; } .s-idle { background: #a0a3a8; }
@@ -318,8 +324,11 @@ function cardHtml(row, compact) {
     ${t.children ? `<span class="meta">${t.children} sub-ticket${t.children > 1 ? "s" : ""}</span>` : ""}
     ${statusHtml(row)}${pills(t)}</button>`;
 }
+// A column top to bottom: by priority (drag to reorder), except Done, latest first.
+const inColumn = (rows, stage) => { const cs = rows.filter((r) => r.ticket.stage === stage);
+  return stage === "done" ? cs : cs.sort((a, b) => a.ticket.rank - b.ticket.rank || a.ticket.id - b.ticket.id); };
 function boardHtml(rows) {
-  return `<div class="cols">${STAGES.map((s) => { const cs = rows.filter((r) => r.ticket.stage === s);
+  return `<div class="cols">${STAGES.map((s) => { const cs = inColumn(rows, s);
     return `<section class="col" data-drop="${s}"><h2>${STAGE_NAME[s]}<span class="n">${cs.length}</span></h2>${cs.map((r) => cardHtml(r)).join("")}</section>`; }).join("")}</div>`;
 }
 function lanesHtml(rows) {
@@ -328,7 +337,7 @@ function lanesHtml(rows) {
     ${projects.map((p) => { const mine = rows.filter((r) => r.ticket.project === p.name);
       const running = mine.filter((r) => ["running", "planning"].includes(r.ticket.stage) && r.status && r.status !== "gone").length;
       return `<tr><td class="lane"><div><strong>${esc(p.name)}</strong><span class="mono muted" style="font-size:11.5px">${p.mode === "worktree" ? `${running} of ${p.slots} running` : "queue"}</span></div></td>
-        ${STAGES.map((s) => `<td data-drop="${s}" data-project="${esc(p.name)}"><div>${mine.filter((r) => r.ticket.stage === s).map((r) => cardHtml(r, true)).join("")}</div></td>`).join("")}</tr>`; }).join("")}
+        ${STAGES.map((s) => `<td data-drop="${s}" data-project="${esc(p.name)}"><div>${inColumn(mine, s).map((r) => cardHtml(r, true)).join("")}</div></td>`).join("")}</tr>`; }).join("")}
   </tbody></table></div>`;
 }
 function listHtml(rows) {
@@ -531,7 +540,7 @@ async function submitNew(form) {
   } catch (e) { toast(e.message, true); }
 }
 
-// ---- drag a card to another column ----
+// ---- drag a card to another column, or up and down for priority ----
 // Pointer events rather than HTML5 drag and drop, so it works on touch and on
 // <button> cards. A mouse picks a card up once it moves; a finger has to hold
 // still for a moment first, so a swipe still scrolls the board.
@@ -547,6 +556,8 @@ function liftCard() {
   Object.assign(g.style, { width: r.width + "px", left: r.left + "px", top: r.top + "px" });
   document.body.appendChild(g);
   drag.ghost = g; drag.dx = drag.x - r.left; drag.dy = drag.y - r.top;
+  drag.home = drag.el.closest("[data-drop]");
+  drag.at = [...drag.home.querySelectorAll("[data-drag]")].indexOf(drag.el);
   drag.el.classList.add("lifted");
   drag.scroller = drag.el.closest(".cols, .lanes");
   navigator.vibrate?.(10);
@@ -556,6 +567,23 @@ function dragMove(x, y) {
   drag.ghost.style.left = x - drag.dx + "px"; drag.ghost.style.top = y - drag.dy + "px";
   const el = dropAt(x, y);
   if (el !== drag.over) { drag.over?.classList.remove("drop-on"); el?.classList.add("drop-on"); drag.over = el; }
+  let s = el && slotAt(el, y);
+  if (s && el === drag.home && s.i === drag.at) s = null; // where it already is
+  if (s?.above !== drag.slot?.above || s?.below !== drag.slot?.below) { showSlot(drag.slot, false); showSlot(s, true); }
+  drag.slot = s;
+}
+// Where in a column a drop at height y lands: between the cards above and
+// below it (either may be null), at index i among the column's other cards.
+// Done has no order of its own.
+function slotAt(el, y) {
+  if (el.dataset.drop === "done") return null;
+  const cards = [...el.querySelectorAll("[data-drag]")].filter((c) => c !== drag.el);
+  let i = cards.findIndex((c) => { const r = c.getBoundingClientRect(); return y < r.top + r.height / 2; });
+  if (i < 0) i = cards.length;
+  return { above: cards[i - 1] || null, below: cards[i] || null, i };
+}
+function showSlot(s, on) {
+  if (s?.below) s.below.classList.toggle("ins-above", on); else s?.above?.classList.toggle("ins-below", on);
 }
 function autoScroll() {
   if (!drag?.ghost) return;
@@ -569,11 +597,24 @@ function autoScroll() {
 function endDrag(drop) {
   const d = drag; drag = null; if (!d) return;
   clearTimeout(d.hold); cancelAnimationFrame(d.raf);
-  d.ghost?.remove(); d.over?.classList.remove("drop-on"); d.el.classList.remove("lifted");
+  d.ghost?.remove(); d.over?.classList.remove("drop-on"); d.el.classList.remove("lifted"); showSlot(d.slot, false);
   if (!d.ghost) return;
   dragDone = Date.now();
   const stage = drop && d.over?.dataset.drop;
-  if (stage) moveTo(d.key, stage); else render();
+  if (!stage) return render();
+  // The ticket it goes after, or before when it goes to the top.
+  const s = d.slot;
+  const place = s?.above ? { after: s.above.dataset.drag } : s?.below ? { before: s.below.dataset.drag } : {};
+  if (d.over !== d.home) return moveTo(d.key, stage, place);
+  if (!s) return render();
+  placeLocally(d.key, place); render();
+  act(d.key, "rank", place).catch(() => refresh());
+}
+// Show a reorder before the server answers: just past its new neighbor.
+function placeLocally(key, place) {
+  const rank = (k) => state.data.tickets.find((r) => r.ticket.key === k)?.ticket.rank;
+  const t = state.data.tickets.find((r) => r.ticket.key === key)?.ticket; if (!t) return;
+  if (place.after) t.rank = rank(place.after) + 0.5; else if (place.before) t.rank = rank(place.before) - 0.5;
 }
 
 // ---- moving to Done ----
@@ -622,16 +663,16 @@ async function doneExtras(key) {
   return { ...extra, finish };
 }
 const finishMsg = (key, x) => x.finish === "pr" ? `${key}: Claude is opening a PR` : x.finish === "merge" ? `${key}: Claude is merging it` : "";
-async function moveTo(key, stage) {
+async function moveTo(key, stage, place = {}) {
   const row = state.data.tickets.find((r) => r.ticket.key === key);
   if (!row || row.ticket.stage === stage) return render();
   const extra = stage === "done" ? await doneExtras(key) : {};
   if (!extra) { render(); if (state.detail) renderDetail(); return; }
   // Merge or PR: it stays put (Finishing) until Claude is done.
   if (finishMsg(key, extra)) { render(); return act(key, "move", { stage, ...extra }, finishMsg(key, extra)).catch(() => refresh()); }
-  row.ticket.stage = stage; render();
+  row.ticket.stage = stage; placeLocally(key, place); render();
   const n = extra.spin_off ? openSubs(key).length : 0;
-  act(key, "move", { stage, ...extra }, `${key} to ${STAGE_NAME[stage]}${n ? ` · ${n} spun off` : ""}`).catch(() => refresh());
+  act(key, "move", { stage, ...extra, ...place }, `${key} to ${STAGE_NAME[stage]}${n ? ` · ${n} spun off` : ""}`).catch(() => refresh());
 }
 document.addEventListener("pointerdown", (e) => {
   const el = e.target.closest("[data-drag]");
