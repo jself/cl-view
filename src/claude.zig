@@ -394,33 +394,51 @@ pub fn trustDialog(text: []const u8) bool {
     return std.mem.indexOf(u8, text, "Yes, I trust this folder") != null;
 }
 
+/// The trust dialog's cursor is on "Yes, I trust this folder".
+fn trustYesSelected(text: []const u8) bool {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.indexOf(u8, line, "Yes, I trust this folder") != null)
+            return std.mem.indexOf(u8, line, "\u{276f}") != null;
+    }
+    return false;
+}
+
+test trustYesSelected {
+    try std.testing.expect(!trustYesSelected(" \u{276f} No, exit\n   Yes, I trust this folder\n"));
+    try std.testing.expect(trustYesSelected("   No, exit\n \u{276f} Yes, I trust this folder\n"));
+}
+
 /// Wait (up to 60 s) for the prompt, then type `message` and press Enter.
 /// With `accept_trust`, answer the folder-trust dialog with yes (for
 /// worktrees cl made from a repo you put on the board).
 pub fn sendInitialMessage(ctx: Ctx, tmux_name: []const u8, message: []const u8, accept_trust: bool) !void {
     var tries: usize = 0;
-    var trusted = false;
     while (tries < 300) : (tries += 1) {
         const text = tmux.capturePlain(ctx, tmux_name) catch return error.TmuxFailed;
         defer ctx.gpa.free(text);
         if (promptVisible(text)) break;
-        if (accept_trust and !trusted and trustDialog(text)) {
-            // "No, exit" is selected first: move to "Yes, I trust this folder".
-            tmux.runQuiet(ctx, &.{ "send-keys", "-t", tmux_name, "Down" }) catch {};
+        if (accept_trust and trustDialog(text)) {
+            // "No, exit" is selected first. Claude may not be reading keys
+            // yet when the dialog shows, so press Enter only once the cursor
+            // is seen on "Yes, I trust this folder"; Enter on "No" quits.
+            const key = if (trustYesSelected(text)) "Enter" else "Down";
+            tmux.runQuiet(ctx, &.{ "send-keys", "-t", tmux_name, key }) catch {};
             ctx.sleepMs(300);
-            tmux.runQuiet(ctx, &.{ "send-keys", "-t", tmux_name, "Enter" }) catch {};
-            trusted = true;
         }
         ctx.sleepMs(200);
     } else return error.PromptTimeout;
     ctx.sleepMs(300);
     try tmux.sendLine(ctx, tmux_name, message);
-    // If the text is still sitting in the composer after a moment, press Enter again.
-    ctx.sleepMs(1500);
-    const text = tmux.capturePlain(ctx, tmux_name) catch return;
-    defer ctx.gpa.free(text);
+    // If the text is still sitting in the composer after a moment, press
+    // Enter again. A multi-line message shows there as "[Pasted text #1 ...]".
     const tail = message[0..@min(message.len, 40)];
-    if (std.mem.indexOf(u8, text, tail) != null and promptVisible(text)) {
+    for (0..3) |_| {
+        ctx.sleepMs(1500);
+        const text = tmux.capturePlain(ctx, tmux_name) catch return;
+        defer ctx.gpa.free(text);
+        const waiting = std.mem.indexOf(u8, text, tail) != null or std.mem.indexOf(u8, text, "[Pasted text #") != null;
+        if (!waiting or !promptVisible(text)) return;
         tmux.runQuiet(ctx, &.{ "send-keys", "-t", tmux_name, "Enter" }) catch {};
     }
 }
