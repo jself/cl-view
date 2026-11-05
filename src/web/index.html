@@ -33,6 +33,7 @@
                  -webkit-tap-highlight-color: transparent; }
   #keys button.down { background: var(--key-down); }
   #keys .back { font-weight: bold; font-size: 22px; }
+  #keys .board svg { width: 20px; height: 20px; }
   #overlay { position: fixed; inset: 0; display: none; place-items: center; background: rgba(0,0,0,.6);
              font: 16px ui-monospace, SFMono-Regular, Menlo, monospace; }
   #overlay.show { display: grid; }
@@ -44,7 +45,6 @@
   <a href="/board" id="close" title="Close (Ctrl-Q or Alt-Q): back to the board, the session keeps running" aria-label="Close and go back to the board">✕</a></div>
 <div id="term"></div>
 <div id="keys">
-  <a href="/board" title="The ticket board">Board</a>
   <button class="back" data-send="\x11" title="Back to the list (Ctrl-Q or Alt-Q)" aria-label="Back to the list">⇦</button>
   <button data-send="\x1b">Esc</button>
   <button data-send="\t">Tab</button>
@@ -56,6 +56,7 @@
   <button data-send="\n" title="New line in Claude's composer (Ctrl-J)">C-j</button>
   <button data-send="\x03" title="Interrupt (Ctrl-C)">C-c</button>
   <button data-send="\x0c" data-fit title="Refit the terminal to this screen and redraw (Ctrl-L)">C-l</button>
+  <a href="/board" class="board" title="Board" aria-label="Board"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><path d="M6 2.5v11M10 2.5v11"/></svg></a>
 </div>
 <div id="overlay"><button id="reconnect">Reconnect</button></div>
 <script src="/xterm.js"></script>
