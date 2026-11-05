@@ -115,25 +115,37 @@ Three sources, all local files or tmux:
 ## Test plans
 
 Like the wizard skill, but for trying a change. When there's something to try,
-Claude writes `.claude/test-plan.md` next to the review guide (the ticket
-prompt already asks for it):
+Claude gives the plan to `cl ticket done <key> --test-plan -` on stdin (the
+ticket prompt asks for it; `cl ticket testplan --format` shows the format), and
+the board keeps it in the ticket. Each `## ` heading is a step:
 
-    ## Setup
-    1. Steps only you can do (log in to the staging API, plug in the phone)
-    ## Launch
-    ```sh
-    one command, run from the worktree, that starts everything
-    ```
-    Open http://localhost:4321
-    ## Checks
-    - [ ] what to try, and what you should see
+    ## Start the dev server
+    run: npm run dev
+    wait: http://localhost:4321
+    ## Log in
+    open: http://localhost:4321/login
+    Sign in as the staging admin.
+    ## The hero image
+    open: http://localhost:4321/
+    - [ ] The hero loads as AVIF
 
-The board turns it into a walk-through on a Testing ticket: tick the setup
-steps, press Launch (the command runs in a hidden tmux window for the ticket,
-`cl t launch <key>`, with its output one click away), then pass or fail each
-check with a note. Passing all of them approves the ticket; a failure sends
-the notes back to Claude and the ticket goes back to running. `cl t test
-<key>` is the same walk-through in the terminal.
+The Test tab walks through it one step at a time (Back, Next, a dot per
+step): `run:` is a Run button (the command runs from the ticket's directory in
+a hidden tmux session, `clrun_<key>_s<n>`, `cl t launch <key> --step <n>`, its
+output under it), `wait:` says whether that local URL answers yet, `open:` is
+a button that opens the page in a new tab (the cl window hands it to the
+browser), other lines are what to do by hand, and `- [ ]` checks are Pass or
+Fail with a note, and each step has a comment box. Nothing runs or opens until
+its button is pressed. Results, notes, comments and the step you're on are
+saved on the ticket as you go (`test_progress`), so a reload or another device
+picks up where you left off; a new plan or submitting starts over. The last
+page sums up the checks and comments, step by step. A failure sends them to
+Claude for another round. Everything passed with comments offers Send to
+Claude (another round) or Pass and finish (the comments stay on the ticket).
+Everything passed with nothing to say approves a ticket in Testing; in an
+earlier stage the results are only kept. `cl t test <key>` is
+the same walk-through in the terminal (it asks before running or opening). A
+plan in the older Setup / Launch / Checks shape reads as three steps.
 
 ## Phases
 

@@ -115,6 +115,13 @@ pub const Ticket = struct {
     session_id: []const u8,
     /// Claude's summary from `done`.
     summary: []const u8,
+    /// The test plan Claude gave with `done` (markdown: Setup, Launch,
+    /// Checks), "" for none.
+    test_plan: []const u8 = "",
+    /// How far the human got testing it (the board's JSON: results, notes,
+    /// comments, the step they're on), "" for not started. A new plan or
+    /// submitted results start it over.
+    test_progress: []const u8 = "",
     /// 1, then +1 each time it is sent back after Claude said done.
     round: i64,
     created: i64,
@@ -176,6 +183,8 @@ const schema =
     \\  change_id TEXT NOT NULL DEFAULT '',
     \\  rank INTEGER NOT NULL DEFAULT 0,
     \\  killed INTEGER NOT NULL DEFAULT 0,
+    \\  test_plan TEXT NOT NULL DEFAULT '',
+    \\  test_progress TEXT NOT NULL DEFAULT '',
     \\  created INTEGER NOT NULL,
     \\  updated INTEGER NOT NULL
     \\);
@@ -253,6 +262,14 @@ const version = 9;
 
 pub fn migrate(db: Db) !void {
     const have = (try db.int("PRAGMA user_version", .{})) orelse 0;
+    // Added whatever the version says: branches built in parallel each take
+    // the next version number, so a board another branch moved to it can
+    // still lack these. Test plans used to be read from .claude/test-plan.md
+    // in the ticket's directory, which tickets without a worktree shared.
+    if (have >= 1) {
+        try addColumn(db, "tickets", "test_plan", "TEXT NOT NULL DEFAULT ''");
+        try addColumn(db, "tickets", "test_progress", "TEXT NOT NULL DEFAULT ''");
+    }
     if (have >= version) return;
     // Version 1 had no sub-tickets, version 2 no planning skill.
     if (have >= 1 and have < 2) try db.execMulti("ALTER TABLE tickets ADD COLUMN parent INTEGER REFERENCES tickets(id)");
@@ -275,6 +292,17 @@ pub fn migrate(db: Db) !void {
 fn addColumn(db: Db, comptime table: []const u8, comptime column: []const u8, comptime decl: []const u8) !void {
     if ((try db.int("SELECT 1 FROM pragma_table_info('" ++ table ++ "') WHERE name = '" ++ column ++ "'", .{})) != null) return;
     try db.execMulti("ALTER TABLE " ++ table ++ " ADD COLUMN " ++ column ++ " " ++ decl);
+}
+
+test "migrate: a board another branch moved to a later version still gets the test columns" {
+    const db = try Db.open(":memory:");
+    defer db.close();
+    try migrate(db);
+    try db.execMulti("ALTER TABLE tickets DROP COLUMN test_plan; ALTER TABLE tickets DROP COLUMN test_progress; PRAGMA user_version = 9");
+    try migrate(db);
+    try std.testing.expect((try db.int("SELECT 1 FROM pragma_table_info('tickets') WHERE name = 'test_progress'", .{})) != null);
+    try std.testing.expect((try db.int("SELECT 1 FROM pragma_table_info('tickets') WHERE name = 'test_plan'", .{})) != null);
+    try std.testing.expectEqual(@as(?i64, 9), try db.int("PRAGMA user_version", .{}));
 }
 
 fn now(ctx: Ctx) i64 {
@@ -456,7 +484,7 @@ pub fn createTicket(ctx: Ctx, db: Db, a: std.mem.Allocator, in: TicketInput) Err
 }
 
 const ticket_cols = "t.id, t.key, t.project, t.title, t.body, t.stage, t.mode, t.plan, t.target, t.worktree, t.branch, t.profile, t.tmux, t.session_id, t.summary, t.round, t.created, t.updated, " ++
-    "coalesce((SELECT p.key FROM tickets p WHERE p.id = t.parent), ''), (SELECT count(*) FROM tickets c WHERE c.parent = t.id), t.skill, t.base, t.finishing, t.change_id, t.rank, t.killed";
+    "coalesce((SELECT p.key FROM tickets p WHERE p.id = t.parent), ''), (SELECT count(*) FROM tickets c WHERE c.parent = t.id), t.skill, t.base, t.finishing, t.change_id, t.rank, t.killed, t.test_plan, t.test_progress";
 
 fn readTicket(st: sqlite.Stmt, a: std.mem.Allocator) !Ticket {
     return .{
@@ -486,6 +514,8 @@ fn readTicket(st: sqlite.Stmt, a: std.mem.Allocator) !Ticket {
         .change = try st.dupe(a, 23),
         .rank = st.int(24),
         .killed = st.int(25) != 0,
+        .test_plan = try st.dupe(a, 26),
+        .test_progress = try st.dupe(a, 27),
     };
 }
 
@@ -653,6 +683,17 @@ pub fn setSession(ctx: Ctx, db: Db, id: i64, tmux_name: []const u8, session_id: 
     // A session again: it isn't killed any more.
     try db.exec("UPDATE tickets SET tmux = ?2, session_id = ?3, worktree = ?4, branch = ?5, killed = killed AND ?2 = '' WHERE id = ?1", .{ id, tmux_name, session_id, worktree, branch });
     try touch(ctx, db, id);
+}
+
+/// Keep the test plan Claude wrote for the ticket; testing it starts over.
+pub fn setTestPlan(ctx: Ctx, db: Db, id: i64, md: []const u8) Error!void {
+    try db.exec("UPDATE tickets SET test_plan = ?2, test_progress = '' WHERE id = ?1", .{ id, md });
+    try touch(ctx, db, id);
+}
+
+/// Save how far testing got (left out of `updated`: it changes as you type).
+pub fn setTestProgress(db: Db, id: i64, json: []const u8) Error!void {
+    try db.exec("UPDATE tickets SET test_progress = ?2 WHERE id = ?1", .{ id, json });
 }
 
 /// Sub-tickets of `key` that aren't Done yet; a ticket can't be Done while it has any.

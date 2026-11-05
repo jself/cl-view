@@ -188,6 +188,21 @@
   .check .pf { display: flex; gap: calc(6 * var(--u)); }
   .check .pf .on.pass { background: #14532d; border-color: #14532d; }
   .check .pf .on.fail { background: #7f1d1d; border-color: #7f1d1d; }
+  .wiz { display: flex; flex-direction: column; gap: calc(12 * var(--u)); }
+  .wiz .steps { display: flex; flex-wrap: wrap; gap: calc(6 * var(--u)); }
+  .wiz .dot { width: calc(28 * var(--u)); height: calc(28 * var(--u)); border-radius: 50%; border: 1px solid var(--line); background: none; color: var(--muted); cursor: pointer; font-size: calc(12 * var(--u)); }
+  .wiz .dot.at { border-color: var(--accent); color: var(--fg); background: var(--accent); }
+  .wiz .dot.pass { border-color: #14532d; color: #86efac; }
+  .wiz .dot.fail { border-color: #7f1d1d; color: #fca5a5; }
+  .wiz .do p { margin: 0 0 calc(6 * var(--u)); overflow-wrap: anywhere; }
+  .wiz .do a { color: var(--fg); }
+  .wiz .wait { margin: 0; color: var(--muted); overflow-wrap: anywhere; }
+  .wiz .wait.up { color: #86efac; }
+  .wiz a.btn { text-decoration: none; color: inherit; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .wiz .results { margin: 0; padding-left: 0; list-style: none; display: flex; flex-direction: column; gap: calc(6 * var(--u)); }
+  .wiz .results .results { margin-top: calc(6 * var(--u)); padding-left: calc(12 * var(--u)); }
+  .wiz .res { display: inline-block; min-width: calc(40 * var(--u)); font-size: calc(12 * var(--u)); color: var(--muted); }
+  .wiz .res.pass { color: #86efac; } .wiz .res.fail { color: #fca5a5; }
   #toast { position: fixed; left: 50%; bottom: calc(20 * var(--u)); transform: translateX(-50%); background: #2c2e33; color: #fff; padding: calc(10 * var(--u)) calc(16 * var(--u));
            border-radius: calc(10 * var(--u)); display: none; max-width: calc(100vw - calc(32 * var(--u))); z-index: 10; }
   #toast.err { background: #7f1d1d; }
@@ -476,8 +491,14 @@ async function openTicket(key, tab) {
   await loadDetail(key);
 }
 async function loadDetail(key, quiet) {
-  try { state.detail = await api("ticket/" + encodeURIComponent(key)); }
+  let d;
+  try { d = await api("ticket/" + encodeURIComponent(key)); }
   catch (e) { if (!quiet) toast(e.message, true); return; }
+  // Another ticket was opened while this one loaded: never show this one there.
+  if (state.open !== key) return;
+  state.detail = d;
+  // Opening it: testing picks up where it was left (saved on the ticket).
+  if (!quiet) { try { state.checks = JSON.parse(d.ticket.test_progress || "{}"); } catch { state.checks = {}; } }
   // Keep what's being typed: only redraw when nothing in the popup has focus.
   const focused = document.activeElement && document.getElementById("ticketDlg").contains(document.activeElement) && /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName);
   if (quiet && state.sending) return;
@@ -668,20 +689,74 @@ function reviewTab(d) {
       <textarea id="backText" rows="3"></textarea></label>
     <div class="actions"><button type="button" class="btn" id="sendBack">Send back to Claude</button></div></div>`;
 }
+// The test plan as a walk-through, one step at a time (like the wizard
+// skill), then a page that sums up the checks and sends them. Nothing runs or
+// opens until its button is pressed.
+function planChecks(p) {
+  const out = []; p.steps.forEach((st, si) => st.checks.forEach((text) => out.push({ text, si }))); return out;
+}
 function testTab(d) {
-  const p = d.test_plan; const l = d.launch;
-  return `<div style="display:flex;flex-direction:column;gap:calc(12 * var(--u))">
-    ${p.setup.length ? `<div><strong>Setup</strong><ol style="margin:calc(6 * var(--u)) 0 0;padding-left:calc(20 * var(--u))">${p.setup.map((s, i) =>
-      `<li><label style="display:flex;gap:calc(8 * var(--u));align-items:flex-start"><input type="checkbox" data-setup="${i}" ${state.checks["s" + i] ? "checked" : ""}> ${esc(s)}</label></li>`).join("")}</ol></div>` : ""}
-    ${p.launch ? `<div><strong>Launch</strong><pre class="term" style="margin-top:calc(6 * var(--u))">${esc(p.launch)}</pre>${p.open ? `<p style="margin:calc(6 * var(--u)) 0">${esc(p.open)}</p>` : ""}
-      <div class="actions"><button type="button" class="btn primary" data-act="launch">${l ? "Restart" : "Launch"}</button>${l ? `<button type="button" class="btn" data-act="launch-stop">Stop</button>` : ""}</div>
-      ${l ? `<p class="muted" style="margin:calc(8 * var(--u)) 0 calc(4 * var(--u))">${l.running ? "Running" : "Exited"}</p><pre class="term">${esc(l.output || "(no output yet)")}</pre>` : ""}</div>` : ""}
-    <div><strong>Checks</strong><div style="display:flex;flex-direction:column;gap:calc(8 * var(--u));margin-top:calc(6 * var(--u))">${p.checks.map((c, i) => { const r = state.checks["c" + i] || {};
+  const p = d.test_plan; const n = p.steps.length; const all = planChecks(p);
+  const at = Math.min(state.checks.step || 0, n);
+  const dots = `<div class="steps">${p.steps.map((st, i) => { const own = all.map((c, ci) => [c, ci]).filter(([c]) => c.si === i);
+      const res = own.map(([, ci]) => state.checks["c" + ci]?.pass);
+      const mark = own.length && res.every((r) => r === true) ? "pass" : res.some((r) => r === false) ? "fail" : "";
+      return `<button type="button" class="dot ${i === at ? "at" : ""} ${mark}" data-step-go="${i}" title="${esc(st.title)}">${i + 1}</button>`; }).join("")}
+    <button type="button" class="dot ${at === n ? "at" : ""}" data-step-go="${n}" title="Results">✓</button></div>`;
+  const nav = `<div class="actions" style="justify-content:space-between">
+    <button type="button" class="btn" data-step-go="${at - 1}" ${at === 0 ? "disabled" : ""}>Back</button>
+    ${at < n ? `<button type="button" class="btn primary" data-step-go="${at + 1}">${at === n - 1 ? "Results" : "Next"}</button>` : ""}</div>`;
+  if (at === n) {
+    const rows = p.steps.map((st, si) => { const own = all.map((c, ci) => [c, ci]).filter(([c]) => c.si === si); const comment = state.checks["s" + si];
+      if (!own.length && !comment) return "";
+      return `<li><strong>${si + 1}. ${esc(st.title)}</strong><ul class="results">${own.map(([c, ci]) => { const r = state.checks["c" + ci] || {};
+        return `<li><span class="res ${r.pass === true ? "pass" : r.pass === false ? "fail" : ""}">${r.pass === true ? "Pass" : r.pass === false ? "Fail" : "—"}</span> ${esc(c.text)}${r.note ? ` <span class="muted">— ${esc(r.note)}</span>` : ""}</li>`; }).join("")}
+        ${comment ? `<li class="muted">Comment: ${esc(comment)}</li>` : ""}</ul></li>`; }).join("");
+    return `<div class="wiz">${dots}<strong>Results</strong><ul class="results">${rows}</ul>
+      <label class="muted" style="display:flex;flex-direction:column;gap:calc(5 * var(--u));font-size:calc(12.5 * var(--u))">Anything else for Claude<textarea id="testNote" rows="2">${esc(state.checks.note || "")}</textarea></label>
+      <div class="actions" id="submitRow">${submitButtons(d, all)}</div>${nav}</div>`;
+  }
+  const st = p.steps[at]; const l = d.launches?.[at]; const ready = d.ready?.[at];
+  let ci = all.findIndex((c) => c.si === at);
+  return `<div class="wiz">${dots}
+    <div class="muted" style="font-size:calc(12 * var(--u))">Step ${at + 1} of ${n}</div><strong style="font-size:calc(16 * var(--u))">${esc(st.title)}</strong>
+    ${st.do.length ? `<div class="do">${st.do.map((x) => `<p>${linkify(x)}</p>`).join("")}</div>` : ""}
+    ${st.run ? `<div><pre class="term">${esc(st.run)}</pre>
+      <div class="actions" style="margin-top:calc(8 * var(--u));align-items:center"><button type="button" class="btn primary" data-launch="${at + 1}">${l ? "Restart" : "Run"}</button>${l ? `<button type="button" class="btn" data-launch-stop="${at + 1}">Stop</button>` : ""}
+      ${l ? `<span class="muted">${l.running ? "Running" : "Exited"}</span>` : ""}</div>
+      ${l ? `<pre class="term" style="margin-top:calc(8 * var(--u))">${esc(l.output || "(no output yet)")}</pre>` : ""}</div>` : ""}
+    ${st.wait ? `<p class="wait ${ready ? "up" : ""}">${ready === true ? "✓ Answering" : ready === false ? "… Not answering yet" : "Waits for"}: ${esc(st.wait)}</p>` : ""}
+    ${st.open.length ? `<div class="actions">${st.open.map((u) => `<a class="btn" href="${esc(u)}" target="_blank" rel="noopener">Open ${esc(u.replace(/^https?:\/\//, ""))} ↗</a>`).join("")}</div>` : ""}
+    ${st.checks.length ? `<div style="display:flex;flex-direction:column;gap:calc(8 * var(--u))">${st.checks.map((c) => { const i = ci++; const r = state.checks["c" + i] || {};
       return `<div class="check"><span>${esc(c)}</span><div class="pf"><button type="button" class="btn pass ${r.pass === true ? "on" : ""}" data-check="${i}" data-pass="1">Pass</button>
         <button type="button" class="btn fail ${r.pass === false ? "on" : ""}" data-check="${i}" data-pass="0">Fail</button></div>
-        ${r.pass === false ? `<input type="text" data-note="${i}" placeholder="What happened?" value="${esc(r.note || "")}">` : ""}</div>`; }).join("")}</div></div>
-    <label class="muted" style="display:flex;flex-direction:column;gap:calc(5 * var(--u));font-size:calc(12.5 * var(--u))">Anything else for Claude<textarea id="testNote" rows="2">${esc(state.checks.note || "")}</textarea></label>
-    <div class="actions"><button type="button" class="btn primary" id="sendResults">Submit results</button></div></div>`;
+        ${r.pass === false ? `<input type="text" data-note="${i}" placeholder="What happened?" value="${esc(r.note || "")}">` : ""}</div>`; }).join("")}</div>` : ""}
+    <label class="muted" style="display:flex;flex-direction:column;gap:calc(5 * var(--u));font-size:calc(12.5 * var(--u))">Comment on this step (goes to Claude with the results)<textarea data-comment="${at}" rows="2">${esc(state.checks["s" + at] || "")}</textarea></label>
+    ${nav}</div>`;
+}
+// What Submit does: anything failed goes to Claude; everything passed with
+// comments lets you choose; everything passed and nothing to say approves a
+// ticket in Testing (earlier, it's only kept).
+function submitButtons(d, all) {
+  const failed = all.some((c, ci) => state.checks["c" + ci]?.pass === false);
+  const commented = (state.checks.note || "").trim() || d.test_plan.steps.some((st, si) => (state.checks["s" + si] || "").trim());
+  if (failed) return `<button type="button" class="btn primary" id="sendResults" data-send="1">Send results to Claude</button>`;
+  const finish = d.ticket.stage === "testing" ? "Pass and finish" : "Pass (keep the results)";
+  if (commented) return `<button type="button" class="btn primary" id="sendResults" data-send="1">Send to Claude</button>
+    <button type="button" class="btn" id="sendResults2" data-send="0">${finish}${d.ticket.stage === "testing" ? " (comments stay on the ticket)" : ""}</button>`;
+  return `<button type="button" class="btn primary" id="sendResults" data-send="0">${finish}</button>`;
+}
+// How far testing got is saved on the ticket as you go (a moment after the
+// last change), so a reload, another device or closing the popup keeps it.
+let progressTimer = null;
+function saveProgress() {
+  const key = state.open; const progress = JSON.stringify(state.checks);
+  clearTimeout(progressTimer);
+  progressTimer = setTimeout(() => api(`ticket/${encodeURIComponent(key)}/test-progress`, { progress }).catch((e) => toast("Couldn't save your progress: " + e.message, true)), 600);
+}
+// Plain text with its http(s) URLs as links that open in a new tab.
+function linkify(text) {
+  return esc(text).replace(/https?:\/\/[^\s<)`]+[^\s<)`.,;]/g, (u) => `<a href="${u}" target="_blank" rel="noopener">${u}</a>`);
 }
 function commentsTab(d) {
   const t = d.ticket; const back = t.stage === "review" || t.stage === "testing";
@@ -976,7 +1051,10 @@ document.addEventListener("click", async (e) => {
   }
   if (ds.pick !== undefined) { state.picks[ds.pick] = ds.n; state.other[ds.pick] = ""; renderDetail(); return; }
   if (ds.perm) return sendAnswer(key, [ds.perm], el);
-  if (ds.check !== undefined) { const c = state.checks["c" + ds.check] || {}; c.pass = ds.pass === "1"; state.checks["c" + ds.check] = c; renderDetail(); return; }
+  if (ds.check !== undefined) { const c = state.checks["c" + ds.check] || {}; c.pass = ds.pass === "1"; state.checks["c" + ds.check] = c; saveProgress(); renderDetail(); return; }
+  if (ds.stepGo !== undefined) { state.checks.step = Math.max(0, +ds.stepGo); saveProgress(); renderDetail(); document.getElementById("ticketDlg").scrollTop = 0; return; }
+  if (ds.launch) return act(key, "launch", { step: +ds.launch }, "Started");
+  if (ds.launchStop) return act(key, "launch-stop", { step: +ds.launchStop }, "Stopped");
   if (ds.act === "gutter") {
     try { const r = await act(key, "gutter"); toast("gutter's window is open"); } catch {}
     return;
@@ -1009,14 +1087,19 @@ document.addEventListener("click", async (e) => {
     box.value = ""; toast(r.sent_back ? `Back to Claude: round ${r.round}` : r.sent ? "Sent" : r.unsent ? "Saved (no session yet)" : "Saved");
     return;
   }
-  if (el.id === "sendResults") {
-    const p = state.detail.test_plan;
-    const checks = p.checks.map((text, i) => ({ text, pass: state.checks["c" + i]?.pass, note: state.checks["c" + i]?.note || "" }));
-    if (checks.some((c) => c.pass === undefined)) return toast("Pass or fail every check first", true);
-    const extra = checks.every((c) => c.pass) && state.detail.ticket.stage === "testing" ? await doneExtras(key) : {};
+  if (el.id === "sendResults" || el.id === "sendResults2") {
+    const send = el.dataset.send === "1";
+    const checks = planChecks(state.detail.test_plan).map((c, i) => ({ text: c.text, si: c.si, pass: state.checks["c" + i]?.pass, note: state.checks["c" + i]?.note || "" }));
+    const miss = checks.findIndex((c) => c.pass === undefined);
+    if (miss >= 0) { state.checks.step = planChecks(state.detail.test_plan)[miss].si; renderDetail(); return toast("Pass or fail every check first", true); }
+    const extra = !send && checks.every((c) => c.pass) && state.detail.ticket.stage === "testing" ? await doneExtras(key) : {};
     if (!extra) return;
-    const r = await act(key, "test-results", { checks, note: document.getElementById("testNote").value, ...extra });
-    toast(r.passed ? (finishMsg(key, extra) ? "All passed: " + finishMsg(key, extra) : "All passed: done") : "Sent the failures to Claude"); state.checks = {};
+    const steps = state.detail.test_plan.steps.map((st, si) => ({ title: st.title, comment: state.checks["s" + si] || "",
+      checks: checks.filter((c) => c.si === si).map(({ text, pass, note }) => ({ text, pass, note })) }));
+    clearTimeout(progressTimer);
+    const r = await act(key, "test-results", { steps, send, note: document.getElementById("testNote").value, ...extra });
+    toast(r.sent ? "Sent to Claude" : r.unsent ? "No session to send to: kept as a comment" : !r.approved ? "All passed: kept on the ticket"
+      : finishMsg(key, extra) ? "All passed: " + finishMsg(key, extra) : "All passed: done", r.unsent); state.checks = {};
     return;
   }
   if (el.id === "deleteTicket") {
@@ -1027,9 +1110,10 @@ document.addEventListener("click", async (e) => {
 document.addEventListener("input", (e) => {
   const ds = e.target.dataset;
   if (ds.other !== undefined) { state.other[ds.other] = e.target.value; }
-  if (ds.note !== undefined) { const c = state.checks["c" + ds.note] || {}; c.note = e.target.value; state.checks["c" + ds.note] = c; }
-  if (ds.setup !== undefined) state.checks["s" + ds.setup] = e.target.checked;
-  if (e.target.id === "testNote") state.checks.note = e.target.value;
+  if (ds.note !== undefined) { const c = state.checks["c" + ds.note] || {}; c.note = e.target.value; state.checks["c" + ds.note] = c; saveProgress(); }
+  if (ds.comment !== undefined) { state.checks["s" + ds.comment] = e.target.value; saveProgress(); }
+  if (e.target.id === "testNote") { state.checks.note = e.target.value; saveProgress();
+    const row = document.getElementById("submitRow"); if (row) row.innerHTML = submitButtons(state.detail, planChecks(state.detail.test_plan)); }
   if (e.target.id === "search") { state.search = e.target.value; render(); }
 });
 document.addEventListener("change", (e) => {
@@ -1082,7 +1166,7 @@ function restoreScrolls(saved) {
 addEventListener("pagehide", () => {
   const drafts = {}; for (const id of DRAFTS) { const el = document.getElementById(id); if (el?.value) drafts[id] = el.value; }
   const place = { filter: state.filter, project: state.project, search: state.search, open: state.open, tab: state.tab,
-    picks: state.picks, other: state.other, checks: state.checks, tailPinned: state.tailPinned, drafts, scrolls: scrolls(), page: [scrollX, scrollY] };
+    picks: state.picks, other: state.other, tailPinned: state.tailPinned, drafts, scrolls: scrolls(), page: [scrollX, scrollY] };
   try { sessionStorage.setItem("cl-board-place", JSON.stringify(place)); } catch {}
 });
 async function restorePlace() {
@@ -1096,7 +1180,7 @@ async function restorePlace() {
   scrollTo(...(place.page || [0, 0]));
   if (!place.open || !state.data) return;
   const opening = openTicket(place.open, place.tab);
-  Object.assign(state, { picks: place.picks || {}, other: place.other || {}, checks: place.checks || {} });
+  Object.assign(state, { picks: place.picks || {}, other: place.other || {} });
   await opening;
   if (state.open !== place.open) return;
   // Gone since (deleted, say): don't leave an empty popup up.

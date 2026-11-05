@@ -234,7 +234,7 @@ pub fn finished(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, s
 /// still using it. A worktree stays until `cleanup`.
 fn closeSession(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8) !void {
     review.stopGutter(ctx, a, key) catch {};
-    review.stopLaunch(ctx, a, key) catch {};
+    review.stopLaunch(ctx, a, key, null) catch {};
     const t = try board.getTicket(db, a, key);
     const s = liveSession(ctx, t) orelse return;
     if ((try db.int("SELECT 1 FROM tickets WHERE tmux = ?1 AND id != ?2 AND stage != 'done'", .{ s, t.id })) != null) return;
@@ -553,22 +553,41 @@ pub fn gutterSubmitted(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []cons
     return r;
 }
 
-/// Record test results: all passed approves the ticket on to Done; any
-/// failure sends the results to Claude for another round.
-pub fn testResults(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, checks: []const review.Check, note: []const u8, spin_off: bool, finish: Finish) !bool {
-    const res = try review.recordResults(a, checks, note);
-    if (res.passed) {
-        const t = try board.getTicket(db, a, key);
+pub const TestOutcome = struct {
+    passed: bool,
+    /// Went to Claude: a failure, or comments you chose to send.
+    sent: bool = false,
+    /// It has no session to send them to; they're kept as a comment.
+    unsent: bool = false,
+    /// A ticket in Testing went on to Done (or to finishing).
+    approved: bool = false,
+};
+
+/// Record test results. A failure goes to Claude for another round, as do
+/// comments when everything passed if `send` says so (null: whenever there
+/// are any). Everything passing and nothing sent approves a ticket in
+/// Testing; earlier, the results are only kept on the ticket.
+pub fn testResults(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, steps: []const review.StepResult, note: []const u8, send: ?bool, spin_off: bool, finish: Finish) !TestOutcome {
+    const res = try review.recordResults(a, steps, note);
+    const t = try board.getTicket(db, a, key);
+    // Sent: the next try starts over.
+    try board.setTestProgress(db, t.id, "");
+    var o: TestOutcome = .{ .passed = res.passed };
+    if (!res.passed or (send orelse res.commented)) {
+        if (t.stage == .review) try board.move(ctx, db, a, key, .testing);
+        const r = try comment(ctx, db, a, key, "you", res.text, true);
+        o.sent = r.sent;
+        o.unsent = r.unsent;
+    } else {
         if (t.stage == .testing) try readyForDone(ctx, db, a, key, spin_off);
         _ = try board.addComment(ctx, db, a, key, "you", res.text, false);
-        if (t.stage == .testing) _ = try approve(ctx, db, a, key, spin_off, finish);
-    } else {
-        const t = try board.getTicket(db, a, key);
-        if (t.stage == .review) try board.move(ctx, db, a, key, .testing);
-        _ = try comment(ctx, db, a, key, "you", res.text, true);
+        if (t.stage == .testing) {
+            _ = try approve(ctx, db, a, key, spin_off, finish);
+            o.approved = true;
+        }
     }
-    review.stopLaunch(ctx, a, key) catch {};
-    return res.passed;
+    review.stopLaunch(ctx, a, key, null) catch {};
+    return o;
 }
 
 test "gutterSubmitted: an empty review sends nothing and leaves the ticket alone" {

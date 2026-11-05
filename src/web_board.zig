@@ -8,8 +8,8 @@
 //!   POST /api/ticket                    new ticket
 //!   POST /api/ticket/<key>/<action>     edit move rank comment flag unflag done approve start
 //!                                       answer key kill hide unhide rm cleanup gutter
-//!                                       gutter-stop launch launch-stop test-results
-//!                                       relocate
+//!                                       gutter-stop launch launch-stop test-progress
+//!                                       test-results relocate
 //!   POST /api/project                   add a project
 //!   POST /api/project/<name>/<action>   set rm
 const std = @import("std");
@@ -98,7 +98,7 @@ pub fn handle(ctx: Ctx, cfg: config.Config, req: *std.http.Server.Request, path:
             error.NoChange => .{ .conflict, "its work has no jj change of its own to move with it" },
             error.SessionFailed => .{ .internal_server_error, "the session didn't start" },
             error.OpenSubtickets => .{ .conflict, "it has sub-tickets that aren't done yet; finish them or spin them off" },
-            error.NoTestPlan => .{ .not_found, "no test plan (.claude/test-plan.md)" },
+            error.NoTestPlan => .{ .not_found, "no test plan" },
             error.NoLaunch => .{ .not_found, "the test plan has no launch command" },
             error.Conflicts => .{ .conflict, "merging it back conflicts (the files are on the ticket); it stays in Testing" },
             error.MergeFailed => .{ .internal_server_error, worktree.lastError() },
@@ -131,8 +131,15 @@ const Body = struct {
     answers: ?[]const []const u8 = null,
     key: ?[]const u8 = null,
     branch: ?bool = null,
+    /// test-results: each step's checks and comment (`checks` alone: a page
+    /// from before steps).
+    steps: ?[]const review.StepResult = null,
     checks: ?[]const review.Check = null,
+    /// test-progress: the board's JSON for how far testing got.
+    progress: ?[]const u8 = null,
     note: ?[]const u8 = null,
+    /// launch, launch-stop: the test plan step (1-based).
+    step: ?usize = null,
     name: ?[]const u8 = null,
     dir: ?[]const u8 = null,
     prefix: ?[]const u8 = null,
@@ -269,7 +276,7 @@ fn ticketAction(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator
     } else if (eql(u8, action, "unflag")) {
         try board.clearFlag(ctx, db, a, key, b.kind orelse return error.BadInput);
     } else if (eql(u8, action, "done")) {
-        try board.done(ctx, db, a, key, b.summary orelse "");
+        try review.done(ctx, db, a, key, b.summary orelse "", null);
     } else if (eql(u8, action, "approve")) {
         _ = try actions.approve(ctx, db, a, key, b.spin_off orelse false, try finishOf(b));
     } else if (eql(u8, action, "start")) {
@@ -300,12 +307,21 @@ fn ticketAction(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator
     } else if (eql(u8, action, "gutter-stop")) {
         try review.stopGutter(ctx, a, key);
     } else if (eql(u8, action, "launch")) {
-        try review.launch(ctx, db, a, try board.getTicket(db, a, key));
+        _ = try review.launch(ctx, db, a, try board.getTicket(db, a, key), b.step);
     } else if (eql(u8, action, "launch-stop")) {
-        try review.stopLaunch(ctx, a, key);
+        try review.stopLaunch(ctx, a, key, b.step);
+    } else if (eql(u8, action, "test-progress")) {
+        const json = b.progress orelse return error.BadInput;
+        if (json.len > 64 * 1024) return error.BadInput;
+        // An object or "" (start over), nothing else.
+        if (json.len > 0) switch (std.json.parseFromSliceLeaky(std.json.Value, a, json, .{}) catch return error.BadInput) {
+            .object => {},
+            else => return error.BadInput,
+        };
+        try board.setTestProgress(db, (try board.getTicket(db, a, key)).id, json);
     } else if (eql(u8, action, "test-results")) {
-        const passed = try actions.testResults(ctx, db, a, key, b.checks orelse return error.BadInput, b.note orelse "", b.spin_off orelse false, try finishOf(b));
-        return ok(req, a, .{ .passed = passed });
+        const steps = b.steps orelse &.{review.StepResult{ .checks = b.checks orelse return error.BadInput }};
+        return ok(req, a, try actions.testResults(ctx, db, a, key, steps, b.note orelse "", b.send, b.spin_off orelse false, try finishOf(b)));
     } else return error.NotFound;
     return ok(req, a, .{ .ok = true });
 }
@@ -371,6 +387,7 @@ fn getTicket(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, r
         if (raw.len > 0) ctx.gpa.free(raw);
     }
     const dir = review.ticketDir(db, a, t) catch "";
+    const plan = review.readTestPlan(a, t);
     // gutter may have been opened elsewhere (cl t gutter): relay it too.
     const gutter_port = try review.gutterPort(ctx, a, t.key);
     if (gutter_port) |p| web.relayGutter(ctx, cfg, t.key, p);
@@ -386,8 +403,10 @@ fn getTicket(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, r
         .tail_cols = tail_cols,
         .dir = dir,
         .guide = dir.len > 0 and review.hasGuide(ctx, a, dir),
-        .test_plan = if (dir.len > 0) review.readTestPlan(ctx, a, dir) else null,
-        .launch = try review.launchState(ctx, a, t.key),
+        .test_plan = plan,
+        // Per step of the plan: its command's run, and whether its wait URL answers.
+        .launches = if (plan) |p| try review.launchStates(ctx, a, t.key, p) else &.{},
+        .ready = if (plan) |p| try review.waitStates(ctx, a, p) else &.{},
         .gutter_port = gutter_port,
         .main_branch = if (t.branch.len > 0 or t.change.len > 0) worktree.mainBranch(ctx, a, (try board.getProject(db, a, t.project)).dir) else "",
     });

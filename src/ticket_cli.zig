@@ -65,8 +65,11 @@ pub const ticket_usage =
     \\                              press a key in its session
     \\  gutter <key> [--stop]       review its changes in gutter's window (with Claude's review
     \\                              guide); the review you submit there goes to its session
-    \\  testplan <key> [--json]     the test plan Claude wrote: setup, launch, checks
-    \\  launch <key> [--stop]       run the test plan's launch command (tmux session clrun_<key>)
+    \\  testplan <key> [--json]     the test plan Claude gave: its steps, in order
+    \\  testplan --format           how to write one (for Claude)
+    \\  launch <key> [--step <n>] [--stop]
+    \\                              run a step's run: command (the first one by default) in tmux
+    \\                              session clrun_<key>_s<n>; --stop: that step's, or all
     \\  test <key>                  walk through the test plan here; failures go back to Claude
     \\  relocate <key> worktree|queue
     \\                              move it to a worktree of its own, or back to the queue; one
@@ -80,8 +83,11 @@ pub const ticket_usage =
     \\                              ticket in review or testing that starts another round
     \\  flag <key> <kind> [detail]  set a flag (input question review testing, or your own)
     \\  unflag <key> <kind>
-    \\  done [<key>] [--summary <text>]
-    \\                              Claude: finished, nothing more needed; moves to review
+    \\  done [<key>] [--summary <text>] [--test-plan <markdown> | -]
+    \\                              Claude: finished, nothing more needed; moves to review.
+    \\                              --test-plan (- reads stdin): what to try, kept in the ticket
+    \\                              (steps; `testplan --format`); without it an
+    \\                              earlier round's stays, "" drops it
     \\  done [<key>] --close [--pr-url <url>]
     \\                              Claude: merged or opened the PR it was asked to; moves to
     \\                              done (the PR link becomes a comment) and closes the session
@@ -309,7 +315,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
     const a = arena_state.allocator();
     const cmd = argv[0];
     const args = try Args.parse(a, argv[1..], &.{
-        "--body", "--target", "--stage", "--profile", "--project", "--flag", "--search", "--title", "--as", "--summary", "--parent", "--skill", "--pr-url", "--before", "--after",
+        "--body", "--target", "--stage", "--profile", "--project", "--flag", "--search", "--title", "--as", "--summary", "--test-plan", "--step", "--parent", "--skill", "--pr-url", "--before", "--after",
     }, ticket_usage);
     const env_key = ctx.env.get("CL_TICKET");
     const db = openBoard(ctx, cfg);
@@ -444,8 +450,8 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         return;
     }
     if (std.mem.eql(u8, cmd, "done")) {
-        args.only(&.{ "--summary", "--close", "--pr-url" }, ticket_usage);
-        const key = keyArg(pos, 0, env_key, "cl ticket done [<key>] [--summary <text>] [--close [--pr-url <url>]]");
+        args.only(&.{ "--summary", "--test-plan", "--close", "--pr-url" }, ticket_usage);
+        const key = keyArg(pos, 0, env_key, "cl ticket done [<key>] [--summary <text>] [--test-plan <markdown> | -] [--close [--pr-url <url>]]");
         const t0 = board.getTicket(db, a, key) catch |e| boardFail(db, e, "ticket");
         // While finishing, a plain `done` means the merge or PR is done too.
         if (args.has("--close") or t0.finishing.len > 0) {
@@ -458,7 +464,16 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
             return;
         }
         if (args.get("--pr-url") != null) fail("--pr-url goes with --close", .{});
-        board.done(ctx, db, a, key, args.get("--summary") orelse "") catch |e| boardFail(db, e, "ticket");
+        var test_plan = args.get("--test-plan");
+        if (test_plan != null and std.mem.eql(u8, test_plan.?, "-")) {
+            var buf: [4096]u8 = undefined;
+            var r = std.Io.File.stdin().reader(ctx.io, &buf);
+            test_plan = r.interface.allocRemaining(a, .limited(256 * 1024)) catch fail("cannot read the test plan from stdin", .{});
+        }
+        review.done(ctx, db, a, key, args.get("--summary") orelse "", test_plan) catch |e| switch (e) {
+            error.BadTestPlan => fail("{s}", .{if (t0.stage == .planning) "a plan being approved has no test plan yet" else "the test plan needs at least one \"- [ ] ...\" check (cl ticket testplan --format)"}),
+            else => boardFail(db, e, "ticket"),
+        };
         const t = board.getTicket(db, a, key) catch |e| boardFail(db, e, "ticket");
         return out(try std.fmt.allocPrint(a, "{s}: {s}. The board shows it to the human; nothing more to do.\n", .{
             t.key, if (t.stage == .planning) "plan ready for approval" else "moved to review",
@@ -559,32 +574,29 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         return out(try std.fmt.allocPrint(a, "gutter's window is open (http://127.0.0.1:{d}); the review you submit goes to the session\n", .{port}));
     }
     if (std.mem.eql(u8, cmd, "testplan")) {
-        args.only(&.{"--json"}, ticket_usage);
-        const key = keyArg(pos, 0, env_key, "cl ticket testplan <key> [--json]");
+        args.only(&.{ "--json", "--format" }, ticket_usage);
+        if (args.has("--format")) return out(review.format_help);
+        const key = keyArg(pos, 0, env_key, "cl ticket testplan <key> [--json] | --format");
         const t = board.getTicket(db, a, key) catch |e| boardFail(db, e, "ticket");
-        const plan = review.readTestPlan(ctx, a, review.ticketDir(db, a, t) catch |e| boardFail(db, e, "ticket")) orelse fail("{s} has no test plan (.claude/test-plan.md)", .{t.key});
+        const plan = review.readTestPlan(a, t) orelse fail("{s} has no test plan", .{t.key});
         if (args.has("--json")) return out(try std.fmt.allocPrint(a, "{f}\n", .{std.json.fmt(plan, .{})}));
         var aw: std.Io.Writer.Allocating = .init(a);
-        if (plan.setup.len > 0) try aw.writer.writeAll("setup:\n");
-        for (plan.setup, 1..) |x, i| try aw.writer.print("  {d}. {s}\n", .{ i, x });
-        if (plan.launch.len > 0) try aw.writer.print("launch: {s}\n", .{plan.launch});
-        if (plan.open.len > 0) try aw.writer.print("        {s}\n", .{plan.open});
-        if (plan.checks.len > 0) try aw.writer.writeAll("checks:\n");
-        for (plan.checks) |x| try aw.writer.print("  [ ] {s}\n", .{x});
+        for (plan.steps, 1..) |st, i| try printStep(&aw.writer, st, i, plan.steps.len);
         return out(aw.writer.buffered());
     }
     if (std.mem.eql(u8, cmd, "launch")) {
-        args.only(&.{"--stop"}, ticket_usage);
-        if (pos.len != 1) fail("usage: cl ticket launch <key> [--stop]", .{});
+        args.only(&.{ "--stop", "--step" }, ticket_usage);
+        if (pos.len != 1) fail("usage: cl ticket launch <key> [--step <n>] [--stop]", .{});
         const t = board.getTicket(db, a, pos[0]) catch |e| boardFail(db, e, "ticket");
-        if (args.has("--stop")) return review.stopLaunch(ctx, a, t.key);
-        review.launch(ctx, db, a, t) catch |e| switch (e) {
-            error.NoTestPlan => fail("{s} has no test plan (.claude/test-plan.md)", .{t.key}),
-            error.NoLaunch => fail("the test plan has no launch command", .{}),
+        const step: ?usize = if (args.get("--step")) |v| std.fmt.parseInt(usize, v, 10) catch fail("--step takes a step number", .{}) else null;
+        if (args.has("--stop")) return review.stopLaunch(ctx, a, t.key, step);
+        const i = review.launch(ctx, db, a, t, step) catch |e| switch (e) {
+            error.NoTestPlan => fail("{s} has no test plan", .{t.key}),
+            error.NoLaunch => fail("{s}", .{if (step != null) "that step has no run: command" else "the test plan has no run: command"}),
             else => boardFail(db, e, "ticket"),
         };
         const name = try std.ascii.allocLowerString(a, t.key);
-        return out(try std.fmt.allocPrint(a, "running in tmux session clrun_{s} (tmux attach -t clrun_{s})\n", .{ name, name }));
+        return out(try std.fmt.allocPrint(a, "step {d} running in tmux session clrun_{s}_s{d} (tmux attach -t clrun_{s}_s{d})\n", .{ i, name, i, name, i }));
     }
     if (std.mem.eql(u8, cmd, "test")) {
         args.only(&.{}, ticket_usage);
@@ -627,7 +639,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
 /// `cl t test`: the test plan as a walk-through in the terminal.
 fn walkTest(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8) !void {
     const t = board.getTicket(db, a, key) catch |e| boardFail(db, e, "ticket");
-    const plan = review.readTestPlan(ctx, a, review.ticketDir(db, a, t) catch |e| boardFail(db, e, "ticket")) orelse fail("{s} has no test plan (.claude/test-plan.md)", .{t.key});
+    const plan = review.readTestPlan(a, t) orelse fail("{s} has no test plan", .{t.key});
     var in_buf: [4096]u8 = undefined;
     var in = std.Io.File.stdin().reader(ctx.io, &in_buf);
     const ask = struct {
@@ -642,28 +654,42 @@ fn walkTest(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8) !void
         }
     };
     try out(try std.fmt.allocPrint(a, "Testing {s}: {s}\n", .{ t.key, t.title }));
-    for (plan.setup, 1..) |step, i| _ = try ask.line(&in, a, try std.fmt.allocPrint(a, "\nSetup {d}/{d}: {s}\n  Enter when done ", .{ i, plan.setup.len, step }));
-    if (plan.launch.len > 0) {
-        const yn = try ask.line(&in, a, try std.fmt.allocPrint(a, "\nLaunch: {s}\n  Run it now? [Y/n] ", .{plan.launch}));
-        if (yn.len == 0 or yn[0] == 'y' or yn[0] == 'Y') {
-            review.launch(ctx, db, a, t) catch |e| fail("launch failed: {s}", .{@errorName(e)});
-            const name = try std.ascii.allocLowerString(a, t.key);
-            try out(try std.fmt.allocPrint(a, "  running in tmux session clrun_{s}{s}{s}\n", .{ name, if (plan.open.len > 0) "; " else "", plan.open }));
+    var results: std.ArrayList(review.StepResult) = .empty;
+    const yes = struct {
+        fn of(s: []const u8) bool {
+            return s.len == 0 or s[0] == 'y' or s[0] == 'Y';
         }
-    }
-    var checks: std.ArrayList(review.Check) = .empty;
-    for (plan.checks, 1..) |c, i| {
-        const ans = try ask.line(&in, a, try std.fmt.allocPrint(a, "\nCheck {d}/{d}: {s}\n  Pass? [y/n] ", .{ i, plan.checks.len, c }));
-        const pass = ans.len > 0 and (ans[0] == 'y' or ans[0] == 'Y');
-        const note = if (pass) "" else try ask.line(&in, a, "  What happened? ");
-        try checks.append(a, .{ .text = c, .pass = pass, .note = note });
+    }.of;
+    for (plan.steps, 1..) |st, i| {
+        var aw: std.Io.Writer.Allocating = .init(a);
+        try aw.writer.writeAll("\n");
+        try printStep(&aw.writer, st, i, plan.steps.len);
+        try out(aw.writer.buffered());
+        // Like the board's buttons: nothing runs or opens without a yes.
+        if (st.run.len > 0 and yes(try ask.line(&in, a, "  Run it? [Y/n] "))) {
+            _ = review.launch(ctx, db, a, t, i) catch |e| fail("launch failed: {s}", .{@errorName(e)});
+            const name = try std.ascii.allocLowerString(a, t.key);
+            try out(try std.fmt.allocPrint(a, "  running in tmux session clrun_{s}_s{d}\n", .{ name, i }));
+        }
+        for (st.open) |url| if (yes(try ask.line(&in, a, try std.fmt.allocPrint(a, "  Open {s}? [Y/n] ", .{url})))) openUrl(ctx, url);
+        var checks: std.ArrayList(review.Check) = .empty;
+        for (st.checks) |c| {
+            const ans = try ask.line(&in, a, try std.fmt.allocPrint(a, "  Check: {s}\n  Pass? [y/n] ", .{c}));
+            const pass = ans.len > 0 and (ans[0] == 'y' or ans[0] == 'Y');
+            const note = if (pass) "" else try ask.line(&in, a, "  What happened? ");
+            try checks.append(a, .{ .text = c, .pass = pass, .note = note });
+        }
+        const comment = try ask.line(&in, a, "  Comment on this step? (Enter to skip) ");
+        try results.append(a, .{ .title = st.title, .comment = comment, .checks = checks.items });
     }
     const note = try ask.line(&in, a, "\nAnything else for Claude? (Enter to skip) ");
     var finish: actions.Finish = .close;
     const cur = board.getTicket(db, a, key) catch |e| boardFail(db, e, "ticket");
-    for (checks.items) |c| {
-        if (!c.pass) break;
-    } else if (cur.stage == .testing and (cur.branch.len > 0 or cur.change.len > 0)) {
+    const res = review.recordResults(a, results.items, note) catch |e| boardFail(db, e, "ticket");
+    // Comments with everything passing: send them, or finish without.
+    var send = !res.passed;
+    if (res.passed and res.commented) send = yes(try ask.line(&in, a, "\nAll passed, with comments. Send them to Claude for another round? [Y/n] "));
+    if (res.passed and !send and cur.stage == .testing and (cur.branch.len > 0 or cur.change.len > 0)) {
         const main = worktree.mainBranch(ctx, a, (board.getProject(db, a, cur.project) catch |e| boardFail(db, e, "project")).dir);
         const ans = try ask.line(&in, a, try std.fmt.allocPrint(a, "\nAll passed. [m]erge {s} into {s}, open a [p]R, or just [c]lose? ", .{ if (cur.branch.len > 0) cur.branch else "its change", main }));
         if (ans.len > 0) finish = switch (std.ascii.toLower(ans[0])) {
@@ -672,8 +698,37 @@ fn walkTest(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8) !void
             else => .close,
         };
     }
-    const passed = actions.testResults(ctx, db, a, key, checks.items, note, false, finish) catch |e| boardFail(db, e, "ticket");
-    try out(if (!passed) "\nSent the results to Claude; the ticket is back in running.\n" else if (finish != .close) "\nAll passed: Claude is finishing it; it goes to done when that's through.\n" else "\nAll passed: the ticket is done.\n");
+    const o = actions.testResults(ctx, db, a, key, results.items, note, send, false, finish) catch |e| boardFail(db, e, "ticket");
+    try out(if (o.sent)
+        "\nSent the results to Claude for another round.\n"
+    else if (o.unsent)
+        "\nIt has no session to send them to; they're kept as a comment.\n"
+    else if (!o.approved)
+        "\nAll passed; kept on the ticket (it isn't in testing, so nothing moved).\n"
+    else if (finish != .close)
+        "\nAll passed: Claude is finishing it; it goes to done when that's through.\n"
+    else
+        "\nAll passed: the ticket is done.\n");
+}
+
+/// A test plan step as text: `cl t testplan` and `cl t test`.
+fn printStep(w: *std.Io.Writer, st: review.Step, i: usize, n: usize) !void {
+    try w.print("Step {d}/{d}: {s}\n", .{ i, n, st.title });
+    for (st.do) |x| try w.print("  {s}\n", .{x});
+    if (st.run.len > 0) try w.print("  run: {s}\n", .{st.run});
+    if (st.wait.len > 0) try w.print("  wait: {s}\n", .{st.wait});
+    for (st.open) |x| try w.print("  open: {s}\n", .{x});
+    for (st.checks) |x| try w.print("  [ ] {s}\n", .{x});
+}
+
+/// Open a URL in the browser, as the wizard does; say it when that fails.
+fn openUrl(ctx: Ctx, url: []const u8) void {
+    for ([_][]const u8{ "xdg-open", "open", "wslview" }) |cmd| {
+        var child = std.process.spawn(ctx.io, .{ .argv = &.{ cmd, url }, .stdin = .ignore, .stdout = .ignore, .stderr = .ignore }) catch continue;
+        _ = child.wait(ctx.io) catch continue;
+        return;
+    }
+    out("  couldn't open a browser; visit it by hand\n") catch {};
 }
 
 /// --merge, --pr or --close (the default).

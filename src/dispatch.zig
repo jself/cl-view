@@ -60,11 +60,11 @@ pub fn prompt(a: std.mem.Allocator, t: board.Ticket, notes: []const board.Commen
         \\- To split off a separate piece of work: `cl ticket new --parent {s} "<title>" -m "<details>"`.
         \\- When the work is finished and you need nothing more from me:
         \\  1. Write a review guide to .claude/review-guide.md (`gutter -guide-format` shows the format).
-        \\  2. If there is something for me to try, write .claude/test-plan.md: "## Setup" (numbered steps
-        \\     only I can do), "## Launch" (one shell command, run from this directory, that starts
-        \\     everything, and the URL or port to open) and "## Checks" ("- [ ] what to try and what I
-        \\     should see").
-        \\  3. {s}Run `cl ticket done {s} --summary "<what changed, in a sentence or two>"`.
+        \\  2. {s}Run `cl ticket done {s} --summary "<what changed, in a sentence or two>"`.
+        \\  3. If there is something for me to try, add `--test-plan -` and give the plan on stdin
+        \\     (a heredoc, not a file): steps the board walks me through one at a time, with buttons
+        \\     to run a command (`run:`, from this directory) and open a page (`open:`), and checks
+        \\     ("- [ ] what I should see"). `cl ticket testplan --format` shows the format.
         \\  Don't run it while you still need anything from me. When I send feedback, finish the same way.
         \\
     , .{ t.key, if (t.change.len == 0 and t.mode == .worktree) "Commit your work on this branch (the review shows commits and new files that way). " else "", t.key });
@@ -334,7 +334,7 @@ pub fn relocate(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator
         if (try targetHasTicket(db, t.tmux, t.id)) return error.Busy;
     }
     review.stopGutter(ctx, a, t.key) catch {};
-    review.stopLaunch(ctx, a, t.key) catch {};
+    review.stopLaunch(ctx, a, t.key, null) catch {};
     const short = t.change[0..@min(t.change.len, 12)];
     var note: []const u8 = undefined;
     switch (to) {
