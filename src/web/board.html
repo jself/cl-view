@@ -78,6 +78,11 @@
   .card.hot { border-color: #f5a524; }
   .card .top { display: flex; gap: calc(8 * var(--u)); font: calc(11.5 * var(--u)) var(--mono); color: var(--muted); }
   .card .top .grow { flex: 1; }
+  /* The shell icon on a card or list row: straight to the session's terminal. */
+  .shell-ic { display: inline-flex; align-items: center; justify-content: center; width: calc(22 * var(--u)); height: calc(18 * var(--u)); margin: calc(-2 * var(--u)) 0;
+              border-radius: calc(5 * var(--u)); color: #2dd4bf; cursor: pointer; flex: none; vertical-align: middle; }
+  .shell-ic:hover { background: #22303a; }
+  .shell-ic svg { width: calc(15 * var(--u)); height: calc(15 * var(--u)); }
   .card .t { font-size: calc(14 * var(--u)); font-weight: 500; line-height: 1.35; }
   .card .meta { font: calc(11.5 * var(--u)) var(--mono); color: var(--dim); overflow-wrap: anywhere; }
   .card .sub { font: calc(11.5 * var(--u)) var(--mono); color: var(--question); }
@@ -271,6 +276,12 @@ const pills = (t) => t.flags.length || t.finishing ? `<span class="pills">${fini
 const statusOf = (row) => row.status || (row.ticket.tmux.startsWith("(") ? "starting" : row.ticket.tmux && !["backlog", "queued"].includes(row.ticket.stage) ? "gone" : "none");
 const statusHtml = (row) => { const s = statusOf(row); const label = s === "none" ? (row.ticket.stage === "queued" ? "Waiting for a slot" : "Not started") : (STATUS_NAME[s] || s);
   return `<span class="status"><span class="dot s-${esc(s)}"></span>${esc(label)}</span>`; };
+// A live session's shell icon. In a card (a button) it's a span the click handler follows.
+const SHELL_SVG = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><path d="M4.5 6l2 2-2 2M8.5 10.5h3"/></svg>`;
+const liveRow = (row) => row.ticket.tmux && row.status && row.status !== "gone";
+const shellIcon = (row, link) => !liveRow(row) ? "" : link
+  ? `<a class="shell-ic" href="${shellHref(row.ticket)}" title="Open shell" aria-label="Open ${esc(row.ticket.key)}'s shell">${SHELL_SVG}</a>`
+  : `<span class="shell-ic" data-shell="${shellHref(row.ticket)}" title="Open shell" aria-label="Open ${esc(row.ticket.key)}'s shell">${SHELL_SVG}</span>`;
 const where = (t) => t.worktree || t.branch ? t.branch || "worktree" : t.mode === "worktree" ? "worktree on start" : t.target ? "queue: " + t.target : "queue";
 
 // ---- board data ----
@@ -374,7 +385,7 @@ function renderFilters() {
 function cardHtml(row, compact) {
   const t = row.ticket; const hot = t.flags.some((f) => f.kind === "input" || f.kind === "question");
   return `<button type="button" class="card ${hot ? "hot" : ""}" data-open="${esc(t.key)}" data-drag="${esc(t.key)}">
-    <span class="top"><span>${esc(t.key)}</span><span class="grow"></span><span>${ago(t.updated)}</span></span>
+    <span class="top"><span>${esc(t.key)}</span><span class="grow"></span>${shellIcon(row)}<span>${ago(t.updated)}</span></span>
     <span class="t">${esc(t.title)}</span>
     ${t.parent ? `<span class="sub">sub-ticket of ${esc(t.parent)}</span>` : ""}
     ${compact ? "" : `<span class="meta">${esc(t.project)} · ${esc(where(t))}</span>`}
@@ -402,7 +413,7 @@ function lanesHtml(rows) {
 function listHtml(rows) {
   if (!rows.length) return `<p class="empty">Nothing matches.</p>`;
   return `<div class="list"><table><thead><tr><th>Key</th><th>Ticket</th><th>Stage</th><th>Session</th><th>Flags</th><th>Workspace</th><th>Updated</th></tr></thead><tbody>
-    ${rows.map((r) => { const t = r.ticket; return `<tr class="row" data-open="${esc(t.key)}"><td class="mono muted">${esc(t.key)}</td>
+    ${rows.map((r) => { const t = r.ticket; return `<tr class="row" data-open="${esc(t.key)}"><td class="mono muted" style="white-space:nowrap">${esc(t.key)} ${shellIcon(r, true)}</td>
       <td><div style="font-weight:500">${esc(t.title)}</div><div class="muted" style="font-size:calc(12 * var(--u))">${esc(t.project)}${t.parent ? " · sub-ticket of " + esc(t.parent) : ""}</div></td>
       <td>${STAGE_NAME[t.stage]}</td><td>${statusHtml(r)}</td><td>${pills(t)}</td><td class="mono" style="font-size:calc(12 * var(--u))">${esc(where(t))}</td><td class="muted">${ago(t.updated)}</td></tr>`; }).join("")}
   </tbody></table></div>`;
@@ -742,7 +753,7 @@ async function moveTo(key, stage, place = {}) {
 }
 document.addEventListener("pointerdown", (e) => {
   const el = e.target.closest("[data-drag]");
-  if (!el || !el.closest("#main") || drag || (e.pointerType === "mouse" && e.button !== 0)) return;
+  if (!el || e.target.closest("[data-shell]") || !el.closest("#main") || drag || (e.pointerType === "mouse" && e.button !== 0)) return;
   const row = state.data?.tickets.find((r) => r.ticket.key === el.dataset.drag);
   drag = { el, key: el.dataset.drag, project: row?.ticket.project, id: e.pointerId, touch: e.pointerType !== "mouse", x: e.clientX, y: e.clientY };
   if (drag.touch) drag.hold = setTimeout(() => { if (drag && !drag.ghost) { liftCard(); dragMove(drag.x, drag.y); autoScroll(); } }, 350);
@@ -766,6 +777,8 @@ document.addEventListener("click", (e) => { if (Date.now() - dragDone < 400 && e
 
 // ---- events ----
 document.addEventListener("click", async (e) => {
+  const sh = e.target.closest("[data-shell]");
+  if (sh) { e.preventDefault(); if (e.ctrlKey || e.metaKey) window.open(sh.dataset.shell); else location.href = sh.dataset.shell; return; }
   const el = e.target.closest("button, a, tr.row"); if (!el) return;
   const ds = el.dataset;
   if (ds.view) { state.view = ds.view; store("cl-view", ds.view); render(); return; }
