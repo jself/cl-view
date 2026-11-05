@@ -202,7 +202,7 @@ const STATUS_NAME = { busy: "Working", waiting: "Waiting on you", blocked: "Wait
 
 const store = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch { return null; } };
 const state = {
-  data: null, view: store("cl-view") || "board", filter: "all", project: "", subs: store("cl-subs") === "1",
+  data: null, view: store("cl-view") || "board", filter: "all", project: "", subs: store("cl-subs") === "1", done: store("cl-done") === "1",
   search: "", needsOpen: store("cl-needs") !== "0", open: null, detail: null, tab: null, picks: {}, other: {}, checks: {},
   sending: false,
 };
@@ -294,6 +294,7 @@ function visible() {
   return state.data.tickets.filter((row) => {
     const t = row.ticket;
     if (!state.subs && t.parent) return false;
+    if (!state.done && t.stage === "done") return false;
     if (state.project && t.project !== state.project) return false;
     if (q && !(t.key + " " + t.title + " " + t.body).toLowerCase().includes(q)) return false;
     const f = state.filter;
@@ -348,13 +349,15 @@ function renderNeeds() {
 }
 
 function renderFilters() {
-  const d = state.data; const all = d.tickets.filter((r) => state.subs || !r.ticket.parent);
+  const d = state.data; const mine = d.tickets.filter((r) => state.subs || !r.ticket.parent);
+  const done = mine.filter((r) => r.ticket.stage === "done").length; const all = state.done ? mine : mine.filter((r) => r.ticket.stage !== "done");
   const n = (f) => all.filter((r) => f === "all" || (f === "me" ? needsMe(r) : f === "working" ? r.status === "busy" : r.ticket.flags.some((x) => x.kind === f))).length;
   const chips = [["all", "All"], ["me", "Needs me"], ["input", "Needs input"], ["question", "Questions"], ["review", "Review"], ["testing", "Testing"], ["working", "Working"]];
   setHtml(document.getElementById("filters"), chips.map(([k, l]) =>
       `<button type="button" class="chip ${state.filter === k ? "on" : ""}" data-filter="${k}" aria-pressed="${state.filter === k}">${l}<span class="n">${n(k)}</span></button>`).join("")
     + `<select id="projectSel" aria-label="Project"><option value="">All projects</option>${d.projects.map((p) => `<option ${p.name === state.project ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select>`
-    + `<button type="button" class="chip ${state.subs ? "on" : ""}" id="subsBtn" aria-pressed="${state.subs}">Sub-tickets<span class="n">${state.subs ? "shown" : "hidden"}</span></button>`);
+    + `<button type="button" class="chip ${state.subs ? "on" : ""}" id="subsBtn" aria-pressed="${state.subs}">Sub-tickets<span class="n">${state.subs ? "shown" : "hidden"}</span></button>`
+    + `<button type="button" class="chip ${state.done ? "on" : ""}" id="doneBtn" aria-pressed="${state.done}">Done<span class="n">${state.done ? "shown" : done + " hidden"}</span></button>`);
 }
 
 function cardHtml(row, compact) {
@@ -367,20 +370,22 @@ function cardHtml(row, compact) {
     ${t.children ? `<span class="meta">${t.children} sub-ticket${t.children > 1 ? "s" : ""}</span>` : ""}
     ${statusHtml(row)}${pills(t)}</button>`;
 }
+// Done is a column only when it's toggled on.
+const columns = () => state.done ? STAGES : STAGES.filter((s) => s !== "done");
 // A column top to bottom: by priority (drag to reorder), except Done, latest first.
 const inColumn = (rows, stage) => { const cs = rows.filter((r) => r.ticket.stage === stage);
   return stage === "done" ? cs : cs.sort((a, b) => a.ticket.rank - b.ticket.rank || a.ticket.id - b.ticket.id); };
 function boardHtml(rows) {
-  return `<div class="cols">${STAGES.map((s) => { const cs = inColumn(rows, s);
+  return `<div class="cols">${columns().map((s) => { const cs = inColumn(rows, s);
     return `<section class="col" data-drop="${s}"><h2>${STAGE_NAME[s]}<span class="n">${cs.length}</span></h2>${cs.map((r) => cardHtml(r)).join("")}</section>`; }).join("")}</div>`;
 }
 function lanesHtml(rows) {
   const projects = state.data.projects.filter((p) => !state.project || p.name === state.project);
-  return `<div class="lanes"><table><thead><tr><th></th>${STAGES.map((s) => `<th>${STAGE_NAME[s]}</th>`).join("")}</tr></thead><tbody>
+  return `<div class="lanes"><table><thead><tr><th></th>${columns().map((s) => `<th>${STAGE_NAME[s]}</th>`).join("")}</tr></thead><tbody>
     ${projects.map((p) => { const mine = rows.filter((r) => r.ticket.project === p.name);
       const running = mine.filter((r) => ["running", "planning"].includes(r.ticket.stage) && r.status && r.status !== "gone").length;
       return `<tr><td class="lane"><div><strong>${esc(p.name)}</strong><span class="mono muted" style="font-size:calc(11.5 * var(--u))">${p.mode === "worktree" ? `${running} of ${p.slots} running` : "queue"}</span></div></td>
-        ${STAGES.map((s) => `<td data-drop="${s}" data-project="${esc(p.name)}"><div>${inColumn(mine, s).map((r) => cardHtml(r, true)).join("")}</div></td>`).join("")}</tr>`; }).join("")}
+        ${columns().map((s) => `<td data-drop="${s}" data-project="${esc(p.name)}"><div>${inColumn(mine, s).map((r) => cardHtml(r, true)).join("")}</div></td>`).join("")}</tr>`; }).join("")}
   </tbody></table></div>`;
 }
 function listHtml(rows) {
@@ -754,6 +759,7 @@ document.addEventListener("click", async (e) => {
   const ds = el.dataset;
   if (ds.view) { state.view = ds.view; store("cl-view", ds.view); render(); return; }
   if (ds.filter) { state.filter = ds.filter; render(); return; }
+  if (el.id === "doneBtn") { state.done = !state.done; store("cl-done", state.done ? "1" : "0"); render(); return; }
   if (el.id === "subsBtn") { state.subs = !state.subs; store("cl-subs", state.subs ? "1" : "0"); render(); return; }
   if (el.id === "needsToggle") { state.needsOpen = !state.needsOpen; store("cl-needs", state.needsOpen ? "1" : "0"); renderNeeds(); return; }
   if (el.id === "newBtn") return openNew(null);
