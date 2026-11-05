@@ -474,7 +474,8 @@ function detailsTab(d) {
       <label>Queue session<select name="target"><option value="">Project default / parent's</option>${sessions.map((s) => `<option value="${esc(s.tmux)}" ${s.tmux === t.target ? "selected" : ""}>${esc(s.name)} (${esc(s.status)})</option>`).join("")}</select></label></div>
     <div class="row2"><label>Plan first<select name="plan"><option value="0">No</option><option value="1" ${t.plan ? "selected" : ""}>Yes</option></select></label>
       <label>Planning skill<input type="text" name="skill" value="${esc(t.skill)}" placeholder="grilling, wayfinder"></label></div>
-    <div class="actions"><button type="submit" class="btn primary">Save</button>
+    <div class="actions"><button type="submit" class="btn primary" value="close">Save and close</button>
+      <button type="submit" class="btn">Save</button>
       ${t.worktree && t.stage === "done" ? `<button type="button" class="btn" data-act="cleanup">Remove worktree</button>` : ""}
       <button type="button" class="btn danger" id="deleteTicket">Delete ticket</button></div></form>`;
 }
@@ -739,6 +740,7 @@ document.addEventListener("submit", async (e) => {
   if (e.target.id === "editForm") {
     const f = Object.fromEntries(new FormData(e.target));
     await act(state.open, "edit", { title: f.title, body: f.body, project: f.project, mode: f.mode, target: f.target, plan: f.plan === "1", skill: f.skill }, "Saved");
+    if (e.submitter?.value === "close") document.getElementById("ticketDlg").close();
   }
 });
 document.getElementById("ticketDlg").addEventListener("close", () => { state.open = null; state.detail = null; });
