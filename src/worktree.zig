@@ -241,6 +241,22 @@ pub fn newChange(ctx: Ctx, a: std.mem.Allocator, dir: []const u8, trunk: []const
     return mark(ctx, a, dir, bookmark);
 }
 
+/// The working copy's change when it holds work nobody has claimed: edits,
+/// no description, not in trunk. jj keeps such a change when the working
+/// copy moves off it, but nothing points at it, so it is easily lost.
+pub fn strayWork(ctx: Ctx, a: std.mem.Allocator, dir: []const u8, trunk: []const u8) ?[]const u8 {
+    const revs = std.fmt.allocPrint(a, "@ & description(exact:\"\") & ~empty() & ~::{s}", .{sym(a, trunk) catch return null}) catch return null;
+    const hit = changes(ctx, a, dir, revs) catch return null;
+    return if (hit.len == 1) hit[0] else null;
+}
+
+/// Make the working copy's change a ticket's own: describe it `desc` and
+/// put `bookmark` on it (see `mark`).
+pub fn adoptChange(ctx: Ctx, a: std.mem.Allocator, dir: []const u8, desc: []const u8, bookmark: []const u8) Error!Change {
+    _ = try run(ctx, a, &.{ "jj", "-R", dir, "describe", "-r", "@", "-m", desc });
+    return mark(ctx, a, dir, bookmark);
+}
+
 /// The working copy's change, with `bookmark` put on it. A bookmark of that
 /// name already elsewhere only moves forward (an old merged branch); else the
 /// change goes without one.
@@ -498,6 +514,18 @@ test "a change per ticket: switch, merge back, conflicts" {
     try std.testing.expect((try mergeChange(ctx, a, repo, "", four.id, four.bookmark, trunk)).empty);
     try std.testing.expectEqualStrings(master_now, try run(ctx, a, &.{ "git", "-C", repo, "rev-parse", "master" }));
     try std.testing.expectEqual(ChangeState.gone, changeState(ctx, a, repo, four.id, trunk));
+
+    // Undescribed edits in the working copy are stray work; an adopted one
+    // is a ticket's change and merges like one.
+    _ = catchUp(ctx, a, repo, trunk);
+    try std.testing.expect(strayWork(ctx, a, repo, trunk) == null);
+    try tmp.dir.writeFile(ctx.io, .{ .sub_path = "c.txt", .data = "stray\n" });
+    const stray = strayWork(ctx, a, repo, trunk).?;
+    const five = try adoptChange(ctx, a, repo, "T-5: legacy", "t-5-legacy");
+    try std.testing.expectEqualStrings(stray, five.id);
+    try std.testing.expect(strayWork(ctx, a, repo, trunk) == null);
+    try std.testing.expect((try mergeChange(ctx, a, repo, "", five.id, five.bookmark, trunk)).merged);
+    try std.testing.expectEqualStrings("stray\n", try run(ctx, a, &.{ "git", "-C", repo, "show", "master:c.txt" }));
 
     // cl's own files stay out of changes.
     excludeClFiles(ctx, a, repo);

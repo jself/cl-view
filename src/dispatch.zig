@@ -319,9 +319,8 @@ fn startIn(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: 
             } else if (t.change.len > 0) wt.branch = t.branch;
         },
         // Never while another ticket of the project is in progress (a
-        // forced start): its files would go from under it. A ticket that ran
-        // before tickets had changes keeps working on what the checkout has.
-        .queue => if (trunk != null and !in_parent and (free or !live) and (t.change.len > 0 or t.base.len == 0) and !try projectBusy(db, a, view, t)) {
+        // forced start): its files would go from under it.
+        .queue => if (trunk != null and !in_parent and (free or !live) and !try projectBusy(db, a, view, t)) {
             if (try ticketChange(ctx, db, a, p.dir, t, trunk.?, desc)) |c| {
                 tc.change = c.change.id;
                 tc.branch = c.change.bookmark;
@@ -369,23 +368,37 @@ fn startIn(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: 
 }
 
 /// Put the project's checkout `dir` on the ticket's change: its own when it
-/// has one still open, else a new one on top of `trunk`. `switched` is true
-/// when the checkout's files changed. null (logged) when jj refused.
+/// has one still open, else a new one on top of `trunk`. A ticket that ran
+/// before tickets had changes takes the checkout's undescribed work as its
+/// change. Undescribed work the checkout leaves behind is logged and noted on
+/// the ticket. `switched` is true when the checkout's files changed. null
+/// (logged) when jj refused.
 fn ticketChange(ctx: Ctx, db: board.Db, a: std.mem.Allocator, dir: []const u8, t: board.Ticket, trunk: []const u8, desc: []const u8) !?struct { change: worktree.Change, switched: bool } {
     const before = worktree.workingCommit(ctx, a, dir) catch "";
-    const c: worktree.Change = blk: {
-        if (t.change.len > 0) switch (worktree.changeState(ctx, a, dir, t.change, trunk)) {
-            .open => {
-                _ = worktree.editChange(ctx, a, dir, t.change) catch {
-                    try board.logEvent(ctx, db, t.id, "no change", worktree.lastError());
-                    return null;
-                };
-                break :blk .{ .id = t.change, .bookmark = t.branch };
-            },
-            // Merged already (reopened after Done), or abandoned: start over.
-            .merged, .gone => {},
+    const stray = worktree.strayWork(ctx, a, dir, trunk);
+    const open = t.change.len > 0 and worktree.changeState(ctx, a, dir, t.change, trunk) == .open;
+    const bookmark = try worktree.slug(a, t.key, t.title);
+    // Ran before tickets had changes (a base and no change): it worked on
+    // whatever the checkout had, so that is its work.
+    if (stray != null and t.change.len == 0 and t.base.len > 0) {
+        const c = worktree.adoptChange(ctx, a, dir, desc, bookmark) catch {
+            try board.logEvent(ctx, db, t.id, "no change", worktree.lastError());
+            return null;
         };
-        const c = worktree.newChange(ctx, a, dir, trunk, desc, try worktree.slug(a, t.key, t.title)) catch {
+        try board.setChange(db, t.id, c.id, c.bookmark);
+        try board.logEvent(ctx, db, t.id, "adopted change", c.id);
+        return .{ .change = c, .switched = false };
+    }
+    const c: worktree.Change = blk: {
+        if (open) {
+            _ = worktree.editChange(ctx, a, dir, t.change) catch {
+                try board.logEvent(ctx, db, t.id, "no change", worktree.lastError());
+                return null;
+            };
+            break :blk .{ .id = t.change, .bookmark = t.branch };
+        }
+        // None yet, or merged already (reopened after Done), or abandoned: a new one.
+        const c = worktree.newChange(ctx, a, dir, trunk, desc, bookmark) catch {
             try board.logEvent(ctx, db, t.id, "no change", worktree.lastError());
             return null;
         };
@@ -393,6 +406,12 @@ fn ticketChange(ctx: Ctx, db: board.Db, a: std.mem.Allocator, dir: []const u8, t
         try board.setChange(db, t.id, c.id, c.bookmark);
         try board.logEvent(ctx, db, t.id, "change", c.id);
         break :blk c;
+    };
+    // jj keeps work the checkout left, but nothing points at it: say where.
+    if (stray) |id| if (!std.mem.eql(u8, id, c.id)) {
+        const short = id[0..@min(id.len, 12)];
+        try board.logEvent(ctx, db, t.id, "left undescribed work", id);
+        _ = try board.addComment(ctx, db, a, t.key, "claude", try std.fmt.allocPrint(a, "The project's checkout held uncommitted work in an undescribed change, {s}, that belongs to no ticket. It was left there for this ticket's change: `jj log -r {s}` shows it, `jj edit {s}` goes back to it.", .{ short, short, short }), false);
     };
     const switched = before.len > 0 and worktree.filesDiffer(ctx, a, dir, before);
     // Where the checkout was, in case it held work of someone's own (jj keeps it there).

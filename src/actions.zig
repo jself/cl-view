@@ -103,6 +103,9 @@ fn startFinish(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, fi
     const t = try board.getTicket(db, a, key);
     const dir = (try board.getProject(db, a, t.project)).dir;
     if (finish == .merge and t.change.len > 0) return mergeBack(ctx, db, a, t, dir);
+    if (finish == .merge and t.mode == .queue and t.branch.len == 0 and t.base.len > 0) {
+        if (try adoptStray(ctx, db, a, t, dir)) |owned| return mergeBack(ctx, db, a, owned, dir);
+    }
     if (t.branch.len == 0) return false;
     const s = liveSession(ctx, t) orelse return error.NoSession;
     const main = worktree.mainBranch(ctx, a, dir);
@@ -119,6 +122,26 @@ fn startFinish(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, fi
     try tmux.sendLine(ctx, s, text);
     _ = try board.addComment(ctx, db, a, key, "you", text, true);
     return true;
+}
+
+/// A queue ticket with no change of its own (it ran before tickets had
+/// them) whose work sits uncommitted in the project's checkout: that work
+/// becomes its change, so approving it merges the work instead of closing
+/// the ticket and leaving it behind. null when the checkout holds none.
+fn adoptStray(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, dir: []const u8) !?board.Ticket {
+    const trunk = worktree.trunkBookmark(ctx, a, dir) orelse return null;
+    _ = worktree.strayWork(ctx, a, dir, trunk) orelse return null;
+    const desc = try std.fmt.allocPrint(a, "{s}: {s}", .{ t.key, t.title });
+    const c = worktree.adoptChange(ctx, a, dir, desc, try worktree.slug(a, t.key, t.title)) catch {
+        try board.logEvent(ctx, db, t.id, "merge failed", worktree.lastError());
+        return error.MergeFailed;
+    };
+    try board.setChange(db, t.id, c.id, c.bookmark);
+    try board.logEvent(ctx, db, t.id, "adopted change", c.id);
+    var owned = t;
+    owned.change = c.id;
+    owned.branch = c.bookmark;
+    return owned;
 }
 
 /// Merge the ticket's jj change back into trunk (see `worktree.mergeChange`).
