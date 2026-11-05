@@ -36,12 +36,22 @@ const State = struct {
     terms: std.ArrayList(*Terminal) = .empty,
 };
 
-pub fn main(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void {
+const usage = "usage: cl web [--port N] [password | start | stop]";
+
+pub fn main(ctx: Ctx, cfg_in: config.Config, argv_in: []const []const u8) !void {
+    var cfg = cfg_in;
+    var argv = argv_in;
+    if (argv.len > 0 and std.mem.eql(u8, argv[0], "--port")) {
+        if (argv.len < 2) fail(usage, .{});
+        const port = std.fmt.parseInt(u16, argv[1], 10) catch fail("--port takes a port, got {s}", .{argv[1]});
+        try cfg.overridePort(ctx.perm, port);
+        argv = argv[2..];
+    }
     if (argv.len > 0) {
         if (std.mem.eql(u8, argv[0], "password")) return setPassword(ctx);
         if (std.mem.eql(u8, argv[0], "start")) return start(ctx, cfg, true);
-        if (std.mem.eql(u8, argv[0], "stop")) return stop(ctx);
-        return fail("usage: cl web [password | start | stop]", .{});
+        if (std.mem.eql(u8, argv[0], "stop")) return stop(ctx, cfg);
+        return fail(usage, .{});
     }
     return serve(ctx, cfg);
 }
@@ -66,7 +76,11 @@ fn serve(ctx: Ctx, cfg: config.Config) !void {
     }
     if (threads.items.len == 0) fail("web.listen is empty", .{});
     (try std.Thread.spawn(.{}, reapLoop, .{&state})).detach();
-    if (cfg.board.dispatch) (try std.Thread.spawn(.{}, dispatch.loop, .{ ctx, cfg, &logLine })).detach();
+    if (cfg.board.dispatch) {
+        (try std.Thread.spawn(.{}, dispatch.loop, .{ ctx, cfg, &logLine })).detach();
+    } else if (cfg.web.port) |p| {
+        logf("port {d} overrides web.listen: a second server, so the board's dispatcher stays with the main one", .{p});
+    }
     for (threads.items) |t| t.join();
 }
 
@@ -740,8 +754,17 @@ fn parseSize(text: []const u8, cols: *u16, rows: *u16) void {
 
 // ---- background server, password ----
 
+/// The tmux role of the background server: one for the main server, and one
+/// per overridden port, so `cl web start | stop` with CL_PORT leaves the main
+/// one alone.
+fn role(alloc: std.mem.Allocator, cfg: config.Config) ![]const u8 {
+    const p = cfg.web.port orelse return tmux.web_role;
+    return std.fmt.allocPrint(alloc, "{s}:{d}", .{ tmux.web_role, p });
+}
+
 /// Start the server in a hidden tmux session unless it is running. `force`
-/// ignores web.autostart (for `cl web start`).
+/// ignores web.autostart (for `cl web start`), which an overridden port
+/// turns off.
 pub fn start(ctx: Ctx, cfg: config.Config, force: bool) !void {
     if (!force and !cfg.web.autostart) return;
     if (cfg.web.password.len == 0) {
@@ -751,36 +774,45 @@ pub fn start(ctx: Ctx, cfg: config.Config, force: bool) !void {
     var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    if (try tmux.findRole(ctx, arena, tmux.web_role) != null) {
+    const r = try role(arena, cfg);
+    if (try tmux.findRole(ctx, arena, r) != null) {
         if (force) say("cl web is already running (cl web stop to stop it)", .{});
         return;
     }
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
     const exe = exe_buf[0..try std.process.executablePath(ctx.io, &exe_buf)];
-    const log = try logPath(ctx, arena);
+    const log = try logPath(ctx, arena, cfg);
     try std.Io.Dir.cwd().createDirPath(ctx.io, std.fs.path.dirname(log).?);
+    // The tmux server's environment, not ours, reaches the command, so the
+    // port goes on the command line.
+    var port_buf: [8]u8 = undefined;
+    const port = if (cfg.web.port) |p| std.fmt.bufPrint(&port_buf, "{d}", .{p}) catch unreachable else "";
     _ = try tmux.newSession(ctx, .{
-        .name = "web",
+        .name = if (cfg.web.port != null) try std.fmt.allocPrint(arena, "web-{s}", .{port}) else "web",
         .dir = ctx.home,
         .profile = "",
         .config_dir = null,
-        .role = tmux.web_role,
+        .role = r,
         // Restart after a crash, and record how each run ended.
-        .command = &.{ "sh", "-c", "while :; do \"$0\" web >>\"$1\" 2>&1; echo \"$(date '+%F %T') cl web exited with status $?; restarting in 10s\" >>\"$1\"; sleep 10; done", exe, log },
+        .command = &.{ "sh", "-c", "while :; do \"$0\" web ${2:+--port \"$2\"} >>\"$1\" 2>&1; echo \"$(date '+%F %T') cl web exited with status $?; restarting in 10s\" >>\"$1\"; sleep 10; done", exe, log, port },
     });
     if (force) say("cl web started (log: {s})", .{log});
 }
 
-fn stop(ctx: Ctx) !void {
+fn stop(ctx: Ctx, cfg: config.Config) !void {
     var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);
     defer arena_state.deinit();
-    const s = (try tmux.findRole(ctx, arena_state.allocator(), tmux.web_role)) orelse fail("cl web is not running", .{});
+    const arena = arena_state.allocator();
+    const s = (try tmux.findRole(ctx, arena, try role(arena, cfg))) orelse fail("cl web is not running", .{});
     try tmux.kill(ctx, s.tmux_name);
 }
 
-fn logPath(ctx: Ctx, alloc: std.mem.Allocator) ![]const u8 {
-    if (ctx.env.get("XDG_STATE_HOME")) |d| if (d.len > 0) return std.fmt.allocPrint(alloc, "{s}/cl/web.log", .{d});
-    return std.fmt.allocPrint(alloc, "{s}/.local/state/cl/web.log", .{ctx.home});
+/// web.log, or web-<port>.log for a server on an overridden port.
+pub fn logPath(ctx: Ctx, alloc: std.mem.Allocator, cfg: config.Config) ![]const u8 {
+    var name_buf: [32]u8 = undefined;
+    const name = if (cfg.web.port) |p| std.fmt.bufPrint(&name_buf, "web-{d}.log", .{p}) catch unreachable else "web.log";
+    if (ctx.env.get("XDG_STATE_HOME")) |d| if (d.len > 0) return std.fmt.allocPrint(alloc, "{s}/cl/{s}", .{ d, name });
+    return std.fmt.allocPrint(alloc, "{s}/.local/state/cl/{s}", .{ ctx.home, name });
 }
 
 /// Prompt for a password (twice, without echo), hash it, and store it as

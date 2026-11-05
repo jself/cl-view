@@ -79,6 +79,7 @@ cl alert <text> | --clear flag the chooser header from the operator
 cl web                    serve the chooser to a browser (foreground)
 cl web password           set the web password (stored as an argon2id hash)
 cl web start | stop       run the web server in the background / stop it
+cl web --port N ...       the same on port N, as a second server (or CL_PORT=N)
 cl ticket | t <command>   the ticket board (see Board)
 cl project <command>      projects that tickets belong to
 
@@ -195,6 +196,15 @@ web.font_size = 16              # text size of the board and terminal pages, in 
   remembers its own.
 - Attaching from the phone resizes that session to the phone's width
   (`window-size latest`); it switches back when you use it at the desk.
+- `CL_PORT=8422` (or `cl web --port 8422`) replaces the port of every
+  `web.listen` entry, so `CL_PORT=8422 zig-out/bin/cl web` serves a branch's
+  build on 127.0.0.1:8422 and tailscale:8422 next to the installed one, with
+  the same config and board. That server is a second one: it doesn't run the
+  board's dispatcher (the main server keeps starting queued tickets), cl
+  commands run with `CL_PORT` set don't autostart anything, and `cl web start`
+  / `cl web stop` with it start and stop only that port's background server
+  (logging to `web-8422.log`), never the main one. `cl window` with `CL_PORT`
+  opens and starts that port's server.
 
 ## Window
 

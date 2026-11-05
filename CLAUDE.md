@@ -16,3 +16,14 @@ The human runs the installed `~/.local/bin/cl`, and `cl web` serves the board an
 3. Restart any test launch that is running (`cl ticket launch <key> --stop`, then `cl ticket launch <key>`).
 
 Tell the human to reload the board page.
+
+## Test plans
+
+To let the human try a change to the web server or board, launch the branch's
+build as a second server next to the installed one, on its own port and the
+same config and board (it leaves the dispatcher to the main server):
+
+    ~/.local/share/zvm/0.16.0/zig build && CL_PORT=8422 zig-out/bin/cl web
+
+and give http://127.0.0.1:8422/board (or http://<machine>:8422/board over
+tailscale) as what to open. Use any free port other than web.listen's.

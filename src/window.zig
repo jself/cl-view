@@ -29,7 +29,7 @@ pub fn main(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void {
     const arena = arena_state.allocator();
 
     var ip_buf: [64]u8 = undefined;
-    const addr = pickAddr(cfg.web.listen, portOverride(ctx)) orelse fail("web.listen has no address to open", .{});
+    const addr = pickAddr(cfg.web.listen) orelse fail("web.listen has no address to open", .{});
     const host = if (std.mem.eql(u8, addr.host, "tailscale"))
         web.tailscaleIp(ctx, &ip_buf) catch fail("web.listen only has tailscale, and tailscale has no IPv4", .{})
     else
@@ -59,24 +59,17 @@ pub fn main(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void {
     try detach(ctx, &.{ "sh", "-c", script.items, "sh", url, log });
 }
 
-/// CL_PORT, when set, replaces the port of every web.listen entry (CL-18).
-fn portOverride(ctx: Ctx) ?u16 {
-    const v = ctx.env.get("CL_PORT") orelse return null;
-    if (v.len == 0) return null;
-    return std.fmt.parseInt(u16, v, 10) catch fail("CL_PORT is not a port: {s}", .{v});
-}
-
 const Addr = struct { host: []const u8, port: u16 };
 
 /// The web.listen address the window should open: the first loopback or
 /// all-interfaces entry (as 127.0.0.1), or else the first entry.
-fn pickAddr(listen: []const u8, port_override: ?u16) ?Addr {
+fn pickAddr(listen: []const u8) ?Addr {
     var first: ?Addr = null;
     var it = std.mem.splitScalar(u8, listen, ',');
     while (it.next()) |raw| {
         const text = std.mem.trim(u8, raw, " \t");
         const colon = std.mem.lastIndexOfScalar(u8, text, ':') orelse continue;
-        const port = port_override orelse (std.fmt.parseInt(u16, text[colon + 1 ..], 10) catch continue);
+        const port = std.fmt.parseInt(u16, text[colon + 1 ..], 10) catch continue;
         const host = std.mem.trim(u8, text[0..colon], "[]");
         for ([_][]const u8{ "127.0.0.1", "localhost", "0.0.0.0", "::", "::1" }) |local| {
             if (std.mem.eql(u8, host, local)) return .{ .host = if (std.mem.eql(u8, host, "::1")) "::1" else "127.0.0.1", .port = port };
@@ -98,7 +91,7 @@ fn ensureServer(ctx: Ctx, cfg: config.Config, ip: std.Io.net.IpAddress) !void {
     }
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&buf);
-    const log = statePath(ctx, fba.allocator(), "web.log") catch "the web log";
+    const log = web.logPath(ctx, fba.allocator(), cfg) catch "the web log";
     fail("cl web is not answering on {f}; see {s}", .{ ip, log });
 }
 
@@ -189,13 +182,12 @@ fn fail(comptime fmt: []const u8, args: anytype) noreturn {
 
 test pickAddr {
     const eq = std.testing.expectEqualDeep;
-    try eq(Addr{ .host = "127.0.0.1", .port = 8421 }, pickAddr("127.0.0.1:8421", null).?);
-    try eq(Addr{ .host = "127.0.0.1", .port = 8421 }, pickAddr("tailscale:8421, 127.0.0.1:8421", null).?);
-    try eq(Addr{ .host = "127.0.0.1", .port = 9000 }, pickAddr("0.0.0.0:9000", null).?);
-    try eq(Addr{ .host = "tailscale", .port = 8421 }, pickAddr("tailscale:8421", null).?);
-    try eq(Addr{ .host = "127.0.0.1", .port = 8422 }, pickAddr("tailscale:8421,127.0.0.1:8421", 8422).?);
-    try eq(Addr{ .host = "::1", .port = 8421 }, pickAddr("[::1]:8421", null).?);
-    try std.testing.expect(pickAddr("", null) == null);
+    try eq(Addr{ .host = "127.0.0.1", .port = 8421 }, pickAddr("127.0.0.1:8421").?);
+    try eq(Addr{ .host = "127.0.0.1", .port = 8421 }, pickAddr("tailscale:8421, 127.0.0.1:8421").?);
+    try eq(Addr{ .host = "127.0.0.1", .port = 9000 }, pickAddr("0.0.0.0:9000").?);
+    try eq(Addr{ .host = "tailscale", .port = 8421 }, pickAddr("tailscale:8421").?);
+    try eq(Addr{ .host = "::1", .port = 8421 }, pickAddr("[::1]:8421").?);
+    try std.testing.expect(pickAddr("") == null);
 }
 
 test desktopEntry {

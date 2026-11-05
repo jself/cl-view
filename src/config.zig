@@ -21,6 +21,10 @@
 //! When CLAUDE_CONFIG_DIR is set in the environment it overrides `default`:
 //! the profile with that directory is used, or one named after the directory
 //! is added if none matches.
+//!
+//! When CL_PORT is set (or `cl web --port` is given) it replaces the port of
+//! every web.listen entry, for running a second `cl web` next to the main one:
+//! see `overridePort`.
 const std = @import("std");
 const Ctx = @import("ctx.zig");
 
@@ -46,6 +50,17 @@ pub const Config = struct {
     pub fn defaultProfile(self: Config) Profile {
         return self.find(self.default) orelse self.profiles[0];
     }
+
+    /// Serve on `port` instead of the configured one, on every web.listen
+    /// host, as a second server next to the main one (trying a branch's
+    /// build, say). That one keeps the board's dispatcher and web.autostart:
+    /// two dispatchers on one board.db would start each ticket twice.
+    pub fn overridePort(self: *Config, alloc: std.mem.Allocator, port: u16) !void {
+        self.web.listen = try withPort(alloc, self.web.listen, port);
+        self.web.port = port;
+        self.web.autostart = false;
+        self.board.dispatch = false;
+    }
 };
 
 pub const Web = struct {
@@ -58,6 +73,9 @@ pub const Web = struct {
     /// Base text size of the board and the terminal page, in px; the board's
     /// whole layout scales with it. 14 was the size before this setting.
     font_size: u8 = 16,
+    /// Set by `overridePort` (CL_PORT, `cl web --port`): this is a second
+    /// server next to the one on the configured port.
+    port: ?u16 = null,
 };
 
 pub const Board = struct {
@@ -73,6 +91,18 @@ pub const Board = struct {
 };
 
 pub fn load(ctx: Ctx) !Config {
+    var cfg = try loadFile(ctx);
+    if (ctx.env.get("CL_PORT")) |v| if (v.len > 0) {
+        const port = std.fmt.parseInt(u16, v, 10) catch {
+            std.debug.print("cl: CL_PORT is not a port: {s}\n", .{v});
+            std.process.exit(1);
+        };
+        try cfg.overridePort(ctx.perm, port);
+    };
+    return cfg;
+}
+
+fn loadFile(ctx: Ctx) !Config {
     const path = try std.fmt.allocPrint(ctx.perm, "{s}/.config/cl/config", .{ctx.home});
     const data = std.Io.Dir.cwd().readFileAlloc(ctx.io, path, ctx.perm, .limited(64 * 1024)) catch |err| switch (err) {
         error.FileNotFound => return fallback(ctx),
@@ -148,6 +178,50 @@ fn fromEnv(ctx: Ctx, profiles: *std.ArrayList(Profile), env_dir: []const u8) ![]
     const name = std.mem.trimStart(u8, base, ".");
     try profiles.append(ctx.perm, .{ .name = if (name.len > 0) name else "env", .config_dir = want });
     return profiles.items[profiles.items.len - 1].name;
+}
+
+/// `listen` with each host:port entry's port replaced by `port`. Entries
+/// without a port are kept for the server to reject.
+fn withPort(alloc: std.mem.Allocator, listen: []const u8, port: u16) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var it = std.mem.splitScalar(u8, listen, ',');
+    while (it.next()) |raw| {
+        const text = std.mem.trim(u8, raw, " \t");
+        if (text.len == 0) continue;
+        if (out.items.len > 0) try out.appendSlice(alloc, ", ");
+        const colon = std.mem.lastIndexOfScalar(u8, text, ':') orelse {
+            try out.appendSlice(alloc, text);
+            continue;
+        };
+        try out.print(alloc, "{s}:{d}", .{ text[0..colon], port });
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+test withPort {
+    const a = std.testing.allocator;
+    const cases = [_][2][]const u8{
+        .{ "127.0.0.1:8421", "127.0.0.1:8422" },
+        .{ "127.0.0.1:8421, tailscale:8421", "127.0.0.1:8422, tailscale:8422" },
+        .{ "[::1]:8421,0.0.0.0:9000", "[::1]:8422, 0.0.0.0:8422" },
+        .{ "nonsense", "nonsense" },
+    };
+    for (cases) |c| {
+        const got = try withPort(a, c[0], 8422);
+        defer a.free(got);
+        try std.testing.expectEqualStrings(c[1], got);
+    }
+}
+
+test "overridePort makes a second server" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: Config = .{ .profiles = &.{}, .default = "", .operator = "", .web = .{ .autostart = true } };
+    try cfg.overridePort(arena.allocator(), 8422);
+    try std.testing.expectEqualStrings("127.0.0.1:8422", cfg.web.listen);
+    try std.testing.expectEqual(@as(?u16, 8422), cfg.web.port);
+    try std.testing.expect(!cfg.web.autostart);
+    try std.testing.expect(!cfg.board.dispatch);
 }
 
 fn fallback(ctx: Ctx) !Config {
