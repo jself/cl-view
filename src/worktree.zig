@@ -325,7 +325,8 @@ pub fn mergeChange(ctx: Ctx, a: std.mem.Allocator, dir: []const u8, work_dir: []
     const tip = if (heads.len == 1) heads[0] else change;
     const range = try std.fmt.allocPrint(a, "{s}..{s}", .{ t, tip });
     if ((try changes(ctx, a, dir, try std.fmt.allocPrint(a, "({s}) & conflicts()", .{range}))).len > 0) {
-        const files = run(ctx, a, &.{ "jj", "-R", dir, "resolve", "--list", "-r", tip }) catch "";
+        // Run there, so the paths are the repo's own.
+        const files = runIn(ctx, a, dir, &.{ "jj", "-R", dir, "resolve", "--list", "-r", tip }) catch "";
         return .{ .merged = false, .conflicts = std.mem.trim(u8, files, " \n") };
     }
     var res: Merge = .{ .merged = true };
@@ -379,7 +380,12 @@ pub fn lastError() []const u8 {
 
 /// Run a command; stdout on success. On failure stderr goes to last_error.
 fn run(ctx: Ctx, a: std.mem.Allocator, argv: []const []const u8) Error![]const u8 {
-    const res = std.process.run(a, ctx.io, .{ .argv = argv }) catch {
+    return runIn(ctx, a, null, argv);
+}
+
+/// `run` from directory `cwd` (jj prints paths relative to where it runs).
+fn runIn(ctx: Ctx, a: std.mem.Allocator, cwd: ?[]const u8, argv: []const []const u8) Error![]const u8 {
+    const res = std.process.run(a, ctx.io, .{ .argv = argv, .cwd = if (cwd) |d| .{ .path = d } else .inherit }) catch {
         setError(argv[0]);
         return error.CommandFailed;
     };
@@ -474,7 +480,7 @@ test "a change per ticket: switch, merge back, conflicts" {
     const master_before = try run(ctx, a, &.{ "git", "-C", repo, "rev-parse", "master" });
     const m1 = try mergeChange(ctx, a, repo, "", one.id, one.bookmark, trunk);
     try std.testing.expect(!m1.merged);
-    try std.testing.expect(std.mem.indexOf(u8, m1.conflicts, "a.txt") != null);
+    try std.testing.expect(std.mem.startsWith(u8, m1.conflicts, "a.txt"));
     try std.testing.expectEqualStrings(master_before, try run(ctx, a, &.{ "git", "-C", repo, "rev-parse", "master" }));
 
     // Settled in its change, it merges.
