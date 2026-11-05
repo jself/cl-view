@@ -7,7 +7,7 @@
 //!   GET  /api/ticket/<key>              one ticket in full (+ session tail, review, test plan)
 //!   POST /api/ticket                    new ticket
 //!   POST /api/ticket/<key>/<action>     edit move rank comment flag unflag done approve start
-//!                                       answer key rm cleanup gutter send-review launch
+//!                                       answer key rm cleanup gutter gutter-stop launch
 //!                                       launch-stop test-results
 //!   POST /api/project                   add a project
 //!   POST /api/project/<name>/<action>   set rm
@@ -86,13 +86,12 @@ pub fn handle(ctx: Ctx, cfg: config.Config, req: *std.http.Server.Request, path:
             error.NoSession => .{ .conflict, "the ticket has no live session" },
             error.NothingAsked => .{ .conflict, "nothing is waiting for an answer" },
             error.BadAnswer => .{ .bad_request, "one answer per question: an option number or your own words" },
+            error.GutterFailed => .{ .internal_server_error, "gutter didn't start (is it installed?)" },
             error.NotDelivered => .{ .conflict, "Claude didn't take the answer; it's still waiting. Check the session" },
             error.AlreadyStarted => .{ .conflict, "it already has a session" },
             error.TargetBusy => .{ .conflict, "its session is busy or has another ticket in progress; it waits in Queued and starts there when the session is free" },
             error.WorktreeFailed => .{ .internal_server_error, worktree.lastError() },
             error.SessionFailed => .{ .internal_server_error, "the session didn't start" },
-            error.GutterFailed => .{ .internal_server_error, "gutter didn't start (is it installed?)" },
-            error.NoReview => .{ .conflict, "submit the review in gutter first" },
             error.OpenSubtickets => .{ .conflict, "it has sub-tickets that aren't done yet; finish them or spin them off" },
             error.NoTestPlan => .{ .not_found, "no test plan (.claude/test-plan.md)" },
             error.NoLaunch => .{ .not_found, "the test plan has no launch command" },
@@ -285,9 +284,6 @@ fn ticketAction(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator
         return ok(req, a, .{ .port = port });
     } else if (eql(u8, action, "gutter-stop")) {
         try review.stopGutter(ctx, a, key);
-    } else if (eql(u8, action, "send-review")) {
-        const r = try actions.sendReview(ctx, db, a, key);
-        return ok(req, a, r);
     } else if (eql(u8, action, "launch")) {
         try review.launch(ctx, db, a, try board.getTicket(db, a, key));
     } else if (eql(u8, action, "launch-stop")) {
@@ -356,6 +352,9 @@ fn getTicket(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, r
         if (raw.len > 0) ctx.gpa.free(raw);
     }
     const dir = review.ticketDir(db, a, t) catch "";
+    // gutter may have been opened elsewhere (cl t gutter): relay it too.
+    const gutter_port = try review.gutterPort(ctx, a, t.key);
+    if (gutter_port) |p| web.relayGutter(ctx, cfg, t.key, p);
     var subs: std.ArrayList(TicketRow) = .empty;
     for (try board.listTickets(db, a, .{ .parent = t.key })) |c| try subs.append(a, .{ .ticket = c, .status = ss.map.get(c.tmux) orelse "" });
     try ok(req, a, .{
@@ -367,10 +366,9 @@ fn getTicket(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, r
         .tail = tail,
         .dir = dir,
         .guide = dir.len > 0 and review.hasGuide(ctx, a, dir),
-        .review = dir.len > 0 and review.hasReview(ctx, a, dir),
         .test_plan = if (dir.len > 0) review.readTestPlan(ctx, a, dir) else null,
         .launch = try review.launchState(ctx, a, t.key),
-        .gutter_port = try review.gutterPort(ctx, a, t.key),
+        .gutter_port = gutter_port,
         .main_branch = if (t.branch.len > 0 or t.change.len > 0) worktree.mainBranch(ctx, a, (try board.getProject(db, a, t.project)).dir) else "",
     });
 }

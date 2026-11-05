@@ -1,6 +1,7 @@
-//! Reviewing and trying a ticket: gutter on its changes (with the review
-//! guide Claude wrote), and the test plan Claude wrote (.claude/test-plan.md):
-//! setup steps, one Launch command run in a hidden tmux session, and checks.
+//! Reviewing and trying a ticket: gutter's window on its changes (with the
+//! review guide Claude wrote), whose submitted review goes to the session, and
+//! the test plan Claude wrote (.claude/test-plan.md): setup steps, one
+//! Launch command run in a hidden tmux session, and checks.
 //!
 //! gutter and launches run in tmux sessions named clg_<key> and clrun_<key>,
 //! outside cl's `cl_` names so the chooser doesn't list them.
@@ -37,11 +38,6 @@ pub fn hasGuide(ctx: Ctx, a: std.mem.Allocator, dir: []const u8) bool {
     return exists(ctx, guidePath(a, dir) catch return false);
 }
 
-/// A review you submitted in gutter, waiting to go to Claude.
-pub fn hasReview(ctx: Ctx, a: std.mem.Allocator, dir: []const u8) bool {
-    return exists(ctx, reviewPath(a, dir) catch return false);
-}
-
 fn sessionName(a: std.mem.Allocator, prefix: []const u8, key: []const u8) ![]const u8 {
     const lower = try std.ascii.allocLowerString(a, key);
     return std.fmt.allocPrint(a, "{s}{s}", .{ prefix, lower });
@@ -52,10 +48,18 @@ fn sessionName(a: std.mem.Allocator, prefix: []const u8, key: []const u8) ![]con
 /// The port of the ticket's running gutter, or null.
 pub fn gutterPort(ctx: Ctx, a: std.mem.Allocator, key: []const u8) !?u16 {
     const name = try sessionName(a, "clg_", key);
-    if (!tmux.hasSession(ctx, name)) return null;
+    if (!gutterRunning(ctx, name)) return null;
     const pane = tmux.capturePlain(ctx, name) catch return null;
     defer ctx.gpa.free(pane);
     return parsePort(pane);
+}
+
+/// Whether gutter still runs in `name` (its pane stays after it exits).
+fn gutterRunning(ctx: Ctx, name: []const u8) bool {
+    if (!tmux.hasSession(ctx, name)) return false;
+    const dead = tmux.run(ctx, &.{ "display", "-p", "-t", name, "#{pane_dead}" }) catch return false;
+    defer ctx.gpa.free(dead);
+    return !std.mem.eql(u8, dead, "1");
 }
 
 fn parsePort(text: []const u8) ?u16 {
@@ -73,18 +77,29 @@ test parsePort {
 
 pub const GutterError = error{GutterFailed};
 
-/// Start gutter on the ticket's changes (or reuse the running one) and return
-/// its port on 127.0.0.1. Its review goes to <dir>/.claude/review.md.
+/// Open gutter's window on the ticket's changes in clg_<key> (or reuse the
+/// open one) and return its port on 127.0.0.1. gutter waits for Submit; the
+/// review then lands in <dir>/.claude/review.md and the pane runs `cl ticket
+/// gutter <key> --submitted`, which sends it to the session. Closing gutter
+/// without submitting writes nothing.
 pub fn startGutter(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket) !u16 {
     if (try gutterPort(ctx, a, t.key)) |p| return p;
     const name = try sessionName(a, "clg_", t.key);
+    // A gutter that already exited: start a fresh one.
+    if (tmux.hasSession(ctx, name)) tmux.runQuiet(ctx, &.{ "kill-session", "-t", name }) catch {};
     const dir = try ticketDir(db, a, t);
     std.Io.Dir.cwd().createDirPath(ctx.io, try std.fmt.allocPrint(a, "{s}/.claude", .{dir})) catch {};
-    // A previous review was sent already; start a fresh one.
     std.Io.Dir.cwd().deleteFile(ctx.io, try reviewPath(a, dir)) catch {};
     const rev = try worktree.reviewRev(ctx, a, dir, t.base, t.change);
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const exe = exe_buf[0..try std.process.executablePath(ctx.io, &exe_buf)];
+    const script =
+        \\cl=$1 key=$2; shift 2
+        \\if gutter -sync -window "$@" > .claude/review.md; then exec "$cl" ticket gutter "$key" --submitted; fi
+        \\rm -f .claude/review.md; exit 1
+    ;
     var argv: std.ArrayList([]const u8) = .empty;
-    try argv.appendSlice(a, &.{ "new-session", "-d", "-s", name, "-c", dir, "--", "gutter", "-open=false", "-port", "0", "-dir", ".claude" });
+    try argv.appendSlice(a, &.{ "new-session", "-d", "-s", name, "-c", dir, "--", "sh", "-c", script, "sh", exe, t.key });
     if (rev.len > 0) try argv.appendSlice(a, &.{ "-r", rev });
     tmux.runQuiet(ctx, argv.items) catch return error.GutterFailed;
     tmux.runQuiet(ctx, &.{ "set-option", "-t", name, "remain-on-exit", "on" }) catch {};
@@ -93,6 +108,7 @@ pub fn startGutter(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket
         ctx.sleepMs(100);
         if (try gutterPort(ctx, a, t.key)) |p| return p;
     }
+    stopGutter(ctx, a, t.key) catch {};
     return error.GutterFailed;
 }
 

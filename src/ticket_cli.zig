@@ -46,8 +46,8 @@ pub const ticket_usage =
     \\                              your own words) or permission prompt (a number) it waits on
     \\  key <key> esc|interrupt|enter|up|down
     \\                              press a key in its session
-    \\  gutter <key> [--stop]       review its changes in gutter (with Claude's review guide)
-    \\  send-review <key>           send the review you submitted in gutter to Claude
+    \\  gutter <key> [--stop]       review its changes in gutter's window (with Claude's review
+    \\                              guide); the review you submit there goes to its session
     \\  testplan <key> [--json]     the test plan Claude wrote: setup, launch, checks
     \\  launch <key> [--stop]       run the test plan's launch command (tmux session clrun_<key>)
     \\  test <key>                  walk through the test plan here; failures go back to Claude
@@ -456,22 +456,20 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         return;
     }
     if (std.mem.eql(u8, cmd, "gutter")) {
-        args.only(&.{"--stop"}, ticket_usage);
-        if (pos.len != 1) fail("usage: cl ticket gutter <key> [--stop]", .{});
-        const t = board.getTicket(db, a, pos[0]) catch |e| boardFail(db, e, "ticket");
+        args.only(&.{ "--stop", "--submitted" }, ticket_usage);
+        const key = keyArg(pos, 0, env_key, "cl ticket gutter <key> [--stop]");
+        const t = board.getTicket(db, a, key) catch |e| boardFail(db, e, "ticket");
         if (args.has("--stop")) return review.stopGutter(ctx, a, t.key);
+        if (args.has("--submitted")) {
+            const r = actions.gutterSubmitted(ctx, db, a, t.key) catch |e| switch (e) {
+                error.NoReview => fail("no review from gutter for {s}", .{t.key}),
+                else => boardFail(db, e, "ticket"),
+            };
+            if (r.unsent) fail("{s} has no session to send the review to; it is kept as a comment", .{t.key});
+            return out(if (r.sent) "Sent the review to the session.\n" else "No comments; nothing sent.\n");
+        }
         const port = review.startGutter(ctx, db, a, t) catch fail("gutter didn't start (is it installed?)", .{});
-        return out(try std.fmt.allocPrint(a, "http://127.0.0.1:{d}\n", .{port}));
-    }
-    if (std.mem.eql(u8, cmd, "send-review")) {
-        args.only(&.{}, ticket_usage);
-        const key = keyArg(pos, 0, env_key, "cl ticket send-review <key>");
-        const r = actions.sendReview(ctx, db, a, key) catch |e| switch (e) {
-            error.NoReview => fail("no review yet: submit it in gutter first (cl t gutter {s})", .{key}),
-            else => boardFail(db, e, "ticket"),
-        };
-        if (r.unsent) fail("the ticket has no session to send it to", .{});
-        return;
+        return out(try std.fmt.allocPrint(a, "gutter's window is open (http://127.0.0.1:{d}); the review you submit goes to the session\n", .{port}));
     }
     if (std.mem.eql(u8, cmd, "testplan")) {
         args.only(&.{"--json"}, ticket_usage);

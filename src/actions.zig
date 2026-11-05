@@ -18,7 +18,7 @@ pub const Error = error{
     BadAnswer,
     /// The answer was typed but the session still waits on the same thing.
     NotDelivered,
-    /// No review submitted in gutter yet.
+    /// No review submitted in gutter.
     NoReview,
     /// It has sub-tickets that aren't Done; spin them off to finish it.
     OpenSubtickets,
@@ -320,13 +320,28 @@ pub fn answer(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, 
     _ = try board.addComment(ctx, db, a, key, "you", text.items, true);
 }
 
-/// Send the review you submitted in gutter to Claude: another round.
-pub fn sendReview(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8) !CommentResult {
+/// The review you submitted in gutter (`cl ticket gutter <key> --submitted`,
+/// run by gutter's pane): kept on the ticket and pasted into its session,
+/// which starts another round. One with no comments changes nothing.
+pub fn gutterSubmitted(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8) !CommentResult {
     const t = try board.getTicket(db, a, key);
-    const dir = try review.ticketDir(db, a, t);
-    if (!review.hasReview(ctx, a, dir)) return error.NoReview;
-    const r = try comment(ctx, db, a, key, "you", "I reviewed this in gutter. My comments are in .claude/review.md; please address them, then finish the same way as before.", true);
-    review.stopGutter(ctx, a, key) catch {};
+    const path = try review.reviewPath(a, try review.ticketDir(db, a, t));
+    const text = std.Io.Dir.cwd().readFileAlloc(ctx.io, path, a, .limited(4 << 20)) catch return error.NoReview;
+    if (std.mem.indexOf(u8, text, "_(no feedback)_") != null) {
+        try board.logEvent(ctx, db, t.id, "gutter", "submitted with no comments");
+        return .{};
+    }
+    var r: CommentResult = .{};
+    // The file now holds what the session gets: the review, and what to do with it.
+    const msg = try std.fmt.allocPrint(a, "I reviewed your changes in gutter. Address my review, then finish the same way as before.\n\n{s}", .{std.mem.trimEnd(u8, text, "\n")});
+    if (liveSession(ctx, t)) |s| {
+        try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = path, .data = msg });
+        try tmux.pasteFile(ctx, s, path);
+        r.sent = true;
+    } else r.unsent = true;
+    const br = try board.addComment(ctx, db, a, key, "you", text, r.sent);
+    r.sent_back = br.sent_back;
+    r.round = (try board.getTicket(db, a, key)).round;
     return r;
 }
 

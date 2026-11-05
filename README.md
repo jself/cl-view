@@ -317,18 +317,21 @@ Answers are keypresses in the session, the same as typing them yourself.
 ### Review and testing
 
 ```
-cl t gutter QA-1 [--stop]          gutter on the ticket's changes, with Claude's review guide
-cl t send-review QA-1              send the review you submitted in gutter back to Claude
+cl t gutter QA-1 [--stop]          review the ticket's changes in gutter's window; Submit sends it to Claude
 cl t testplan QA-1                 Claude's test plan: setup steps, launch command, checks
 cl t launch QA-1 [--stop]          run the launch command (tmux session clrun_qa-1)
 cl t test QA-1                     walk through the plan here; failures go back to Claude
 cl t approve QA-1                  review -> testing -> done
 ```
 
-gutter diffs against the revision the ticket started from. It only listens on
-127.0.0.1, so when the board opens it, `cl web` also opens the same port on
-its other `web.listen` addresses (tailscale) and forwards it, while that
-ticket's gutter runs. Test results that all pass move the ticket to done; a
+`cl t gutter` (or the board's Open in gutter) opens gutter's window
+(`gutter -sync -window`, in tmux session clg_qa-1) in the ticket's worktree,
+diffing against the revision the ticket started from. When you click Submit,
+cl pastes the review into the ticket's session, keeps it on the ticket as your
+comment, and the ticket starts another round. Closing gutter without
+submitting (or `--stop`) leaves the ticket as it was. gutter only listens on
+127.0.0.1, so while it runs the board links to it and `cl web` also opens the
+same port on its other `web.listen` addresses (tailscale) and forwards it. Test results that all pass move the ticket to done; a
 failure sends them to Claude for another round.
 
 ### Finishing

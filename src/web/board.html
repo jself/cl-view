@@ -426,7 +426,7 @@ function renderDetailInner() {
   const acts = [];
   if (liveSession) acts.push(`<a class="btn primary" href="/?attach=${encodeURIComponent(t.tmux)}">Open shell</a>`);
   if (!liveSession && t.stage !== "done") acts.push(`<button type="button" class="btn primary" data-act="start">${t.tmux ? "Start again" : "Start now"}</button>`);
-  if (d.guide || t.worktree) acts.push(`<button type="button" class="btn" data-act="gutter">Open in gutter</button>`);
+  if (liveSession && (d.guide || t.worktree)) acts.push(`<button type="button" class="btn" data-act="gutter">Open in gutter</button>`);
   if (approve) acts.push(`<button type="button" class="btn" data-act="approve">${approve}</button>`);
   if (liveSession) acts.push(`<button type="button" class="btn" data-key="esc">Esc</button><button type="button" class="btn" data-key="interrupt">Interrupt</button>`);
   if (t.stage === "backlog") acts.push(`<button type="button" class="btn" data-move="queued">Queue it</button>`);
@@ -475,16 +475,17 @@ function needsTab(d) {
       <div class="opts">${(det.options || []).map((o) => `<button type="button" class="opt" data-perm="${o.n}"><span>${o.n}. ${esc(o.label)}</span></button>`).join("")}</div>
       ${det.options?.length ? "" : `<p class="muted">The options aren't on screen; answer it in the shell.</p>`}</div><div class="actions">${shell}</div>`;
 }
+function sessionLive(d) { return d.ticket.tmux && d.status && d.status !== "gone"; }
 function reviewTab(d) {
   const t = d.ticket;
   return `<div style="display:flex;flex-direction:column;gap:10px">
     ${t.summary ? `<div class="comment claude"><div class="who">Claude's summary</div><div class="body">${esc(t.summary)}</div></div>` : ""}
     <p class="muted" style="margin:0">${d.guide ? "Claude wrote a review guide for gutter." : "No review guide yet; gutter still shows the diff."}
-      ${d.gutter_port ? ` gutter is running on port ${d.gutter_port}.` : ""}</p>
-    <div class="actions"><button type="button" class="btn primary" data-act="gutter">Open in gutter</button>
-      ${d.review ? `<button type="button" class="btn" data-act="send-review">Send my gutter review to Claude</button>` : ""}
-      ${t.stage === "review" ? `<button type="button" class="btn" data-act="approve">Approve, to testing</button>` : ""}
-      ${d.gutter_port ? `<button type="button" class="btn" data-act="gutter-stop">Stop gutter</button>` : ""}</div>
+      ${d.gutter_port ? " gutter's window is open: submit your review there and it goes straight to Claude." : sessionLive(d) ? " gutter opens in a window; the review you submit there goes straight to Claude." : " Start the session again to review in gutter."}</p>
+    <div class="actions">${d.gutter_port ? `<a class="btn primary" target="_blank" rel="noopener" href="http://${location.hostname}:${d.gutter_port}/">Open gutter in the browser</a>
+        <button type="button" class="btn" data-act="gutter-stop">Close gutter</button>`
+      : sessionLive(d) ? `<button type="button" class="btn primary" data-act="gutter">Open in gutter</button>` : ""}
+      ${t.stage === "review" ? `<button type="button" class="btn" data-act="approve">Approve, to testing</button>` : ""}</div>
     <label class="muted" style="display:flex;flex-direction:column;gap:5px;font-size:12.5px">Or say what to change (sends it back for another round)
       <textarea id="backText" rows="3"></textarea></label>
     <div class="actions"><button type="button" class="btn" id="sendBack">Send back to Claude</button></div></div>`;
@@ -761,9 +762,7 @@ document.addEventListener("click", async (e) => {
   if (ds.perm) return sendAnswer(key, [ds.perm], el);
   if (ds.check !== undefined) { const c = state.checks["c" + ds.check] || {}; c.pass = ds.pass === "1"; state.checks["c" + ds.check] = c; renderDetail(); return; }
   if (ds.act === "gutter") {
-    const w = window.open("", "_blank");
-    try { const r = await act(key, "gutter"); const url = `http://${location.hostname}:${r.port}/`; if (w) w.location = url; else location.href = url; }
-    catch { if (w) w.close(); }
+    try { const r = await act(key, "gutter"); toast("gutter's window is open"); } catch {}
     return;
   }
   if (ds.act === "start") return act(key, "start", {}, "Started");
