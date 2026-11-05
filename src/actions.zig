@@ -482,13 +482,15 @@ pub fn answer(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, 
 
 /// The review you submitted in gutter (`cl ticket gutter <key> --submitted`,
 /// run by gutter's pane): kept on the ticket and pasted into its session,
-/// which starts another round. One with no comments changes nothing.
+/// which starts another round. One with no comments or note (submitted
+/// empty, or the window closed) sends nothing and leaves the ticket alone.
 pub fn gutterSubmitted(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8) !CommentResult {
     const t = try board.getTicket(db, a, key);
     const path = try review.reviewPath(a, try review.ticketDir(db, a, t));
     const text = std.Io.Dir.cwd().readFileAlloc(ctx.io, path, a, .limited(4 << 20)) catch return error.NoReview;
-    if (std.mem.indexOf(u8, text, "_(no feedback)_") != null) {
-        try board.logEvent(ctx, db, t.id, "gutter", "submitted with no comments");
+    if (!review.reviewHasFeedback(text)) {
+        std.Io.Dir.cwd().deleteFile(ctx.io, path) catch {};
+        try board.logEvent(ctx, db, t.id, "gutter", "closed with no comments; nothing sent");
         return .{};
     }
     var r: CommentResult = .{};
@@ -521,4 +523,36 @@ pub fn testResults(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8
     }
     review.stopLaunch(ctx, a, key) catch {};
     return res.passed;
+}
+
+test "gutterSubmitted: an empty review sends nothing and leaves the ticket alone" {
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp" };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realPathFileAlloc(ctx.io, ".", a);
+    try tmp.dir.createDirPath(ctx.io, ".claude");
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "qa", .dir = dir });
+    const key = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Fix it" });
+    try board.done(ctx, db, a, key, "fixed");
+    const before = try board.getTicket(db, a, key);
+    const count = "SELECT COUNT(*) FROM comments WHERE ticket = ?1";
+    const comments = try db.int(count, .{before.id});
+
+    // Window closed (gutter prints nothing), then Submit with nothing in it.
+    for ([_][]const u8{ "", "# Review of `@` (jj)\n\n_(no feedback)_\n" }) |md| {
+        try tmp.dir.writeFile(ctx.io, .{ .sub_path = ".claude/review.md", .data = md });
+        try std.testing.expectEqual(CommentResult{}, try gutterSubmitted(ctx, db, a, key));
+        try std.testing.expectError(error.FileNotFound, tmp.dir.access(ctx.io, ".claude/review.md", .{}));
+    }
+    const after = try board.getTicket(db, a, key);
+    try std.testing.expectEqual(before.stage, after.stage);
+    try std.testing.expectEqual(before.round, after.round);
+    try std.testing.expectEqual(before.flags.len, after.flags.len);
+    try std.testing.expectEqual(comments, try db.int(count, .{before.id}));
 }

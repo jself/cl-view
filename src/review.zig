@@ -117,6 +117,27 @@ pub fn stopGutter(ctx: Ctx, a: std.mem.Allocator, key: []const u8) !void {
     if (tmux.hasSession(ctx, name)) try tmux.runQuiet(ctx, &.{ "kill-session", "-t", name });
 }
 
+/// Whether gutter's sync output holds anything for Claude: an overall note
+/// or an inline comment. Closing the window prints nothing and still exits 0;
+/// Submit with nothing prints the title and `_(no feedback)_`, or just the
+/// title when the note is only whitespace.
+pub fn reviewHasFeedback(md: []const u8) bool {
+    var lines = std.mem.splitScalar(u8, md, '\n');
+    while (lines.next()) |line| {
+        const l = std.mem.trimEnd(u8, line, " \r");
+        if (std.mem.eql(u8, l, "## General feedback") or std.mem.eql(u8, l, "## Inline comments")) return true;
+    }
+    return false;
+}
+
+test reviewHasFeedback {
+    try std.testing.expect(!reviewHasFeedback(""));
+    try std.testing.expect(!reviewHasFeedback("# Review of `@` (jj)\n\n_(no feedback)_\n"));
+    try std.testing.expect(!reviewHasFeedback("# Review of `@` (jj)\n\n"));
+    try std.testing.expect(reviewHasFeedback("# Review of `@` (jj)\n\n## General feedback\n\nLooks good.\n\n"));
+    try std.testing.expect(reviewHasFeedback("# Review of `@` (jj)\n\n## Inline comments\n\n### src/a.zig:3\n\nWhy?\n\n"));
+}
+
 // ---- test plans ----
 
 pub const TestPlan = struct {
