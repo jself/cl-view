@@ -213,6 +213,50 @@ pub fn forget(ctx: Ctx, a: std.mem.Allocator, repo: []const u8, path: []const u8
     std.Io.Dir.cwd().deleteTree(ctx.io, path) catch return error.CommandFailed;
 }
 
+// ---- planning workspaces ----
+//
+// A planning session reads the code but writes none, so it gets a checkout
+// of its own on trunk: not the project's checkout, which may hold another
+// ticket's unmerged work. It goes when planning ends.
+
+/// Where the ticket's planning workspace goes: <worktrees>/<project>/<key>-plan.
+pub fn planPath(ctx: Ctx, a: std.mem.Allocator, cfg: config.Config, project: []const u8, key: []const u8) ![]const u8 {
+    const base = try root(ctx, a, cfg);
+    return std.fmt.allocPrint(a, "{s}/{s}/{s}-plan", .{ base, project, try std.ascii.allocLowerString(a, key) });
+}
+
+/// Make the planning workspace at `path` (kept if it is there already): jj
+/// on `trunk` (trunk() when null or not a local bookmark), git detached at the repo's HEAD. The
+/// project's local Claude settings come along, so its allowed commands
+/// don't ask again.
+pub fn createPlan(ctx: Ctx, a: std.mem.Allocator, repo: []const u8, path: []const u8, trunk: ?[]const u8) Error!void {
+    if (std.Io.Dir.cwd().access(ctx.io, path, .{})) |_| return else |_| {}
+    const vcs = try detect(ctx, a, repo);
+    std.Io.Dir.cwd().createDirPath(ctx.io, std.fs.path.dirname(path) orelse ".") catch return error.CommandFailed;
+    switch (vcs) {
+        .jj => _ = try run(ctx, a, &.{ "jj", "-R", repo, "workspace", "add", "--name", std.fs.path.basename(path), "-r", if (trunk) |t| try std.fmt.allocPrint(a, "coalesce(present({s}), trunk())", .{try sym(a, t)}) else "trunk()", path }),
+        .git => _ = try run(ctx, a, &.{ "git", "-C", repo, "worktree", "add", "--detach", path, "HEAD" }),
+    }
+    const settings = try std.fmt.allocPrint(a, "{s}/.claude/settings.local.json", .{repo});
+    if (std.Io.Dir.cwd().access(ctx.io, settings, .{})) |_| {
+        const dst = try std.fmt.allocPrint(a, "{s}/.claude", .{path});
+        std.Io.Dir.cwd().createDirPath(ctx.io, dst) catch return;
+        _ = run(ctx, a, &.{ "cp", "-n", settings, dst }) catch {};
+    } else |_| {}
+}
+
+/// Remove the planning workspace at `path`, if there is one. jj drops its
+/// working copy with it when nothing was written there.
+pub fn removePlan(ctx: Ctx, a: std.mem.Allocator, repo: []const u8, path: []const u8) void {
+    std.Io.Dir.cwd().access(ctx.io, path, .{}) catch return;
+    switch (detect(ctx, a, repo) catch .jj) {
+        .jj => _ = run(ctx, a, &.{ "jj", "-R", repo, "workspace", "forget", std.fs.path.basename(path) }) catch {},
+        .git => _ = run(ctx, a, &.{ "git", "-C", repo, "worktree", "remove", "--force", path }) catch {},
+    }
+    std.Io.Dir.cwd().deleteTree(ctx.io, path) catch {};
+    if ((detect(ctx, a, repo) catch .jj) == .git) _ = run(ctx, a, &.{ "git", "-C", repo, "worktree", "prune" }) catch {};
+}
+
 /// Move cl's ticket files (review guide, review, test plan in .claude/) from
 /// one checkout to another, where it has none of its own yet.
 pub fn carryClFiles(ctx: Ctx, a: std.mem.Allocator, from: []const u8, to: []const u8) void {

@@ -72,6 +72,9 @@ pub const Project = struct {
     /// `cl ticket list` (unless asked for). Only what's shown: its queued
     /// tickets still run.
     hidden: bool = false,
+    /// Planning sessions that may run at once. They write no code, so they
+    /// don't wait for the queue or a worktree slot, only for this.
+    planners: i64 = default_planners,
 };
 
 pub const Flag = struct {
@@ -152,6 +155,9 @@ pub const Ticket = struct {
     /// The test plan Claude gave with `done` (markdown: Setup, Launch,
     /// Checks), "" for none.
     test_plan: []const u8 = "",
+    /// The plan its planning session gave with `done` (markdown), "" for
+    /// none: what the session that builds it is told.
+    plan_md: []const u8 = "",
     /// How far the human got testing it (the board's JSON: results, notes,
     /// comments, the step they're on), "" for not started. A new plan or
     /// submitted results start it over.
@@ -186,6 +192,9 @@ pub const Error = error{ Sqlite, NotFound, Exists, BadInput, OutOfMemory };
 /// Worktree slots a new project gets when none are given.
 pub const default_slots = 3;
 
+/// Planning sessions a project runs at once when none are given.
+pub const default_planners = 2;
+
 const schema =
     \\PRAGMA journal_mode = WAL;
     \\CREATE TABLE IF NOT EXISTS projects (
@@ -201,7 +210,9 @@ const schema =
     \\  after_merge_pid INTEGER NOT NULL DEFAULT 0,
     \\  after_merge_pending TEXT NOT NULL DEFAULT '',
     \\  after_merge_claude TEXT NOT NULL DEFAULT '',
-    \\  hidden INTEGER NOT NULL DEFAULT 0
+    \\  hidden INTEGER NOT NULL DEFAULT 0,
+    \\  planners INTEGER NOT NULL DEFAULT
+++ std.fmt.comptimePrint(" {d}\n", .{default_planners}) ++
     \\);
     \\CREATE TABLE IF NOT EXISTS tickets (
     \\  id INTEGER PRIMARY KEY,
@@ -230,6 +241,7 @@ const schema =
     \\  test_plan TEXT NOT NULL DEFAULT '',
     \\  test_progress TEXT NOT NULL DEFAULT '',
     \\  custom_close TEXT NOT NULL DEFAULT '',
+    \\  plan_md TEXT NOT NULL DEFAULT '',
     \\  created INTEGER NOT NULL,
     \\  updated INTEGER NOT NULL
     \\);
@@ -338,6 +350,10 @@ pub fn migrate(db: Db) !void {
         try addColumn(db, "tickets", "custom_close", "TEXT NOT NULL DEFAULT ''");
         try addColumn(db, "projects", "hidden", "INTEGER NOT NULL DEFAULT 0");
         try db.execMulti(parks_schema);
+        // Planning sessions used to run in the ticket's own session, so
+        // nothing had to carry the plan over.
+        try addColumn(db, "tickets", "plan_md", "TEXT NOT NULL DEFAULT ''");
+        try addColumn(db, "projects", "planners", std.fmt.comptimePrint("INTEGER NOT NULL DEFAULT {d}", .{default_planners}));
     }
     if (have >= version) return;
     // Version 1 had no sub-tickets, version 2 no planning skill.
@@ -362,6 +378,40 @@ pub fn migrate(db: Db) !void {
 fn addColumn(db: Db, comptime table: []const u8, comptime column: []const u8, comptime decl: []const u8) !void {
     if ((try db.int("SELECT 1 FROM pragma_table_info('" ++ table ++ "') WHERE name = '" ++ column ++ "'", .{})) != null) return;
     try db.execMulti("ALTER TABLE " ++ table ++ " ADD COLUMN " ++ column ++ " " ++ decl);
+}
+
+test "an approved plan queues, and the plan is kept" {
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp" };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try Db.open(":memory:");
+    defer db.close();
+    try migrate(db);
+    try addProject(db, .{ .name = "qa", .dir = "/x/qa" });
+    try std.testing.expectEqual(@as(i64, default_planners), (try getProject(db, a, "qa")).planners);
+    try updateProject(db, "qa", .{ .name = "", .dir = "", .planners = 1 });
+    try std.testing.expectEqual(@as(i64, 1), (try getProject(db, a, "qa")).planners);
+    const k = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Plan me", .plan = true });
+    const t = try getTicket(db, a, k);
+    try setPlan(ctx, db, t.id, "## Steps\n1. do it\n");
+    try done(ctx, db, a, k, "Plan ready");
+    try std.testing.expectEqual(Stage.planning, (try getTicket(db, a, k)).stage);
+    try std.testing.expectEqual(Stage.planning, try approve(ctx, db, a, k));
+    const after = try getTicket(db, a, k);
+    try std.testing.expectEqual(Stage.queued, after.stage);
+    try std.testing.expectEqualStrings("## Steps\n1. do it\n", after.plan_md);
+    try std.testing.expectEqual(@as(usize, 0), after.flags.len);
+}
+
+test "migrate: a board from before planning sessions gets the plan and planners columns" {
+    const db = try Db.open(":memory:");
+    defer db.close();
+    try migrate(db);
+    try db.execMulti("ALTER TABLE tickets DROP COLUMN plan_md; ALTER TABLE projects DROP COLUMN planners");
+    try migrate(db);
+    try std.testing.expect((try db.int("SELECT 1 FROM pragma_table_info('tickets') WHERE name = 'plan_md'", .{})) != null);
+    try std.testing.expectEqual(@as(?i64, default_planners), try db.int("SELECT dflt_value FROM pragma_table_info('projects') WHERE name = 'planners'", .{}));
 }
 
 test "migrate: a board another branch moved to a later version still gets the test columns" {
@@ -391,6 +441,7 @@ pub const ProjectInput = struct {
     profile: ?[]const u8 = null,
     after_merge: ?[]const u8 = null,
     after_merge_claude: ?[]const u8 = null,
+    planners: ?i64 = null,
 };
 
 /// A key prefix from a project name: a short first word as is (`qa-tool` →
@@ -452,8 +503,8 @@ pub fn addProject(db: Db, in: ProjectInput) Error!void {
     const prefix = in.prefix orelse defaultPrefix(&buf, in.name);
     if (!validPrefix(prefix)) return error.BadInput;
     if (try db.int("SELECT 1 FROM projects WHERE name = ?1 OR prefix = ?2", .{ in.name, prefix }) != null) return error.Exists;
-    try db.exec("INSERT INTO projects (name, dir, prefix, slots, mode, profile, after_merge, after_merge_claude) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)", .{
-        in.name, in.dir, prefix, in.slots orelse default_slots, @tagName(in.mode orelse .queue), in.profile orelse "", in.after_merge orelse "", in.after_merge_claude orelse "",
+    try db.exec("INSERT INTO projects (name, dir, prefix, slots, mode, profile, after_merge, after_merge_claude, planners) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)", .{
+        in.name, in.dir, prefix, in.slots orelse default_slots, @tagName(in.mode orelse .queue), in.profile orelse "", in.after_merge orelse "", in.after_merge_claude orelse "", in.planners orelse default_planners,
     });
 }
 
@@ -467,6 +518,7 @@ pub fn updateProject(db: Db, name: []const u8, in: ProjectInput) Error!void {
     }
     if (in.dir.len > 0) try db.exec("UPDATE projects SET dir = ?2 WHERE name = ?1", .{ name, in.dir });
     if (in.slots) |s| try db.exec("UPDATE projects SET slots = ?2 WHERE name = ?1", .{ name, s });
+    if (in.planners) |n| try db.exec("UPDATE projects SET planners = ?2 WHERE name = ?1", .{ name, n });
     if (in.mode) |m| try db.exec("UPDATE projects SET mode = ?2 WHERE name = ?1", .{ name, @tagName(m) });
     if (in.profile) |p| try db.exec("UPDATE projects SET profile = ?2 WHERE name = ?1", .{ name, p });
     if (in.after_merge) |c| try db.exec("UPDATE projects SET after_merge = ?2 WHERE name = ?1", .{ name, c });
@@ -491,7 +543,7 @@ pub fn removeProject(db: Db, name: []const u8) Error!void {
     try db.exec("DELETE FROM projects WHERE name = ?1", .{name});
 }
 
-const project_cols = "name, dir, prefix, slots, mode, profile, after_merge, after_merge_claude, hidden";
+const project_cols = "name, dir, prefix, slots, mode, profile, after_merge, after_merge_claude, hidden, planners";
 
 fn readProject(st: sqlite.Stmt, a: std.mem.Allocator) !Project {
     return .{
@@ -504,6 +556,7 @@ fn readProject(st: sqlite.Stmt, a: std.mem.Allocator) !Project {
         .after_merge = try st.dupe(a, 6),
         .after_merge_claude = try st.dupe(a, 7),
         .hidden = st.int(8) != 0,
+        .planners = st.int(9),
     };
 }
 
@@ -645,7 +698,7 @@ pub fn createTicket(ctx: Ctx, db: Db, a: std.mem.Allocator, in: TicketInput) Err
 }
 
 const ticket_cols = "t.id, t.key, t.project, t.title, t.body, t.stage, t.mode, t.plan, t.target, t.worktree, t.branch, t.profile, t.tmux, t.session_id, t.summary, t.round, t.created, t.updated, " ++
-    "coalesce((SELECT p.key FROM tickets p WHERE p.id = t.parent), ''), (SELECT count(*) FROM tickets c WHERE c.parent = t.id), t.skill, t.base, t.finishing, t.change_id, t.rank, t.killed, t.test_plan, t.test_progress, t.custom_close";
+    "coalesce((SELECT p.key FROM tickets p WHERE p.id = t.parent), ''), (SELECT count(*) FROM tickets c WHERE c.parent = t.id), t.skill, t.base, t.finishing, t.change_id, t.rank, t.killed, t.test_plan, t.test_progress, t.custom_close, t.plan_md";
 
 fn readTicket(st: sqlite.Stmt, a: std.mem.Allocator) !Ticket {
     return .{
@@ -678,6 +731,7 @@ fn readTicket(st: sqlite.Stmt, a: std.mem.Allocator) !Ticket {
         .test_plan = try st.dupe(a, 26),
         .test_progress = try st.dupe(a, 27),
         .custom_close = try st.dupe(a, 28),
+        .plan_md = try st.dupe(a, 29),
     };
 }
 
@@ -866,6 +920,12 @@ pub fn setSession(ctx: Ctx, db: Db, id: i64, tmux_name: []const u8, session_id: 
 /// Keep the test plan Claude wrote for the ticket; testing it starts over.
 pub fn setTestPlan(ctx: Ctx, db: Db, id: i64, md: []const u8) Error!void {
     try db.exec("UPDATE tickets SET test_plan = ?2, test_progress = '' WHERE id = ?1", .{ id, md });
+    try touch(ctx, db, id);
+}
+
+/// Keep the plan a planning session gave, for the session that builds it.
+pub fn setPlan(ctx: Ctx, db: Db, id: i64, md: []const u8) Error!void {
+    try db.exec("UPDATE tickets SET plan_md = ?2 WHERE id = ?1", .{ id, md });
     try touch(ctx, db, id);
 }
 
@@ -1059,11 +1119,12 @@ pub fn done(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, summary: []
     try logEvent(ctx, db, t.id, "done", "");
 }
 
-/// The stage `approve` moves a ticket to: an approved plan goes to Running,
-/// a reviewed ticket to Testing, a tested one to Done.
+/// The stage `approve` moves a ticket to: an approved plan goes to Queued
+/// (a new session builds it when there is room), a reviewed ticket to
+/// Testing, a tested one to Done.
 pub fn approvedStage(stage: Stage) ?Stage {
     return switch (stage) {
-        .planning => .running,
+        .planning => .queued,
         .review => .testing,
         .testing => .done,
         else => null,

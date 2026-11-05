@@ -593,7 +593,7 @@ function lanesHtml(rows) {
   const projects = state.data.projects.filter((p) => state.project ? p.name === state.project : projectShown(p.name));
   return `<div class="lanes"><table><thead><tr><th></th>${columns().map((s) => `<th>${STAGE_NAME[s]}</th>`).join("")}</tr></thead><tbody>
     ${projects.map((p) => { const mine = rows.filter((r) => r.ticket.project === p.name);
-      const running = mine.filter((r) => ["running", "planning"].includes(r.ticket.stage) && r.status && r.status !== "gone").length;
+      const running = mine.filter((r) => r.ticket.stage === "running" && r.status && r.status !== "gone").length;
       return `<tr><td class="lane"><div><strong>${esc(p.name)}</strong><span class="mono muted" style="font-size:calc(11.5 * var(--u))">${p.mode === "worktree" ? `${running} of ${p.slots} running` : "queue"}</span><button type="button" class="add" data-new-project="${esc(p.name)}" aria-label="New ticket in ${esc(p.name)}">+</button></div></td>
         ${columns().map((s) => `<td data-drop="${s}" data-project="${esc(p.name)}"><div>${inColumn(mine, s).map((r) => cardHtml(r, true)).join("")}</div></td>`).join("")}</tr>`; }).join("")}
   </tbody></table></div>`;

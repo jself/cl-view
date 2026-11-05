@@ -165,6 +165,7 @@ const Body = struct {
     after_merge_claude: ?[]const u8 = null,
     /// finish "tell": what Claude should do first.
     tell: ?[]const u8 = null,
+    planners: ?i64 = null,
     spin_off: ?bool = null,
     /// Going to Done: "merge", "pr" or "close" (the default).
     finish: ?[]const u8 = null,
@@ -252,6 +253,7 @@ fn route(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: 
                 .dir = dir,
                 .prefix = nonEmpty(b.prefix),
                 .slots = b.slots,
+                .planners = b.planners,
                 .mode = if (b.mode) |m| board.Mode.parse(m) orelse return error.BadInput else null,
                 .profile = b.profile,
                 .after_merge = b.after_merge,
@@ -266,6 +268,7 @@ fn route(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: 
                 .dir = if (b.dir) |d| try realDir(ctx, a, d) else "",
                 .prefix = nonEmpty(b.prefix),
                 .slots = b.slots,
+                .planners = b.planners,
                 .mode = if (b.mode) |m| board.Mode.parse(m) orelse return error.BadInput else null,
                 .profile = b.profile,
                 .after_merge = b.after_merge,
@@ -344,7 +347,7 @@ fn ticketAction(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator
     } else if (eql(u8, action, "unflag")) {
         try board.clearFlag(ctx, db, a, key, b.kind orelse return error.BadInput);
     } else if (eql(u8, action, "done")) {
-        try review.done(ctx, db, a, key, b.summary orelse "", null);
+        try review.done(ctx, db, a, key, b.summary orelse "", null, null);
     } else if (eql(u8, action, "approve")) {
         _ = try actions.approve(ctx, db, a, key, b.spin_off orelse false, try finishOf(b));
     } else if (eql(u8, action, "start")) {

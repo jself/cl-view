@@ -45,16 +45,16 @@ pub fn prompt(a: std.mem.Allocator, t: board.Ticket, notes: []const board.Commen
         try w.writeAll("\nNotes on the ticket:\n");
         for (notes) |n| try w.print("- {s}\n", .{n.body});
     }
-    const planning = t.plan and t.stage == .planning;
-    if (planning) {
-        try w.writeAll("\nPlan first, without changing any code. Ask me with AskUserQuestion until the plan is clear");
-        if (t.skill.len > 0) try w.print(" (use the {s} skill for the interview)", .{t.skill});
-        try w.print(
-            \\. Then post the plan with `cl ticket comment {s} --as claude "<the plan>"`
-            \\and run `cl ticket done {s} --summary "Plan ready"`. Wait for me to approve it before writing code.
-            \\
-        , .{ t.key, t.key });
-    }
+    if (t.plan_md.len > 0) try w.print(
+        \\
+        \\The approved plan, from a planning session before this one (you don't have that
+        \\conversation; this is what it left). The code may have changed since it was written:
+        \\check the plan against the code as it is now and adapt it where they disagree, and
+        \\ask me if that changes what we agreed.
+        \\
+        \\{s}
+        \\
+    , .{std.mem.trimEnd(u8, t.plan_md, "\n")});
     try w.print(
         \\
         \\How tickets work here (cl board):
@@ -83,6 +83,50 @@ pub fn prompt(a: std.mem.Allocator, t: board.Ticket, notes: []const board.Commen
         \\  don't commit (git or jj), start other changes or switch branches. When it's done, cl merges it.
         \\
     , .{ t.change[0..@min(t.change.len, 12)], if (t.branch.len > 0) ", bookmark " else "", t.branch });
+    return aw.written();
+}
+
+/// Where a planning session reads the code.
+pub const PlanDir = union(enum) {
+    /// Its own read-only workspace on this revision (a trunk bookmark, or
+    /// "HEAD" for git).
+    trunk: []const u8,
+    /// The project's checkout (no workspace could be made).
+    checkout,
+};
+
+/// What a planning session is told first: plan only, then hand the plan in
+/// for the session that builds it.
+pub fn planPrompt(a: std.mem.Allocator, t: board.Ticket, notes: []const board.Comment, where: PlanDir) ![]const u8 {
+    var aw: std.Io.Writer.Allocating = .init(a);
+    const w = &aw.writer;
+    try w.print("Ticket {s}: {s}\n", .{ t.key, t.title });
+    if (t.parent.len > 0) try w.print("(a sub-ticket of {s}; `cl ticket show {s}` has the bigger picture)\n", .{ t.parent, t.parent });
+    if (t.body.len > 0) try w.print("\n{s}\n", .{t.body});
+    if (notes.len > 0) {
+        try w.writeAll("\nNotes on the ticket:\n");
+        for (notes) |n| try w.print("- {s}\n", .{n.body});
+    }
+    try w.writeAll("\nThis is a planning session: plan the ticket, don't build it. Don't write or change code or any other file, and don't commit; once I approve the plan, a new session builds it.\n");
+    switch (where) {
+        .trunk => |rev| try w.print("You're in a read-only copy of the project at {s}, for reading the code; it goes away when planning ends.\n", .{rev}),
+        .checkout => try w.writeAll("You're in the project's checkout, which may hold another ticket's unfinished work: read it as the code to plan against, but its files may not be what is merged.\n"),
+    }
+    try w.writeAll("\nAsk me with AskUserQuestion until the plan is clear");
+    if (t.skill.len > 0) try w.print(" (use the {s} skill for the interview)", .{t.skill});
+    try w.print(
+        \\. The session that builds it won't see
+        \\this conversation, only the plan: write it for a reader who starts cold, with every decision
+        \\we made and why, the files and functions to change, what to test, and what is still open.
+        \\
+        \\When the plan is ready, hand it in with
+        \\`cl ticket done {s} --summary "<the plan in a sentence>" --plan` and the plan as markdown on
+        \\stdin (a heredoc, not a file). The board shows it to me for approval; that is the end of your
+        \\part. Don't call ExitPlanMode. If I send feedback on the plan, revise it and hand it in the
+        \\same way. To split off a separate piece of work: `cl ticket new --parent {s} "<title>" -m "<details>"`
+        \\(it waits until the plan is approved).
+        \\
+    , .{ t.key, t.key });
     return aw.written();
 }
 
@@ -128,7 +172,9 @@ fn hooksFile(ctx: Ctx, a: std.mem.Allocator, cfg: config.Config) ![]const u8 {
 fn claudeArgs(ctx: Ctx, cfg: config.Config, a: std.mem.Allocator, t: board.Ticket, sid: []const u8, resuming: bool) ![]const []const u8 {
     var args: std.ArrayList([]const u8) = .empty;
     try args.appendSlice(a, &.{ if (resuming) "--resume" else "--session-id", sid, "--settings", try hooksFile(ctx, a, cfg) });
-    if (t.plan and t.stage == .planning) try args.appendSlice(a, &.{ "--permission-mode", "plan" });
+    // Planning writes nothing, and ExitPlanMode would let it start building.
+    // The tool list goes before another option: it takes every argument up to one.
+    if (t.stage == .planning) try args.appendSlice(a, &.{ "--disallowedTools", "Edit,Write,NotebookEdit,ExitPlanMode", "--permission-mode", "plan" });
     return args.items;
 }
 
@@ -228,8 +274,9 @@ const View = struct {
 };
 
 /// Stages where a ticket still holds its session (or worktree slot): it is
-/// not finished until it reaches done.
-const in_progress = "('planning', 'running', 'review', 'testing')";
+/// not finished until it reaches done. Planning holds neither: it runs in a
+/// session and workspace of its own (see `startPlanning`).
+const in_progress = "('running', 'review', 'testing')";
 
 /// Where a queue ticket runs: its target, else its parent's session, else
 /// the project's own session (see `homeSession`).
@@ -241,15 +288,90 @@ fn queueTarget(db: board.Db, a: std.mem.Allocator, t: board.Ticket, view: View, 
 
 /// The live session of `t`'s parent while the parent is in progress: a
 /// sub-ticket goes on in that conversation. With the parent finished or its
-/// session gone, the sub-ticket waits its turn like a top-level ticket.
+/// session gone, the sub-ticket waits its turn like a top-level ticket. A
+/// parent still planning has only its planning session: see `parentPlanning`.
 fn parentSession(db: board.Db, a: std.mem.Allocator, t: board.Ticket, view: View) !?[]const u8 {
     if (t.parent.len == 0) return null;
     const parent = board.getTicket(db, a, t.parent) catch |err| return if (err == error.NotFound) null else err;
     if (parent.tmux.len == 0 or parent.tmux[0] == '(' or !view.alive(parent.tmux)) return null;
     return switch (parent.stage) {
-        .planning, .running, .review, .testing => parent.tmux,
+        .running, .review, .testing => parent.tmux,
         else => null,
     };
+}
+
+/// `t`'s parent is still being planned: the sub-ticket waits for the plan.
+fn parentPlanning(db: board.Db, a: std.mem.Allocator, t: board.Ticket) !bool {
+    if (t.parent.len == 0) return false;
+    const parent = board.getTicket(db, a, t.parent) catch |err| return if (err == error.NotFound) false else err;
+    return parent.stage == .planning;
+}
+
+/// The planning session's tmux name starts with this (launch names
+/// sessions cl_<name>_<n>, and a planning session is named <key>-plan).
+fn planSessionPrefix(a: std.mem.Allocator, key: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(a, "cl_{s}-plan_", .{try std.ascii.allocLowerString(a, key)});
+}
+
+fn isPlanSession(a: std.mem.Allocator, t: board.Ticket) !bool {
+    return std.mem.startsWith(u8, t.tmux, try planSessionPrefix(a, t.key));
+}
+
+/// Planning sessions of `project` that are running (or starting).
+fn runningPlanners(db: board.Db, a: std.mem.Allocator, view: View, project: []const u8) !i64 {
+    var st = try db.query("SELECT tmux FROM tickets WHERE project = ?1 AND stage = 'planning' AND tmux != ''", .{project});
+    defer st.finalize();
+    var n: i64 = 0;
+    while (try st.step()) {
+        const name = st.text(0);
+        if (std.mem.eql(u8, name, "(starting)") or view.alive(try a.dupe(u8, name))) n += 1;
+    }
+    return n;
+}
+
+/// Start `t`'s planning session: a new session of its own in a read-only
+/// workspace on trunk (the project's checkout when none can be made),
+/// resuming its planning conversation if it had one. It takes no queue turn
+/// or worktree slot, and leaves the ticket's change alone.
+fn startPlanning(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: board.Ticket) !void {
+    const p = try board.getProject(db, a, t.project);
+    if (!try board.claimStart(db, t.id)) return error.AlreadyStarted;
+    errdefer board.releaseStart(db, t.id) catch {};
+    _ = worktree.ensureJj(ctx, a, p.dir);
+    const trunk = worktree.trunkBookmark(ctx, a, p.dir);
+    const path = try worktree.planPath(ctx, a, cfg, p.name, t.key);
+    var dir = path;
+    var where: PlanDir = .{ .trunk = trunk orelse "HEAD" };
+    worktree.createPlan(ctx, a, p.dir, path, trunk) catch |err| {
+        if (err == error.OutOfMemory) return err;
+        try board.logEvent(ctx, db, t.id, "no planning workspace", worktree.lastError());
+        dir = p.dir;
+        where = .checkout;
+    };
+    const resume_id = resumeId(ctx, cfg, a, t, dir, t.profile);
+    const notes = try board.unsentNotes(db, a, t.id);
+    const text = if (resume_id != null) try resumePrompt(a, t, notes) else try planPrompt(a, t, notes, where);
+    var sid: [36]u8 = undefined;
+    const name = try std.fmt.allocPrint(a, "{s}-plan", .{try std.ascii.allocLowerString(a, t.key)});
+    const tmux_name = try newSession(ctx, cfg, a, t, dir, name, text, &sid, true, resume_id);
+    // Its worktree and bookmark (from an earlier round) stay as they are.
+    try board.setSession(ctx, db, t.id, tmux_name, &sid, t.worktree, t.branch);
+    try board.markNotesSent(db, t.id);
+    try board.clearFlagId(ctx, db, t.id, "start-failed");
+    try board.clearFlagId(ctx, db, t.id, "ended");
+    try board.logEvent(ctx, db, t.id, "planning started", tmux_name);
+}
+
+/// Planning is over for `t` (approved, or moved on): close its planning
+/// session and workspace, and forget that conversation so the session that
+/// builds it starts a new one, with the plan.
+fn endPlanning(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: board.Ticket, view: View) !void {
+    if (view.alive(t.tmux)) tmux.kill(ctx, t.tmux) catch {};
+    const p = try board.getProject(db, a, t.project);
+    worktree.removePlan(ctx, a, p.dir, try worktree.planPath(ctx, a, cfg, p.name, t.key));
+    try db.exec("UPDATE tickets SET tmux = '', session_id = '' WHERE id = ?1 AND tmux = ?2", .{ t.id, t.tmux });
+    try board.clearFlagId(ctx, db, t.id, "ended");
+    try board.logEvent(ctx, db, t.id, "planning ended", t.tmux);
 }
 
 /// The project's session in the cl list: a live session in its directory,
@@ -400,6 +522,8 @@ fn startIn(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: 
         // Its session is gone: start it again (a worktree still there is reused).
         try db.exec("UPDATE tickets SET tmux = '' WHERE id = ?1 AND tmux = ?2", .{ t.id, t.tmux });
     }
+    if (t.stage == .planning) return startPlanning(ctx, cfg, db, a, t);
+    if (try parentPlanning(db, a, t)) return error.TargetBusy;
     const p = try board.getProject(db, a, t.project);
     const target = if (t.mode == .queue) try queueTarget(db, a, t, view, p) else "";
     const live = target.len > 0 and view.alive(target);
@@ -500,7 +624,7 @@ fn startIn(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: 
     try board.markNotesSent(db, t.id);
     try board.clearFlagId(ctx, db, t.id, "start-failed");
     try board.clearFlagId(ctx, db, t.id, "ended");
-    if (t.stage != .planning and !(keep_stage and (t.stage == .review or t.stage == .testing))) try board.moveTicket(ctx, db, t, .running);
+    if (!(keep_stage and (t.stage == .review or t.stage == .testing))) try board.moveTicket(ctx, db, t, .running);
     const now_t = try board.getTicket(db, a, t.key);
     try board.logEvent(ctx, db, t.id, "started", now_t.tmux);
 }
@@ -590,7 +714,7 @@ pub fn tick(ctx: Ctx, cfg: config.Config, db: board.Db) !usize {
     // Parked tickets' checks (they run detached; a passing one resumes its ticket).
     park.checkDue(ctx, db) catch {};
     // Nothing queued or in progress, and no session to let go of: nothing to look at.
-    if ((try db.int("SELECT 1 FROM tickets WHERE stage IN ('queued', 'planning', 'running') OR (stage = 'backlog' AND tmux != '') LIMIT 1", .{})) == null) return 0;
+    if ((try db.int("SELECT 1 FROM tickets WHERE stage IN ('queued', 'planning', 'running') OR (stage = 'backlog' AND tmux != '') OR tmux LIKE '%-plan\\_%' ESCAPE '\\' LIMIT 1", .{})) == null) return 0;
     var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);
     defer arena_state.deinit();
     const a = arena_state.allocator();
@@ -616,7 +740,38 @@ pub fn tick(ctx: Ctx, cfg: config.Config, db: board.Db) !usize {
         signals.sync(ctx, db, a, t.*, view.statuses.get(t.tmux), claude.statusFor(ctx, view.statuses, s)) catch {};
     }
 
+    // Out of Planning (approved, or moved): its planning session goes, before
+    // the ticket can start building.
+    {
+        var st = try db.query("SELECT key FROM tickets WHERE stage != 'planning' AND tmux LIKE '%-plan\\_%' ESCAPE '\\'", .{});
+        defer st.finalize();
+        var keys: std.ArrayList([]const u8) = .empty;
+        while (try st.step()) try keys.append(a, try st.dupe(a, 0));
+        for (keys.items) |k| {
+            const t = board.getTicket(db, a, k) catch continue;
+            if (try isPlanSession(a, t)) endPlanning(ctx, cfg, db, a, t, view) catch {};
+        }
+    }
+
     try releaseGone(ctx, db, a, view);
+
+    // Planning tickets that never started, in board order, up to each
+    // project's planners. They don't wait for the queue or worktree slots.
+    const planning = try board.listTickets(db, a, .{ .stage = .planning });
+    std.mem.sort(board.Ticket, planning, {}, byRank);
+    for (planning) |t| {
+        if (t.tmux.len > 0 or t.killed or t.park != null) continue;
+        const p = board.getProject(db, a, t.project) catch continue;
+        if (try runningPlanners(db, a, view, p.name) >= p.planners) continue;
+        startPlanning(ctx, cfg, db, a, t) catch |err| switch (err) {
+            error.AlreadyStarted => continue,
+            else => {
+                board.setFlagId(ctx, db, t.id, "start-failed", "auto", @errorName(err)) catch {};
+                continue;
+            },
+        };
+        return 1 + try tick(ctx, cfg, db);
+    }
 
     var started: usize = 0;
     for (try waitingToStart(db, a)) |t0| {
@@ -641,21 +796,20 @@ pub fn tick(ctx: Ctx, cfg: config.Config, db: board.Db) !usize {
     return started;
 }
 
-/// What the dispatcher may start, in board order: queued tickets, and
-/// planning tickets that never started. A killed one waits for you to
+/// What the dispatcher may start, in board order: queued tickets (planning
+/// ones start on their own, up to the project's planners). A killed one waits for you to
 /// restart it, and a parked one for its park to end, in whatever stage
 /// (moving it to Queued doesn't start it).
 fn waitingToStart(db: board.Db, a: std.mem.Allocator) ![]board.Ticket {
     var waiting: std.ArrayList(board.Ticket) = .empty;
-    for ([_]board.Stage{ .queued, .planning }) |stage| {
-        for (try board.listTickets(db, a, .{ .stage = stage })) |t| if (t.tmux.len == 0 and !t.killed and t.park == null) try waiting.append(a, t);
-    }
-    std.mem.sort(board.Ticket, waiting.items, {}, struct {
-        fn lt(_: void, x: board.Ticket, y: board.Ticket) bool {
-            return x.rank < y.rank or (x.rank == y.rank and x.id < y.id);
-        }
-    }.lt);
+    for (try board.listTickets(db, a, .{ .stage = .queued })) |t| if (t.tmux.len == 0 and !t.killed and t.park == null) try waiting.append(a, t);
+    std.mem.sort(board.Ticket, waiting.items, {}, byRank);
     return waiting.items;
+}
+
+/// Board order: rank, then oldest first.
+fn byRank(_: void, x: board.Ticket, y: board.Ticket) bool {
+    return x.rank < y.rank or (x.rank == y.rank and x.id < y.id);
 }
 
 /// Run the dispatcher until killed, every few seconds.
@@ -714,15 +868,15 @@ test prompt {
     var arena_state = std.heap.ArenaAllocator.init(a);
     defer arena_state.deinit();
     const t: board.Ticket = .{
-        .id = 1, .key = "QA-3", .project = "qa", .title = "Retry", .body = "wrap fetch", .stage = .planning,
-        .mode = .queue, .plan = true, .skill = "grilling", .target = "", .worktree = "", .branch = "", .profile = "",
+        .id = 1, .key = "QA-3", .project = "qa", .title = "Retry", .body = "wrap fetch", .stage = .queued,
+        .mode = .queue, .plan = false, .skill = "", .target = "", .worktree = "", .branch = "", .profile = "",
         .tmux = "", .session_id = "", .summary = "", .round = 1, .created = 0, .updated = 0, .parent = "QA-1", .children = 0,
     };
     const text = try prompt(arena_state.allocator(), t, &.{.{ .author = "you", .body = "keep it small", .sent = false, .at = 0 }}, true);
     try std.testing.expect(std.mem.indexOf(u8, text, "Ticket QA-3: Retry") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "sub-ticket of QA-1") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "- keep it small") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "grilling skill") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "approved plan") == null);
     try std.testing.expect(std.mem.indexOf(u8, text, "cl ticket done QA-3") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "  1. Write a review guide") != null);
     // Without gutter: no review guide, and the steps are numbered from 1.
@@ -730,6 +884,89 @@ test prompt {
     try std.testing.expect(std.mem.indexOf(u8, plain, "gutter") == null);
     try std.testing.expect(std.mem.indexOf(u8, plain, "me:\n  1. Run `cl ticket done QA-3") != null);
     try std.testing.expect(std.mem.indexOf(u8, plain, "  2. If there is something") != null);
+}
+
+test "the session that builds a planned ticket is told the plan" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const t: board.Ticket = .{
+        .id = 1, .key = "QA-3", .project = "qa", .title = "Retry", .body = "wrap fetch", .stage = .queued,
+        .mode = .queue, .plan = true, .skill = "", .target = "", .worktree = "", .branch = "", .profile = "",
+        .tmux = "", .session_id = "", .summary = "", .round = 1, .created = 0, .updated = 0, .parent = "", .children = 0,
+        .plan_md = "## Approach\nRetry fetch three times in api.ts.\n\n",
+    };
+    const text = try prompt(arena_state.allocator(), t, &.{}, false);
+    try std.testing.expect(std.mem.indexOf(u8, text, "approved plan") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "check the plan against the code as it is now") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "## Approach\nRetry fetch three times in api.ts.\n\nHow tickets work") != null);
+}
+
+test planPrompt {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const t: board.Ticket = .{
+        .id = 1, .key = "QA-3", .project = "qa", .title = "Retry", .body = "wrap fetch", .stage = .planning,
+        .mode = .queue, .plan = true, .skill = "grilling", .target = "", .worktree = "", .branch = "", .profile = "",
+        .tmux = "", .session_id = "", .summary = "", .round = 1, .created = 0, .updated = 0, .parent = "QA-1", .children = 0,
+    };
+    const text = try planPrompt(a, t, &.{.{ .author = "you", .body = "keep it small", .sent = false, .at = 0 }}, .{ .trunk = "master" });
+    try std.testing.expect(std.mem.indexOf(u8, text, "Ticket QA-3: Retry") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "sub-ticket of QA-1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "- keep it small") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "grilling skill") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "don't build it") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "read-only copy of the project at master") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "`cl ticket done QA-3 --summary \"<the plan in a sentence>\" --plan`") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Don't call ExitPlanMode") != null);
+    // Nothing about building: no review guide, test plan, or jj change.
+    try std.testing.expect(std.mem.indexOf(u8, text, "review guide") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "--test-plan") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "jj change") == null);
+    const here = try planPrompt(a, t, &.{}, .checkout);
+    try std.testing.expect(std.mem.indexOf(u8, here, "another ticket's unfinished work") != null);
+}
+
+test "planning takes no queue turn or worktree slot, and holds back its sub-tickets" {
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp" };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "qa", .dir = "/x/qa-tool" });
+    const kp = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Planned", .plan = true });
+    const kw = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Planned in a worktree", .plan = true, .mode = .worktree });
+    const kq = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Next", .stage = .queued });
+    const ks = try board.createTicket(ctx, db, a, .{ .title = "Piece", .stage = .queued, .parent = kp });
+    const mk = struct {
+        fn s(tmux_name: []const u8, name: []const u8, created: i64) tmux.Session {
+            return .{ .tmux_name = tmux_name, .name = name, .dir = "/x/qa-tool", .profile = "", .created = created, .pane_title = "", .pane_dead = false, .activity = 0, .role = "", .alert = "" };
+        }
+    }.s;
+    var sessions = [_]tmux.Session{ mk("cl_qa-tool_1", "qa-tool", 1), mk("cl_qa-1-plan_2", "qa-1-plan", 2), mk("cl_qa-2-plan_3", "qa-2-plan", 3) };
+    const view: View = .{ .sessions = &sessions, .statuses = .empty };
+    try db.exec("UPDATE tickets SET tmux = 'cl_qa-1-plan_2' WHERE key = ?1", .{kp});
+    try db.exec("UPDATE tickets SET tmux = 'cl_qa-2-plan_3' WHERE key = ?1", .{kw});
+    const tp = try board.getTicket(db, a, kp);
+    try std.testing.expectEqual(board.Stage.planning, tp.stage);
+    try std.testing.expect(try isPlanSession(a, tp));
+    try std.testing.expect(!try isPlanSession(a, try board.getTicket(db, a, kq)));
+
+    // The queue goes on, and the worktree slots are all free.
+    const tq = try board.getTicket(db, a, kq);
+    try std.testing.expect(!try projectBusy(db, a, view, tq));
+    try std.testing.expect(!try targetHasTicket(db, "cl_qa-1-plan_2", tq.id));
+    try std.testing.expectEqual(@as(i64, 0), try runningWorktrees(db, a, view, "qa"));
+    try std.testing.expectEqual(@as(i64, 2), try runningPlanners(db, a, view, "qa"));
+
+    // A sub-ticket doesn't go into the planning conversation: it waits for the plan.
+    const ts = try board.getTicket(db, a, ks);
+    try std.testing.expect(try parentSession(db, a, ts, view) == null);
+    try std.testing.expect(try parentPlanning(db, a, ts));
+    try db.exec("UPDATE tickets SET stage = 'queued' WHERE key = ?1", .{kp});
+    try std.testing.expect(!try parentPlanning(db, a, ts));
 }
 
 test "queue tickets run one at a time in the project's session" {

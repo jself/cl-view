@@ -70,7 +70,8 @@ pub const ticket_usage =
     \\  unpark <key> [--no-resume]   end the park now and resume its session (--no-resume: just
     \\                              end it; the session stays stopped)
     \\  approve <key> [--spin-off] [--merge | --pr | --tell <text> | --close]
-    \\                              plan → running (tells Claude), review → testing, testing → done
+    \\                              plan → queued (a new session builds it, told the plan),
+    \\                              review → testing, testing → done
     \\  answer <key> <answer>...    answer the question (one per question: an option number or
     \\                              your own words) or permission prompt (a number) it waits on;
     \\                              a multi-select question takes several numbers, maybe then
@@ -107,6 +108,9 @@ pub const ticket_usage =
     \\                              --test-plan (- reads stdin): what to try, kept in the ticket
     \\                              (steps; `testplan --format`); without it an
     \\                              earlier round's stays, "" drops it
+    \\  done [<key>] --summary <text> --plan
+    \\                              Claude, planning: the plan is ready for approval; the plan
+    \\                              (markdown on stdin) is what the session that builds it gets
     \\  done [<key>] --close [--pr-url <url>]
     \\                              Claude: merged or opened the PR it was asked to; moves to
     \\                              done (the PR link becomes a comment) and closes the session
@@ -120,9 +124,9 @@ pub const ticket_usage =
 pub const project_usage =
     \\usage: cl project <command>
     \\
-    \\  add <name> <dir> [--prefix <KEY>] [--slots <n>] [--mode queue|worktree] [--profile <name>]
-    \\      [--after-merge <command>] [--after-merge-claude <steps> | none]
-    \\  set <name> [--name <new>] [--dir <dir>] [--prefix <KEY>] [--slots <n>]
+    \\  add <name> <dir> [--prefix <KEY>] [--slots <n>] [--planners <n>] [--mode queue|worktree]
+    \\      [--profile <name>] [--after-merge <command>] [--after-merge-claude <steps> | none]
+    \\  set <name> [--name <new>] [--dir <dir>] [--prefix <KEY>] [--slots <n>] [--planners <n>]
     \\      [--mode queue|worktree] [--profile <name>] [--after-merge <command>]
     \\      [--after-merge-claude <steps> | none]
     \\  rm <name>                   (refused while it has tickets)
@@ -142,7 +146,7 @@ pub const project_usage =
     \\  what the operator is asked to sort out when the command fails. "" (the
     \\  default): rebuild and restart what runs from the checkout. none: nothing.
     \\
-++ std.fmt.comptimePrint("--slots: worktree tickets in progress at once (default {d})\n", .{board.default_slots});
+++ std.fmt.comptimePrint("--slots: worktree tickets in progress at once (default {d})\n--planners: planning sessions at once; they don't wait for the queue or a slot (default {d})\n", .{ board.default_slots, board.default_planners });
 
 fn out(text: []const u8) !void {
     try std.Io.File.stdout().writeStreamingAll(std.Io.Threaded.global_single_threaded.io(), text);
@@ -258,10 +262,21 @@ fn parseMode(args: Args) ?board.Mode {
 }
 
 fn parseSlots(args: Args) ?i64 {
-    const s = args.get("--slots") orelse return null;
+    return parseCount(args, "--slots");
+}
+
+fn parseCount(args: Args, comptime opt: []const u8) ?i64 {
+    const s = args.get(opt) orelse return null;
     const n = std.fmt.parseInt(i64, s, 10) catch fail("not a number: {s}", .{s});
-    if (n < 1) fail("--slots must be at least 1", .{});
+    if (n < 1) fail(opt ++ " must be at least 1", .{});
     return n;
+}
+
+/// All of stdin (`what` names it in the error).
+fn readStdin(ctx: Ctx, a: std.mem.Allocator, what: []const u8) []const u8 {
+    var buf: [4096]u8 = undefined;
+    var r = std.Io.File.stdin().reader(ctx.io, &buf);
+    return r.interface.allocRemaining(a, .limited(256 * 1024)) catch fail("cannot read {s} from stdin", .{what});
 }
 
 // ---- projects ----
@@ -272,7 +287,7 @@ pub fn projectMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void
     defer arena_state.deinit();
     const a = arena_state.allocator();
     const cmd = argv[0];
-    const args = try Args.parse(a, argv[1..], &.{ "--prefix", "--slots", "--mode", "--profile", "--name", "--dir", "--after-merge", "--after-merge-claude" }, project_usage);
+    const args = try Args.parse(a, argv[1..], &.{ "--prefix", "--slots", "--planners", "--mode", "--profile", "--name", "--dir", "--after-merge", "--after-merge-claude" }, project_usage);
     const db = openBoard(ctx, cfg);
     defer db.close();
 
@@ -281,8 +296,8 @@ pub fn projectMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void
         const ps = board.listProjects(db, a) catch |e| boardFail(db, e, "project");
         if (args.has("--json")) return out(try std.fmt.allocPrint(a, "{f}\n", .{std.json.fmt(ps, .{})}));
         var aw: std.Io.Writer.Allocating = .init(a);
-        for (ps) |p| try aw.writer.print("{s}\t{s}\t{s}\tslots {d}\t{s}{s}{s}{s}{s}{s}{s}{s}\n", .{
-            p.name, p.prefix, try ctx.shortenHomeIn(a, p.dir), p.slots, @tagName(p.mode),
+        for (ps) |p| try aw.writer.print("{s}\t{s}\t{s}\tslots {d}\tplanners {d}\t{s}{s}{s}{s}{s}{s}{s}{s}\n", .{
+            p.name, p.prefix, try ctx.shortenHomeIn(a, p.dir), p.slots, p.planners, @tagName(p.mode),
             if (p.hidden) "\thidden" else "",
             if (p.profile.len > 0) "\t" else "", p.profile,
             if (p.after_merge.len > 0) "\tafter merge: " else "", p.after_merge,
@@ -291,7 +306,7 @@ pub fn projectMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void
         return out(aw.writer.buffered());
     }
     if (std.mem.eql(u8, cmd, "add")) {
-        args.only(&.{ "--prefix", "--slots", "--mode", "--profile", "--after-merge", "--after-merge-claude" }, project_usage);
+        args.only(&.{ "--prefix", "--slots", "--planners", "--mode", "--profile", "--after-merge", "--after-merge-claude" }, project_usage);
         if (args.pos.items.len != 2) fail("usage: cl project add <name> <dir> [options]", .{});
         const dir = try realDir(ctx, a, args.pos.items[1]);
         try checkProfile(cfg, args.get("--profile"));
@@ -300,6 +315,7 @@ pub fn projectMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void
             .dir = dir,
             .prefix = args.get("--prefix"),
             .slots = parseSlots(args),
+            .planners = parseCount(args, "--planners"),
             .mode = if (args.get("--mode")) |m| board.Mode.parse(m) orelse fail("--mode is queue or worktree", .{}) else null,
             .profile = args.get("--profile"),
             .after_merge = args.get("--after-merge"),
@@ -310,7 +326,7 @@ pub fn projectMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void
         return out(try std.fmt.allocPrint(a, "{s}: tickets are {s}-1, {s}-2, ...{s}\n", .{ p.name, p.prefix, p.prefix, if (jj) "\n(set up jj alongside git: jj git init --colocate)" else "" }));
     }
     if (std.mem.eql(u8, cmd, "set")) {
-        args.only(&.{ "--prefix", "--slots", "--mode", "--profile", "--name", "--dir", "--after-merge", "--after-merge-claude" }, project_usage);
+        args.only(&.{ "--prefix", "--slots", "--planners", "--mode", "--profile", "--name", "--dir", "--after-merge", "--after-merge-claude" }, project_usage);
         if (args.pos.items.len != 1) fail("usage: cl project set <name> [options]", .{});
         try checkProfile(cfg, args.get("--profile"));
         board.updateProject(db, args.pos.items[0], .{
@@ -318,6 +334,7 @@ pub fn projectMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void
             .dir = if (args.get("--dir")) |d| try realDir(ctx, a, d) else "",
             .prefix = args.get("--prefix"),
             .slots = parseSlots(args),
+            .planners = parseCount(args, "--planners"),
             .mode = if (args.get("--mode")) |m| board.Mode.parse(m) orelse fail("--mode is queue or worktree", .{}) else null,
             .profile = args.get("--profile"),
             .after_merge = args.get("--after-merge"),
@@ -526,8 +543,8 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         return;
     }
     if (std.mem.eql(u8, cmd, "done")) {
-        args.only(&.{ "--summary", "--test-plan", "--close", "--pr-url" }, ticket_usage);
-        const key = keyArg(pos, 0, env_key, "cl ticket done [<key>] [--summary <text>] [--test-plan <markdown> | -] [--close [--pr-url <url>]]");
+        args.only(&.{ "--summary", "--test-plan", "--close", "--pr-url", "--plan" }, ticket_usage);
+        const key = keyArg(pos, 0, env_key, "cl ticket done [<key>] [--summary <text>] [--test-plan <markdown> | -] [--plan] [--close [--pr-url <url>]]");
         const t0 = board.getTicket(db, a, key) catch |e| boardFail(db, e, "ticket");
         // While finishing, a plain `done` means the merge or PR is done too.
         if (args.has("--close") or t0.finishing.len > 0) {
@@ -545,14 +562,16 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
             return;
         }
         if (args.get("--pr-url") != null) fail("--pr-url goes with --close", .{});
+        // A planning session hands its plan in: the session that builds the
+        // ticket gets only that.
+        if (t0.stage == .planning and !args.has("--plan")) fail("{s} is in planning: give the plan as markdown on stdin with --plan (a heredoc); the session that builds it sees only that", .{t0.key});
+        if (t0.stage != .planning and args.has("--plan")) fail("--plan is for a ticket in planning; {s} is in {s}", .{ t0.key, @tagName(t0.stage) });
         var test_plan = args.get("--test-plan");
-        if (test_plan != null and std.mem.eql(u8, test_plan.?, "-")) {
-            var buf: [4096]u8 = undefined;
-            var r = std.Io.File.stdin().reader(ctx.io, &buf);
-            test_plan = r.interface.allocRemaining(a, .limited(256 * 1024)) catch fail("cannot read the test plan from stdin", .{});
-        }
-        review.done(ctx, db, a, key, args.get("--summary") orelse "", test_plan) catch |e| switch (e) {
+        if (test_plan != null and std.mem.eql(u8, test_plan.?, "-")) test_plan = readStdin(ctx, a, "the test plan");
+        const plan = if (args.has("--plan")) readStdin(ctx, a, "the plan") else null;
+        review.done(ctx, db, a, key, args.get("--summary") orelse "", test_plan, plan) catch |e| switch (e) {
             error.BadTestPlan => fail("{s}", .{if (t0.stage == .planning) "a plan being approved has no test plan yet" else "the test plan needs at least one \"- [ ] ...\" check (cl ticket testplan --format)"}),
+            error.BadPlan => fail("the plan on stdin is empty", .{}),
             else => boardFail(db, e, "ticket"),
         };
         const t = board.getTicket(db, a, key) catch |e| boardFail(db, e, "ticket");

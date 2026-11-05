@@ -108,7 +108,9 @@ const tickets_skill =
     \\                          unless the project sets a mode)
     \\     --target <session>   a queue ticket for one particular session (tmux name)
     \\     --plan               start in planning: Claude interviews the human and posts a
-    \\                          plan to approve first (--skill <name> picks the interview skill)
+    \\                          plan to approve first (--skill <name> picks the interview skill).
+    \\                          Planning starts right away in a session of its own and writes
+    \\                          no code; once approved, the ticket queues to be built
     \\     --parent <key>       a sub-ticket; the project may be left out
     \\     --stage queued       start as soon as a slot or session frees up; without it
     \\                          the ticket waits in backlog until someone queues it
@@ -152,7 +154,7 @@ const tickets_skill =
     \\  cl ticket comment <key> "<text>"   a note; with --send it is also typed into the
     \\                                     ticket's session, and a ticket in review or testing
     \\                                     goes back to running
-    \\  cl ticket approve <key>            plan -> running, review -> testing, testing -> done
+    \\  cl ticket approve <key>            plan -> queued, review -> testing, testing -> done
     \\  Going to done (move or approve) closes the session. A worktree ticket takes
     \\  --merge (Claude merges its branch first) or --pr (opens a PR first); ask the
     \\  human which unless they said. --close, the default, just closes. --tell "<text>"

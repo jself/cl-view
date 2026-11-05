@@ -452,9 +452,16 @@ pub fn readTestPlan(a: std.mem.Allocator, t: board.Ticket) ?TestPlan {
 /// `done`, with the test plan Claude gives for something to try: null keeps
 /// the one from an earlier round, "" drops it. A plan without checks is
 /// refused (error.BadTestPlan), as is one during Planning (a plan being
-/// approved has nothing to try yet).
-pub fn done(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, summary: []const u8, test_plan: ?[]const u8) !void {
+/// approved has nothing to try yet). `plan`, from a planning session, is
+/// kept for the session that builds it and shown on the board; outside
+/// Planning it is refused (error.BadPlan).
+pub fn done(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, summary: []const u8, test_plan: ?[]const u8, plan: ?[]const u8) !void {
     const t = try board.getTicket(db, a, key);
+    if (plan) |md| {
+        if (t.stage != .planning or std.mem.trim(u8, md, " \n\t").len == 0) return error.BadPlan;
+        try board.setPlan(ctx, db, t.id, md);
+        _ = try board.addComment(ctx, db, a, key, "claude", md, false);
+    }
     if (test_plan) |md| {
         if (t.stage == .planning) return error.BadTestPlan;
         if (md.len > 0 and (try parseTestPlan(a, md)).checkCount() == 0) return error.BadTestPlan;
@@ -667,22 +674,44 @@ test "done: each ticket keeps the test plan its own done gave" {
         }
     }.of;
 
-    try done(ctx, db, a, one, "did one", "## Checks\n- [ ] one works\n");
+    try done(ctx, db, a, one, "did one", "## Checks\n- [ ] one works\n", null);
     try std.testing.expectEqualStrings("one works", try checks(a, db, one));
     try std.testing.expectEqualStrings("", try checks(a, db, two));
 
     // Two finishing with its own plan leaves One's alone; without one, it has none.
-    try done(ctx, db, a, two, "did two", null);
+    try done(ctx, db, a, two, "did two", null, null);
     try std.testing.expectEqualStrings("", try checks(a, db, two));
-    try done(ctx, db, a, two, "did two", "## Checks\n- [ ] two works\n");
+    try done(ctx, db, a, two, "did two", "## Checks\n- [ ] two works\n", null);
     try std.testing.expectEqualStrings("one works", try checks(a, db, one));
     try std.testing.expectEqualStrings("two works", try checks(a, db, two));
 
     // A later round: no plan keeps it, "" drops it, one without checks is refused.
-    try done(ctx, db, a, one, "again", null);
+    try done(ctx, db, a, one, "again", null, null);
     try std.testing.expectEqualStrings("one works", try checks(a, db, one));
-    try std.testing.expectError(error.BadTestPlan, done(ctx, db, a, one, "again", "## Setup\n1. x\n"));
+    try std.testing.expectError(error.BadTestPlan, done(ctx, db, a, one, "again", "## Setup\n1. x\n", null));
     try std.testing.expectEqualStrings("one works", try checks(a, db, one));
-    try done(ctx, db, a, one, "again", "");
+    try done(ctx, db, a, one, "again", "", null);
     try std.testing.expectEqualStrings("", try checks(a, db, one));
+}
+
+test "done: a planning session's plan is kept and shown; elsewhere it is refused" {
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp" };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "qa", .dir = "/nonexistent" });
+    const k = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Plan me", .plan = true });
+    try std.testing.expectError(error.BadPlan, done(ctx, db, a, k, "Plan ready", null, " \n"));
+    try done(ctx, db, a, k, "Plan ready", null, "## Steps\n1. retry\n");
+    const t = try board.getTicket(db, a, k);
+    try std.testing.expectEqualStrings("## Steps\n1. retry\n", t.plan_md);
+    try std.testing.expectEqual(board.Stage.planning, t.stage);
+    const cs = try board.comments(db, a, t.id);
+    try std.testing.expect(cs.len >= 1);
+    try std.testing.expectEqualStrings("## Steps\n1. retry\n", cs[0].body);
+    _ = try board.approve(ctx, db, a, k);
+    try std.testing.expectError(error.BadPlan, done(ctx, db, a, k, "built", null, "## Steps\n"));
 }

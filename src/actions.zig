@@ -336,8 +336,9 @@ fn closeSession(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8) !
     try tmux.kill(ctx, s);
 }
 
-/// Approve; an approved plan also tells Claude to go ahead, and a tested
-/// ticket going on to Done finishes as `move` does.
+/// Approve. An approved plan goes to Queued: the dispatcher closes the
+/// planning session and a new one builds it, told the plan. A tested ticket
+/// going on to Done finishes as `move` does.
 pub fn approve(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, spin_off: bool, finish: Finish) !board.Stage {
     if ((try board.getTicket(db, a, key)).stage == .testing) {
         try readyForDone(ctx, db, a, key, spin_off);
@@ -345,14 +346,6 @@ pub fn approve(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, sp
     }
     const from = try board.approve(ctx, db, a, key);
     if (from == .testing) try closeSession(ctx, db, a, key);
-    if (from == .planning) {
-        const t = try board.getTicket(db, a, key);
-        const go = "The plan is approved. Leave plan mode and build it.";
-        if (liveSession(ctx, t)) |s| {
-            try tmux.sendLine(ctx, s, go);
-            _ = try board.addComment(ctx, db, a, key, "you", go, true);
-        }
-    }
     return from;
 }
 

@@ -461,7 +461,9 @@ test trustYesSelected {
 pub fn sendInitialMessage(ctx: Ctx, tmux_name: []const u8, message: []const u8, accept_trust: bool) !void {
     try waitForPrompt(ctx, tmux_name, accept_trust);
     ctx.sleepMs(300);
-    try submit(ctx, tmux_name, message, false);
+    // Pasted, so its newlines survive (typed, Claude's composer drops them
+    // and the ticket's title runs into its body, a plan into one line).
+    try submit(ctx, tmux_name, message, true);
 }
 
 /// Wait (up to 60 s) for Claude's prompt to show in the pane.
