@@ -44,6 +44,10 @@ const instructions =
     \\sessions on a weekend). Leave them out of summaries unless asked, and never raise an
     \\alert about one. `cl watch` stays silent about them.
     \\
+    \\Hidden projects (`cl project list` says hidden) are the same for tickets: leave their
+    \\tickets out of summaries unless the human asks about that project, and never raise an
+    \\alert about one. `cl ticket needs` and `cl ticket list` already leave them out.
+    \\
     \\Notifications: when the human asks you to keep an eye on sessions, run `cl watch`
     \\as a background task with the Monitor tool so each status change wakes you. Without
     \\Monitor, run it in the background and read its output when the human checks in.
@@ -126,6 +130,11 @@ const tickets_skill =
     \\prompt), review (finished, to review), testing (to try), ended (its session went away),
     \\unparked (its park's check passed and it resumed), park-expired (the check never passed).
     \\`cl ticket list --parked` lists parked tickets; `show` has what each waits on and its checks.
+    \\
+    \\Hidden projects (`hidden` in `cl project list`; `cl project hide` / `unhide`): the human
+    \\put them aside. `needs` and `list` leave their tickets out (`--hidden-projects`, or
+    \\`--project <name>`, brings them back). Leave them out of summaries unless asked about
+    \\that project, and never raise an alert about one. Their queued tickets still run.
     \\
     \\## Changing tickets
     \\

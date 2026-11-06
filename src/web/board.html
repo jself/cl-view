@@ -43,7 +43,16 @@
   .seg { display: inline-flex; border: 1px solid var(--line); border-radius: calc(10 * var(--u)); overflow: hidden; }
   .seg button { min-height: calc(36 * var(--u)); padding: 0 calc(12 * var(--u)); border: 0; background: #18191c; color: #c4c6ca; cursor: pointer; }
   .seg button.on { background: var(--line); color: #fff; }
-  input[type=search], input[type=text], select, textarea {
+  /* The view tabs: one icon each (name in the tooltip), the chosen one filled. */
+  .vtabs { display: inline-flex; border: 1px solid var(--line); border-radius: calc(10 * var(--u)); overflow: hidden; }
+  .vtabs button { display: inline-flex; align-items: center; justify-content: center; width: calc(40 * var(--u)); min-height: calc(36 * var(--u)); padding: 0;
+                  border: 0; background: #18191c; color: #a9acb1; cursor: pointer; }
+  .vtabs button + button { border-left: 1px solid var(--line); }
+  .vtabs button:hover { color: #fff; }
+  .vtabs button.on { background: var(--accent); color: var(--accent-fg); }
+  .vtabs button:focus-visible { outline: 2px solid #8fbcff; outline-offset: -2px; }
+  .vtabs svg { width: calc(18 * var(--u)); height: calc(18 * var(--u)); }
+  input[type=search], input[type=text], input[type=number], select, textarea {
     min-height: calc(36 * var(--u)); padding: calc(6 * var(--u)) calc(10 * var(--u)); border: 1px solid var(--line); border-radius: calc(8 * var(--u)); background: #18191c; }
   textarea { width: 100%; resize: vertical; }
   #search { min-width: 0; flex: 0 1 calc(280 * var(--u)); margin-left: auto; }
@@ -68,6 +77,7 @@
 
   nav#filters { display: flex; flex-wrap: wrap; align-items: center; gap: calc(8 * var(--u)); padding: calc(12 * var(--u)) calc(16 * var(--u)); }
   nav#filters select { min-height: calc(34 * var(--u)); }
+  nav#filters[hidden] { display: none; }
   .switch { position: relative; display: inline-flex; align-items: center; gap: calc(8 * var(--u)); min-height: calc(34 * var(--u)); padding: 0 calc(4 * var(--u));
             cursor: pointer; white-space: nowrap; flex: none; color: #d6d7da; user-select: none; }
   .switch input { position: absolute; opacity: 0; width: 1px; height: 1px; margin: 0; }
@@ -78,6 +88,7 @@
   .switch input:checked + .track { background: var(--accent); }
   .switch input:checked + .track::after { transform: translateX(calc(14 * var(--u))); background: #fff; }
   .switch input:focus-visible + .track { outline: 2px solid #8fbcff; outline-offset: 2px; }
+  .switch[hidden] { display: none; }
   .switch .n { font: calc(12 * var(--u)) var(--mono); color: var(--muted); }
 
   main { padding: 0 calc(16 * var(--u)) calc(32 * var(--u)); }
@@ -156,6 +167,12 @@
   .list td { padding: calc(9 * var(--u)) calc(12 * var(--u)); border-top: 1px solid var(--line2); vertical-align: top; }
   .list tr.row { cursor: pointer; }
   .list tr.row:hover td { background: #17181b; }
+  .projects-head { display: flex; flex-wrap: wrap; align-items: center; gap: calc(10 * var(--u)); margin: calc(14 * var(--u)) 0 calc(12 * var(--u)); }
+  .list tr.dim td:not(.acts) { opacity: .5; }
+  .list td.acts { white-space: nowrap; }
+  .list td.acts .btn { min-height: calc(30 * var(--u)); padding: 0 calc(10 * var(--u)); }
+  .formerr { margin: 0; padding: calc(8 * var(--u)) calc(12 * var(--u)); border: 1px solid #6b2b2b; border-radius: calc(8 * var(--u)); background: var(--conflict-bg); color: var(--conflict); }
+  .formerr[hidden] { display: none; }
 
   dialog { padding: 0; border: 1px solid var(--line); border-radius: calc(16 * var(--u)); background: #17181b; color: var(--fg);
            width: min(calc(900 * var(--u)), calc(100vw - calc(24 * var(--u)))); max-height: calc(100dvh - calc(40 * var(--u))); }
@@ -249,8 +266,11 @@
   <span class="title">cl board</span>
   <span id="summary" class="muted"></span>
   <span class="grow"></span>
-  <div class="seg" role="group" aria-label="View">
-    <button type="button" data-view="board">Board</button><button type="button" data-view="lanes">Lanes</button><button type="button" data-view="list">List</button>
+  <div class="vtabs" role="tablist" aria-label="View">
+    <button type="button" role="tab" data-view="board" title="Board" aria-label="Board"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><path d="M6 2.5v11M10 2.5v11"/></svg></button><button
+      type="button" role="tab" data-view="lanes" title="Lanes" aria-label="Lanes"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><path d="M1.5 6.2h13M1.5 9.8h13M5.5 2.5v11"/></svg></button><button
+      type="button" role="tab" data-view="list" title="List" aria-label="List"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5.5 4h8.5M5.5 8h8.5M5.5 12h8.5M2 4h.01M2 8h.01M2 12h.01" stroke-width="1.8"/></svg></button><button
+      type="button" role="tab" data-view="projects" title="Projects" aria-label="Projects"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.5 4a1 1 0 0 1 1-1h3.6l1.6 1.8h5.8a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z"/></svg></button>
   </div>
   <a class="btn" href="/">Terminal</a>
   <a class="btn" id="chatBtn" href="/?attach=operator" title="Talk to the operator: it can make tickets and check on sessions (O)">Chat</a>
@@ -272,6 +292,7 @@
   <select id="projectSel" aria-label="Project"></select>
   <label class="switch"><input type="checkbox" role="switch" id="subsSw"><span class="track"></span>Sub-tickets</label>
   <label class="switch"><input type="checkbox" role="switch" id="doneSw"><span class="track"></span>Done<span class="n" id="doneN"></span></label>
+  <label class="switch" id="hiddenProjWrap" title="Show the tickets of projects you hid (Projects view)" hidden><input type="checkbox" role="switch" id="hiddenProjSw"><span class="track"></span>Hidden projects<span class="n" id="hiddenProjN"></span></label>
   <input id="search" type="search" placeholder="Search tickets" aria-label="Search tickets">
 </nav>
 <main id="main"></main>
@@ -297,6 +318,8 @@
       <label>Check every<input type="text" name="every" value="1h" size="6"></label>
       <label>Give up after<input type="text" name="max" value="7d" size="6"></label></div>
     <div class="actions"><button type="submit" class="btn primary">Park it</button></div></form></div></dialog>
+<dialog id="projDlg" aria-label="Project" style="width:min(calc(620 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="projBody"></div></dialog>
+<dialog id="projRmDlg" aria-label="Delete the project" style="width:min(calc(520 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="projRmBody"></div></dialog>
 <dialog id="killDlg" aria-label="Kill the session" style="width:min(calc(480 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="killBody"></div></dialog>
 <div id="toast" role="status"></div>
 
@@ -313,7 +336,7 @@ const store = (k, v) => { try { if (v === undefined) return localStorage.getItem
 const state = {
   data: null, view: store("cl-view") || "board", filter: "all", project: "", subs: store("cl-subs") === "1", done: store("cl-done") === "1",
   search: "", needsOpen: store("cl-needs") !== "0", needsHidden: store("cl-needs-hidden") === "1", open: null, detail: null, tab: null, picks: {}, other: {}, checks: {},
-  sending: false,
+  sending: false, hiddenProjects: store("cl-hidden-projects") === "1",
 };
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -354,6 +377,12 @@ const asksStill = (t, f) => t.stage !== "done" || f.kind === "after-merge";
 const needsMe = (row) => !row.ticket.park && row.ticket.flags.some((f) => !f.hidden && asksStill(row.ticket, f)) && !row.working;
 // Hidden from Needs you: every flag it has is hidden (a new one brings it back).
 const hiddenNeeds = (row) => !row.ticket.park && row.ticket.flags.length > 0 && row.ticket.flags.every((f) => f.hidden) && row.ticket.flags.some((f) => asksStill(row.ticket, f)) && !row.working;
+// Hidden projects (cl project hide): their tickets stay out of the views and
+// Needs you unless the Hidden projects switch is on. Picking one in the
+// project filter shows its tickets anyway.
+const hiddenProject = (name) => state.data.projects.some((p) => p.name === name && p.hidden);
+const projectShown = (name) => state.hiddenProjects || !hiddenProject(name);
+const shownRows = () => state.data.tickets.filter((r) => projectShown(r.ticket.project));
 const asks = (t) => t.flags.filter((f) => f.kind !== "testing" || t.stage === "testing");
 function askText(t, f) {
   const d = flagDetail(f);
@@ -453,6 +482,7 @@ function visible() {
     if (!state.subs && t.parent) return false;
     if (!state.done && t.stage === "done") return false;
     if (state.project && t.project !== state.project) return false;
+    if (!state.project && !projectShown(t.project)) return false;
     if (q && !(t.key + " " + t.title + " " + t.body).toLowerCase().includes(q)) return false;
     const f = state.filter;
     if (f === "all") return true;
@@ -464,11 +494,15 @@ function visible() {
 
 function render() {
   const d = state.data; if (!d) return;
-  const live = d.tickets.filter((r) => r.status && r.status !== "gone").length;
-  document.getElementById("summary").textContent = `${d.tickets.length} tickets · ${live} sessions live`;
-  for (const b of document.querySelectorAll("[data-view]")) b.classList.toggle("on", b.dataset.view === state.view);
+  const shown = shownRows();
+  const live = shown.filter((r) => r.status && r.status !== "gone").length;
+  document.getElementById("summary").textContent = `${shown.length} tickets · ${live} sessions live`;
+  for (const b of document.querySelectorAll("[data-view]")) { const on = b.dataset.view === state.view; b.classList.toggle("on", on); b.setAttribute("aria-selected", on); }
   renderNeeds(); renderFilters();
   const main = document.getElementById("main");
+  // The filters are about tickets; the Projects view lists every project.
+  document.getElementById("filters").hidden = state.view === "projects";
+  if (state.view === "projects") { setHtml(main, projectsHtml()); return; }
   if (!d.projects.length) {
     setHtml(main, `<p class="empty">No projects yet. Add one with <span class="mono">cl project add &lt;name&gt; &lt;dir&gt;</span>, or with New ticket.</p>`); return;
   }
@@ -477,8 +511,8 @@ function render() {
 }
 
 function renderNeeds() {
-  const rows = state.data.tickets.filter(needsMe);
-  const hidden = state.data.tickets.filter(hiddenNeeds);
+  const rows = shownRows().filter(needsMe);
+  const hidden = shownRows().filter(hiddenNeeds);
   rows.sort((a, b) => Math.min(...a.ticket.flags.map((f) => f.at)) - Math.min(...b.ticket.flags.map((f) => f.at)));
   const box = document.getElementById("needs");
   box.style.display = rows.length || hidden.length ? "" : "none";
@@ -516,14 +550,19 @@ function renderNeeds() {
 }
 
 function renderFilters() {
-  const d = state.data; const mine = d.tickets.filter((r) => state.subs || !r.ticket.parent);
+  const d = state.data; const mine = d.tickets.filter((r) => (state.subs || !r.ticket.parent) && (state.project ? r.ticket.project === state.project : projectShown(r.ticket.project)));
   const done = mine.filter((r) => r.ticket.stage === "done").length; const all = state.done ? mine : mine.filter((r) => r.ticket.stage !== "done");
   const n = (f) => all.filter((r) => f === "all" || (f === "me" ? needsMe(r) : f === "working" ? r.status === "busy" : r.ticket.flags.some((x) => x.kind === f))).length;
   const statuses = [["all", "All tickets"], ["me", "Needs me"], ["input", "Needs input"], ["question", "Questions"], ["review", "Review"], ["testing", "Testing"], ["working", "Working"]];
   setHtml(document.getElementById("statusSel"), statuses.map(([k, l]) =>
     `<option value="${k}" ${state.filter === k ? "selected" : ""}>${l} (${n(k)})</option>`).join(""));
   setHtml(document.getElementById("projectSel"), `<option value="">All projects</option>`
-    + d.projects.map((p) => `<option ${p.name === state.project ? "selected" : ""}>${esc(p.name)}</option>`).join(""));
+    + d.projects.filter((p) => projectShown(p.name) || p.name === state.project)
+      .map((p) => `<option value="${esc(p.name)}" ${p.name === state.project ? "selected" : ""}>${esc(p.name)}${p.hidden ? " (hidden)" : ""}</option>`).join(""));
+  const hiddenN = d.projects.filter((p) => p.hidden).length;
+  document.getElementById("hiddenProjWrap").hidden = !hiddenN;
+  document.getElementById("hiddenProjSw").checked = state.hiddenProjects;
+  document.getElementById("hiddenProjN").textContent = hiddenN ? String(hiddenN) : "";
   document.getElementById("statusSel").value = state.filter;
   document.getElementById("projectSel").value = state.project;
   document.getElementById("subsSw").checked = state.subs;
@@ -551,7 +590,7 @@ function boardHtml(rows) {
     return `<section class="col" data-drop="${s}"><h2>${STAGE_NAME[s]}<span class="n">${cs.length}</span></h2>${cs.map((r) => cardHtml(r)).join("")}<button type="button" class="add" data-new-when="${s}" aria-label="New ticket in ${STAGE_NAME[s]}">+</button></section>`; }).join("")}</div>`;
 }
 function lanesHtml(rows) {
-  const projects = state.data.projects.filter((p) => !state.project || p.name === state.project);
+  const projects = state.data.projects.filter((p) => state.project ? p.name === state.project : projectShown(p.name));
   return `<div class="lanes"><table><thead><tr><th></th>${columns().map((s) => `<th>${STAGE_NAME[s]}</th>`).join("")}</tr></thead><tbody>
     ${projects.map((p) => { const mine = rows.filter((r) => r.ticket.project === p.name);
       const running = mine.filter((r) => ["running", "planning"].includes(r.ticket.stage) && r.status && r.status !== "gone").length;
@@ -566,6 +605,92 @@ function listHtml(rows) {
       <td><div style="font-weight:500">${esc(t.title)}</div><div class="muted" style="font-size:calc(12 * var(--u))">${esc(t.project)}${t.parent ? " · sub-ticket of " + esc(t.parent) : ""}</div></td>
       <td>${STAGE_NAME[t.stage]}</td><td>${statusHtml(r)}</td><td>${pills(t)}</td><td class="mono" style="font-size:calc(12 * var(--u))">${esc(where(t))}</td><td class="muted">${ago(t.updated)}</td></tr>`; }).join("")}
   </tbody></table></div>`;
+}
+
+// ---- projects ----
+const MODE_NAME = { queue: "Queue", worktree: "Worktrees" };
+function projectCounts(name) {
+  const mine = state.data.tickets.filter((r) => r.ticket.project === name);
+  const open = mine.filter((r) => r.ticket.stage !== "done");
+  const by = STAGES.filter((s) => s !== "done").map((s) => [s, open.filter((r) => r.ticket.stage === s).length]).filter(([, n]) => n);
+  return { total: mine.length, open: open.length, done: mine.length - open.length, needs: open.filter(needsMe).length,
+    by: by.map(([s, n]) => `${n} ${STAGE_NAME[s].toLowerCase()}`).join(", ") };
+}
+function projectsHtml() {
+  const ps = state.data.projects;
+  const head = `<div class="projects-head"><button type="button" class="btn primary" id="addProjBtn">Add project</button>
+    <span class="muted" style="font-size:calc(12.5 * var(--u))">A hidden project's tickets stay out of the other views and Needs you; its queued tickets still run.</span></div>`;
+  if (!ps.length) return head + `<p class="empty">No projects yet.</p>`;
+  return head + `<div class="list"><table><thead><tr><th>Project</th><th>Directory</th><th>Prefix</th><th>Mode</th><th>Slots</th><th>Profile</th><th>Open tickets</th><th></th></tr></thead><tbody>
+    ${ps.map((p) => { const c = projectCounts(p.name); const n = esc(p.name);
+      return `<tr class="row${p.hidden ? " dim" : ""}" data-proj-edit="${n}">
+        <td><strong>${n}</strong>${p.hidden ? ` <span class="pill">Hidden</span>` : ""}</td>
+        <td class="mono" style="font-size:calc(12 * var(--u));overflow-wrap:anywhere">${esc(p.dir)}</td>
+        <td class="mono">${esc(p.prefix)}</td><td>${MODE_NAME[p.mode] || esc(p.mode)}</td>
+        <td class="mono">${p.mode === "worktree" ? p.slots : `<span class="muted" title="Slots only limit worktree tickets">${p.slots}</span>`}</td>
+        <td>${p.profile ? esc(p.profile) : `<span class="muted">default</span>`}</td>
+        <td title="${esc(c.by || "none open")}${c.done ? ` · ${c.done} done` : ""}"><span class="mono">${c.open}</span>${c.needs ? ` <span class="pill f-input">${c.needs} need${c.needs > 1 ? "" : "s"} you</span>` : ""}</td>
+        <td class="acts"><button type="button" class="btn" data-proj-edit="${n}">Edit</button>
+          <button type="button" class="btn" ${p.hidden ? `data-proj-unhide="${n}" title="Show its tickets again">Unhide` : `data-proj-hide="${n}" title="Keep its tickets out of the views and Needs you; they still run">Hide`}</button>
+          <button type="button" class="btn danger" data-proj-rm="${n}">Delete</button></td></tr>`; }).join("")}
+  </tbody></table></div>`;
+}
+// name: the project to edit, or null to add one.
+function openProject(name) {
+  const d = state.data; const p = name ? d.projects.find((x) => x.name === name) : null;
+  if (name && !p) return;
+  const profiles = [...d.profiles]; if (p?.profile && !profiles.includes(p.profile)) profiles.push(p.profile);
+  document.getElementById("projBody").innerHTML = `
+    <div class="head"><h1 style="flex:1">${p ? "Edit " + esc(p.name) : "Add a project"}</h1><button type="button" class="btn" id="closeProj">Cancel</button></div>
+    <form class="form" id="projForm" data-name="${esc(p?.name || "")}">
+      <div class="row2"><label>Name<input type="text" name="name" required value="${esc(p?.name || "")}" autocomplete="off"></label>
+        <label>Key prefix<input type="text" name="prefix" value="${esc(p?.prefix || "")}" placeholder="From the name" autocomplete="off" pattern="[A-Za-z0-9]{1,8}" title="Up to 8 letters and digits"></label></div>
+      <label>Directory<input type="text" name="dir" class="mono" required value="${esc(p?.dir || "")}" placeholder="~/devel/project" autocomplete="off"></label>
+      <div class="row2"><label>New tickets run as<select name="mode"><option value="queue" ${p?.mode !== "worktree" ? "selected" : ""}>Queue in a session</option><option value="worktree" ${p?.mode === "worktree" ? "selected" : ""}>Their own worktrees</option></select></label>
+        <label>Worktree slots<input type="number" name="slots" min="1" value="${p ? p.slots : ""}" placeholder="3"></label></div>
+      <label>Profile<select name="profile"><option value="">Default</option>${profiles.map((x) => `<option ${x === p?.profile ? "selected" : ""}>${esc(x)}</option>`).join("")}</select></label>
+      ${p ? `<p class="muted" style="margin:0;font-size:calc(12.5 * var(--u))">A new prefix applies to new tickets; existing keys stay as they are.</p>` : ""}
+      <p class="formerr" id="projErr" role="alert" hidden></p>
+      <div class="actions"><button type="submit" class="btn primary">${p ? "Save" : "Add project"}</button></div></form>`;
+  document.getElementById("projDlg").showModal();
+}
+async function submitProject(form) {
+  const f = Object.fromEntries(new FormData(form)); const old = form.dataset.name;
+  const body = { name: f.name.trim(), dir: f.dir.trim(), prefix: f.prefix.trim().toUpperCase(), mode: f.mode, profile: f.profile };
+  if (f.slots !== "") body.slots = Number(f.slots);
+  // An unchanged directory isn't sent: one that's gone since would refuse the save.
+  if (old && body.dir === state.data.projects.find((x) => x.name === old)?.dir) delete body.dir;
+  const err = document.getElementById("projErr"); err.hidden = true;
+  try {
+    await api(old ? `project/${encodeURIComponent(old)}/set` : "project", body);
+    if (old && state.project === old) state.project = body.name;
+    document.getElementById("projDlg").close(); toast(old ? `${body.name} saved` : `${body.name} added`); await refresh();
+  } catch (e) { err.textContent = e.message; err.hidden = false; }
+}
+async function projectAction(name, action, msg) {
+  try { await api(`project/${encodeURIComponent(name)}/${action}`, {}); toast(msg); await refresh(); }
+  catch (e) { toast(e.message, true); }
+}
+// What happens to its tickets: cl only deletes a project that has none.
+function confirmProjectRm(name) {
+  const c = projectCounts(name);
+  const what = c.total
+    ? `<p style="margin:0">It still has ${c.total} ticket${c.total > 1 ? "s" : ""} (${c.open} open, ${c.done} done). cl only deletes a project with no tickets, so this will be refused: delete its tickets, or move them to another project (a ticket's Edit tab), first.</p>`
+    : `<p style="margin:0">It has no tickets, so nothing else is deleted.</p>`;
+  document.getElementById("projRmBody").innerHTML = `
+    <div class="head"><h1 style="flex:1">Delete ${esc(name)}?</h1></div>${what}
+    <p class="muted" style="margin:0">The board forgets the project; its directory and files stay as they are.</p>
+    <p class="formerr" id="projRmErr" role="alert" hidden></p>
+    <div class="actions"><button type="button" class="btn danger" data-proj-rm-yes="${esc(name)}">Delete project</button><button type="button" class="btn" id="closeProjRm">Cancel</button></div>`;
+  document.getElementById("projRmDlg").showModal();
+}
+async function removeProject(name) {
+  const err = document.getElementById("projRmErr"); err.hidden = true;
+  try {
+    await api(`project/${encodeURIComponent(name)}/rm`, {});
+    if (state.project === name) state.project = "";
+    document.getElementById("projRmDlg").close(); toast(`${name} deleted`); await refresh();
+  } catch (e) { err.textContent = e.message; err.hidden = false; }
 }
 
 // ---- ticket popup ----
@@ -1175,6 +1300,14 @@ document.addEventListener("click", async (e) => {
   const el = e.target.closest("button, a, tr.row"); if (!el) return;
   const ds = el.dataset;
   if (ds.view) { state.view = ds.view; store("cl-view", ds.view); render(); return; }
+  if (el.id === "addProjBtn") return openProject(null);
+  if (el.id === "closeProj") return document.getElementById("projDlg").close();
+  if (el.id === "closeProjRm") return document.getElementById("projRmDlg").close();
+  if (ds.projHide) { e.stopPropagation(); return projectAction(ds.projHide, "hide", `${ds.projHide} hidden: its tickets are out of the views and Needs you`); }
+  if (ds.projUnhide) { e.stopPropagation(); return projectAction(ds.projUnhide, "unhide", `${ds.projUnhide} is shown again`); }
+  if (ds.projRmYes) return removeProject(ds.projRmYes);
+  if (ds.projRm) { e.stopPropagation(); return confirmProjectRm(ds.projRm); }
+  if (ds.projEdit) return openProject(ds.projEdit);
   if (el.id === "needsToggle") { state.needsOpen = !state.needsOpen; store("cl-needs", state.needsOpen ? "1" : "0"); renderNeeds(); return; }
   if (el.id === "newBtn") return openNew(null);
   if (ds.newWhen || ds.newProject) return openNew(null, { when: ds.newWhen, project: ds.newProject });
@@ -1293,6 +1426,7 @@ document.addEventListener("change", (e) => {
   if (e.target.id === "statusSel") { state.filter = e.target.value; render(); }
   if (e.target.id === "projectSel") { state.project = e.target.value; render(); }
   if (e.target.id === "doneSw") { state.done = e.target.checked; store("cl-done", state.done ? "1" : "0"); render(); }
+  if (e.target.id === "hiddenProjSw") { state.hiddenProjects = e.target.checked; store("cl-hidden-projects", state.hiddenProjects ? "1" : "0"); render(); }
   if (e.target.id === "subsSw") { state.subs = e.target.checked; store("cl-subs", state.subs ? "1" : "0"); render(); }
   if (e.target.id === "stageSel" && state.open) moveTo(state.open, e.target.value);
 });
@@ -1329,6 +1463,7 @@ document.addEventListener("submit", async (e) => {
   e.preventDefault();
   if (e.target.id === "newForm") return submitNew(e.target);
   if (e.target.id === "quickForm") return submitQuick(e.target);
+  if (e.target.id === "projForm") return submitProject(e.target);
   if (e.target.id === "parkForm") return submitPark(e.target);
   if (e.target.id === "editForm") {
     const f = Object.fromEntries(new FormData(e.target));

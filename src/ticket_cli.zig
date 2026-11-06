@@ -24,12 +24,15 @@ pub const ticket_usage =
     \\  sub <title> [-m <body>] [options of new]
     \\                              in a ticket's session: a sub-ticket of $CL_TICKET
     \\  list [--stage <s>] [--project <p>] [--flag <f>] [--needs] [--search <q>] [--open]
-    \\      [--top] [--parent <key>] [--parked]
+    \\      [--top] [--parent <key>] [--parked] [--hidden-projects]
     \\                              tickets, newest first (--needs: oldest ask first;
     \\                              --top: no sub-tickets; --parent: its sub-tickets)
-    \\  needs [--hidden]            tickets with a flag, oldest first (the inbox); a ticket
+    \\  needs [--hidden] [--hidden-projects]
+    \\                              tickets with a flag, oldest first (the inbox); a ticket
     \\                              whose session is working on it is left out until it stops,
     \\                              and a hidden one until it raises a new flag (--hidden: those)
+    \\                              list and needs leave out hidden projects' tickets (cl project
+    \\                              hide) unless --hidden-projects, --project or --parent names them
     \\  hide <key> / unhide <key>   keep it out of the inbox (Needs You) without clearing its
     \\                              flags, or bring it back; a new flag brings it back too
     \\  show <key>                  details, flags, sub-tickets, comments and activity
@@ -122,7 +125,10 @@ pub const project_usage =
     \\  set <name> [--name <new>] [--dir <dir>] [--prefix <KEY>] [--slots <n>]
     \\      [--mode queue|worktree] [--profile <name>] [--after-merge <command>]
     \\      [--after-merge-claude <steps> | none]
-    \\  rm <name>
+    \\  rm <name>                   (refused while it has tickets)
+    \\  hide <name> / unhide <name> keep its tickets out of the board's views, Needs You,
+    \\                              `cl ticket needs` and `cl ticket list`, or bring them back;
+    \\                              only what's shown: its queued tickets still run
     \\  list [--json]
     \\  after-merge <name>          run the after-merge command now, on trunk as it is
     \\
@@ -275,8 +281,9 @@ pub fn projectMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void
         const ps = board.listProjects(db, a) catch |e| boardFail(db, e, "project");
         if (args.has("--json")) return out(try std.fmt.allocPrint(a, "{f}\n", .{std.json.fmt(ps, .{})}));
         var aw: std.Io.Writer.Allocating = .init(a);
-        for (ps) |p| try aw.writer.print("{s}\t{s}\t{s}\tslots {d}\t{s}{s}{s}{s}{s}{s}{s}\n", .{
+        for (ps) |p| try aw.writer.print("{s}\t{s}\t{s}\tslots {d}\t{s}{s}{s}{s}{s}{s}{s}{s}\n", .{
             p.name, p.prefix, try ctx.shortenHomeIn(a, p.dir), p.slots, @tagName(p.mode),
+            if (p.hidden) "\thidden" else "",
             if (p.profile.len > 0) "\t" else "", p.profile,
             if (p.after_merge.len > 0) "\tafter merge: " else "", p.after_merge,
             if (p.after_merge_claude.len > 0) "\tclaude after merge: " else "", p.after_merge_claude,
@@ -328,6 +335,12 @@ pub fn projectMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void
         if (p.after_merge.len == 0) fail("{s} has no after-merge command (cl project set {s} --after-merge <command>)", .{ name, name });
         after_merge.startByHand(ctx, db, a, name, "-") catch |e| boardFail(db, e, "project");
         return out(try std.fmt.allocPrint(a, "{s}: after-merge run started; log: {s}\n", .{ name, try ctx.shortenHomeIn(a, try after_merge.logPath(ctx, a, cfg, name)) }));
+    }
+    if (std.mem.eql(u8, cmd, "hide") or std.mem.eql(u8, cmd, "unhide")) {
+        args.only(&.{}, project_usage);
+        if (args.pos.items.len != 1) fail("usage: cl project {s} <name>", .{cmd});
+        board.setProjectHidden(db, args.pos.items[0], std.mem.eql(u8, cmd, "hide")) catch |e| boardFail(db, e, "project");
+        return;
     }
     if (std.mem.eql(u8, cmd, "rm")) {
         args.only(&.{}, project_usage);
@@ -392,7 +405,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         return out(try std.fmt.allocPrint(a, "{s}\n", .{key}));
     }
     if (std.mem.eql(u8, cmd, "list") or std.mem.eql(u8, cmd, "ls") or std.mem.eql(u8, cmd, "needs")) {
-        args.only(&.{ "--stage", "--project", "--flag", "--needs", "--hidden", "--search", "--open", "--top", "--parent", "--parked", "--json" }, ticket_usage);
+        args.only(&.{ "--stage", "--project", "--flag", "--needs", "--hidden", "--search", "--open", "--top", "--parent", "--parked", "--hidden-projects", "--json" }, ticket_usage);
         if (pos.len != 0) fail("{s} takes no arguments\n{s}", .{ cmd, ticket_usage });
         const needs = args.has("--needs") or args.has("--hidden") or std.mem.eql(u8, cmd, "needs");
         const ts = board.listTickets(db, a, .{
@@ -408,6 +421,8 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
             .top = args.has("--top"),
             .parent = args.get("--parent"),
             .parked = args.has("--parked"),
+            // Hidden projects stay out unless asked for, by name or flag.
+            .shown = !args.has("--hidden-projects") and args.get("--project") == null and args.get("--parent") == null,
         }) catch |e| boardFail(db, e, "ticket");
         if (args.has("--json")) return out(try std.fmt.allocPrint(a, "{f}\n", .{std.json.fmt(ts, .{})}));
         var aw: std.Io.Writer.Allocating = .init(a);

@@ -68,6 +68,10 @@ pub const Project = struct {
     /// when it fails: "" for the default (rebuild and restart what runs from
     /// the checkout), "none" for nothing.
     after_merge_claude: []const u8 = "",
+    /// Kept out of the board's views, Needs You, `cl ticket needs` and
+    /// `cl ticket list` (unless asked for). Only what's shown: its queued
+    /// tickets still run.
+    hidden: bool = false,
 };
 
 pub const Flag = struct {
@@ -196,7 +200,8 @@ const schema =
     \\  after_merge TEXT NOT NULL DEFAULT '',
     \\  after_merge_pid INTEGER NOT NULL DEFAULT 0,
     \\  after_merge_pending TEXT NOT NULL DEFAULT '',
-    \\  after_merge_claude TEXT NOT NULL DEFAULT ''
+    \\  after_merge_claude TEXT NOT NULL DEFAULT '',
+    \\  hidden INTEGER NOT NULL DEFAULT 0
     \\);
     \\CREATE TABLE IF NOT EXISTS tickets (
     \\  id INTEGER PRIMARY KEY,
@@ -331,6 +336,7 @@ pub fn migrate(db: Db) !void {
         try addColumn(db, "projects", "after_merge_pending", "TEXT NOT NULL DEFAULT ''");
         try addColumn(db, "projects", "after_merge_claude", "TEXT NOT NULL DEFAULT ''");
         try addColumn(db, "tickets", "custom_close", "TEXT NOT NULL DEFAULT ''");
+        try addColumn(db, "projects", "hidden", "INTEGER NOT NULL DEFAULT 0");
         try db.execMulti(parks_schema);
     }
     if (have >= version) return;
@@ -472,6 +478,12 @@ pub fn updateProject(db: Db, name: []const u8, in: ProjectInput) Error!void {
     }
 }
 
+/// Hide a project from what the board shows, or show it again.
+pub fn setProjectHidden(db: Db, name: []const u8, hidden: bool) Error!void {
+    try db.exec("UPDATE projects SET hidden = ?2 WHERE name = ?1", .{ name, @as(i64, @intFromBool(hidden)) });
+    if (db.changes() == 0) return error.NotFound;
+}
+
 /// Remove a project; refused while it has tickets.
 pub fn removeProject(db: Db, name: []const u8) Error!void {
     if (try db.int("SELECT 1 FROM projects WHERE name = ?1", .{name}) == null) return error.NotFound;
@@ -479,7 +491,7 @@ pub fn removeProject(db: Db, name: []const u8) Error!void {
     try db.exec("DELETE FROM projects WHERE name = ?1", .{name});
 }
 
-const project_cols = "name, dir, prefix, slots, mode, profile, after_merge, after_merge_claude";
+const project_cols = "name, dir, prefix, slots, mode, profile, after_merge, after_merge_claude, hidden";
 
 fn readProject(st: sqlite.Stmt, a: std.mem.Allocator) !Project {
     return .{
@@ -491,6 +503,7 @@ fn readProject(st: sqlite.Stmt, a: std.mem.Allocator) !Project {
         .profile = try st.dupe(a, 5),
         .after_merge = try st.dupe(a, 6),
         .after_merge_claude = try st.dupe(a, 7),
+        .hidden = st.int(8) != 0,
     };
 }
 
@@ -726,6 +739,8 @@ pub const Filter = struct {
     parent: ?[]const u8 = null,
     /// Only parked tickets.
     parked: bool = false,
+    /// Leave out the tickets of hidden projects.
+    shown: bool = false,
 };
 
 /// Words of `q` as FTS5 prefix terms ("foo" bar → "foo"* "bar"*), so user
@@ -760,6 +775,7 @@ pub fn listTickets(db: Db, a: std.mem.Allocator, f: Filter) Error![]Ticket {
     if (f.parent != null) try sql.appendSlice(a, " AND t.parent = (SELECT id FROM tickets WHERE key = ?5 COLLATE NOCASE)");
     if (f.flag != null) try sql.appendSlice(a, " AND EXISTS (SELECT 1 FROM flags g WHERE g.ticket = t.id AND g.cleared IS NULL AND g.kind = ?3)");
     if (f.parked) try sql.appendSlice(a, " AND EXISTS (SELECT 1 FROM parks k WHERE k.ticket = t.id)");
+    if (f.shown) try sql.appendSlice(a, " AND NOT EXISTS (SELECT 1 FROM projects p WHERE p.name = t.project AND p.hidden != 0)");
     // Parked: it waits on something outside cl, not on you.
     if (f.needs) try sql.appendSlice(a, " AND NOT EXISTS (SELECT 1 FROM parks k WHERE k.ticket = t.id)");
     if (f.needs) try sql.appendSlice(a, if (f.hidden)
@@ -1349,6 +1365,30 @@ test "projects, tickets, flags, comments, done" {
     try removeTicket(db, a, k1);
     try removeTicket(db, a, k2);
     try removeProject(db, "qa-tool");
+}
+
+test "hidden projects: their tickets leave the shown lists, not the dispatcher's" {
+    const ctx = testCtx();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try Db.open(":memory:");
+    defer db.close();
+    try migrate(db);
+    try addProject(db, .{ .name = "qa", .dir = "/x/qa" });
+    try addProject(db, .{ .name = "web", .dir = "/x/web" });
+    const k1 = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Shown", .stage = .queued });
+    _ = try createTicket(ctx, db, a, .{ .project = "web", .title = "Hidden", .stage = .queued });
+    try setProjectHidden(db, "web", true);
+    try testing.expect((try getProject(db, a, "web")).hidden);
+    try testing.expect(!(try getProject(db, a, "qa")).hidden);
+    const shown = try listTickets(db, a, .{ .shown = true });
+    try testing.expectEqual(@as(usize, 1), shown.len);
+    try testing.expectEqualStrings(k1, shown[0].key);
+    try testing.expectEqual(@as(usize, 2), (try listTickets(db, a, .{ .stage = .queued })).len);
+    try setProjectHidden(db, "web", false);
+    try testing.expectEqual(@as(usize, 2), (try listTickets(db, a, .{ .shown = true })).len);
+    try testing.expectError(error.NotFound, setProjectHidden(db, "nope", true));
 }
 
 test "rank: new tickets go last, a drop goes between its neighbors" {

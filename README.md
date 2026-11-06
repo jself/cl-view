@@ -262,6 +262,8 @@ Every ticket belongs to a project, which gives it a key prefix:
 cl project add qa-tool ~/devel/qa-tool --slots 2 --mode worktree   # QA-1, QA-2, ...
 cl project add boats ~/devel/boats --prefix BOAT
 cl project list | set <name> [options] | rm <name>
+cl project hide boats         # its tickets leave the board, Needs You, needs and list; queued ones still run
+cl project unhide boats
 cl project set qa-tool --after-merge '<command>'   # run on each merge (see After merge)
 ```
 

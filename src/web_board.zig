@@ -11,7 +11,7 @@
 //!                                       gutter-stop launch launch-stop test-progress
 //!                                       test-results relocate park unpark
 //!   POST /api/project                   add a project
-//!   POST /api/project/<name>/<action>   set rm after-merge
+//!   POST /api/project/<name>/<action>   set rm hide unhide after-merge
 const std = @import("std");
 const Ctx = @import("ctx.zig");
 const config = @import("config.zig");
@@ -82,7 +82,8 @@ pub fn handle(ctx: Ctx, cfg: config.Config, req: *std.http.Server.Request, path:
     }
     var parts = std.mem.splitScalar(u8, path["/api/".len..], '/');
     const what = parts.next() orelse "";
-    const name = parts.next() orelse "";
+    // The page escapes names (encodeURIComponent): a project may be called "scratch 2".
+    const name = std.Uri.percentDecodeInPlace(try a.dupe(u8, parts.next() orelse ""));
     const action = parts.next() orelse "";
 
     const body: Body = if (post) readBody(req, a) catch {
@@ -95,6 +96,7 @@ pub fn handle(ctx: Ctx, cfg: config.Config, req: *std.http.Server.Request, path:
             error.NotFound => .{ .not_found, "no such ticket or project" },
             error.Exists => .{ .conflict, "already exists, or still in use" },
             error.BadInput => .{ .bad_request, "invalid input" },
+            error.NoSuchDir => .{ .bad_request, "no such directory" },
             error.NoSession => .{ .conflict, "the ticket has no live session" },
             error.CustomClose => .{ .conflict, "Claude asked to close it its own way; tell Claude, or just close it" },
             error.NothingAsked => .{ .conflict, "nothing is waiting for an answer" },
@@ -245,7 +247,7 @@ fn route(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: 
     if (std.mem.eql(u8, what, "project")) {
         if (name.len == 0) {
             const dir = try realDir(ctx, a, b.dir orelse return error.BadInput);
-            try board.addProject(db, .{
+            board.addProject(db, .{
                 .name = b.name orelse "",
                 .dir = dir,
                 .prefix = nonEmpty(b.prefix),
@@ -254,12 +256,12 @@ fn route(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: 
                 .profile = b.profile,
                 .after_merge = b.after_merge,
                 .after_merge_claude = b.after_merge_claude,
-            });
+            }) catch |e| return projectFail(req, e);
             _ = worktree.ensureJj(ctx, a, dir);
             return ok(req, a, .{ .ok = true });
         }
         if (std.mem.eql(u8, action, "set")) {
-            try board.updateProject(db, name, .{
+            board.updateProject(db, name, .{
                 .name = b.name orelse "",
                 .dir = if (b.dir) |d| try realDir(ctx, a, d) else "",
                 .prefix = nonEmpty(b.prefix),
@@ -268,16 +270,33 @@ fn route(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: 
                 .profile = b.profile,
                 .after_merge = b.after_merge,
                 .after_merge_claude = b.after_merge_claude,
-            });
+            }) catch |e| return projectFail(req, e);
         } else if (std.mem.eql(u8, action, "after-merge")) {
             if ((try board.getProject(db, a, name)).after_merge.len == 0) return error.BadInput;
             try after_merge.startByHand(ctx, db, a, name, nonEmpty(b.key) orelse "-");
+        } else if (std.mem.eql(u8, action, "hide") or std.mem.eql(u8, action, "unhide")) {
+            try board.setProjectHidden(db, name, std.mem.eql(u8, action, "hide"));
         } else if (std.mem.eql(u8, action, "rm")) {
-            try board.removeProject(db, name);
+            board.removeProject(db, name) catch |e| switch (e) {
+                error.Exists => {
+                    const n = try db.int("SELECT count(*) FROM tickets WHERE project = ?1", .{name}) orelse 0;
+                    return fail(req, .conflict, try std.fmt.allocPrint(a, "{s} still has {d} ticket{s} (Done ones count too). cl only deletes an empty project: delete its tickets or move them to another project first", .{ name, n, if (n == 1) "" else "s" }));
+                },
+                else => return e,
+            };
         } else return error.NotFound;
         return ok(req, a, .{ .ok = true });
     }
     return error.NotFound;
+}
+
+/// Adding or changing a project: say which input was wrong.
+fn projectFail(req: *std.http.Server.Request, err: board.Error) !void {
+    return switch (err) {
+        error.Exists => fail(req, .conflict, "another project already has that name or key prefix"),
+        error.BadInput => fail(req, .bad_request, "a project needs a name and a directory, and a key prefix is up to 8 capital letters and digits"),
+        else => err,
+    };
 }
 
 fn nonEmpty(s: ?[]const u8) ?[]const u8 {
@@ -288,7 +307,7 @@ fn nonEmpty(s: ?[]const u8) ?[]const u8 {
 fn realDir(ctx: Ctx, a: std.mem.Allocator, path: []const u8) ![]const u8 {
     const expanded = try ctx.expandHome(path);
     defer ctx.gpa.free(expanded);
-    return std.Io.Dir.cwd().realPathFileAlloc(ctx.io, expanded, a) catch error.BadInput;
+    return std.Io.Dir.cwd().realPathFileAlloc(ctx.io, expanded, a) catch error.NoSuchDir;
 }
 
 fn ticketAction(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: *std.http.Server.Request, key: []const u8, action: []const u8, b: Body) !void {
