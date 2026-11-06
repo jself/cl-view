@@ -516,6 +516,9 @@ const Terminal = struct {
     /// The registry's reference (dropped when the child exits) plus one per
     /// connection using it. Guarded by `State.mutex`.
     refs: u32 = 1,
+    /// The terminal modes its programs have set, read from all of its
+    /// output (also while detached). Guarded by `mutex`.
+    modes: Modes = .{},
 
     fn id(self: *const Terminal) []const u8 {
         return self.id_buf[0..self.id_len];
@@ -633,9 +636,17 @@ fn serveTerminal(state: *State, req: *std.http.Server.Request, key: []const u8) 
         // the phone dropped without a word): send that page away.
         if (t.ws) |old| old.writeMessage("", .connection_close) catch {};
         t.ws = &ws;
-        // The page resets its terminal only for a new one: a resumed one
-        // keeps the modes (mouse reporting, say) its programs turned on.
+        // The page resets its terminal only for a new one.
         ws.writeMessage(if (fresh) "new" else "resumed", .text) catch {};
+        // A resumed one may be a new page (the session reopened from the
+        // board, a reload) that never saw the modes its programs turned on,
+        // and tmux doesn't send them again: without mouse reporting,
+        // xterm.js turns the wheel into arrow keys. Set them again.
+        if (!fresh) {
+            var buf: [Modes.replay_max]u8 = undefined;
+            const replay = t.modes.replay(&buf);
+            if (replay.len > 0) ws.writeMessage(replay, .binary) catch {};
+        }
     }
     // Repaint for the new page: tmux redraws its client on request, and with
     // no client on this tty the chooser is in front, which redraws on Ctrl-L.
@@ -708,6 +719,102 @@ test attachTarget {
     try std.testing.expectEqualStrings("", attachTarget("/ws?t=x"));
 }
 
+/// The DEC private modes (ESC [ ? n h / l) a terminal's output has set, for
+/// replaying them to a page that resumes the terminal: tmux sets them once
+/// when it attaches and redraws without them. Reads output in pieces, so a
+/// sequence may be split between reads.
+const Modes = struct {
+    /// Cursor keys, cursor shown, mouse reporting and its encodings, focus
+    /// events, the alternate screen, bracketed paste.
+    const tracked = [_]u16{ 1, 25, 1000, 1002, 1003, 1004, 1005, 1006, 1015, 1049, 2004 };
+    /// What a new xterm.js has: all off but the cursor.
+    const default: u16 = 1 << 1;
+    const replay_max = tracked.len * "\x1b[?0000h".len;
+
+    /// Bit i is tracked[i].
+    on: u16 = default,
+    state: enum { ground, esc, csi, private } = .ground,
+    /// The parameters of the sequence being read: up to 8 (the rest add to
+    /// the last).
+    params: [8]u16 = undefined,
+    n_params: u8 = 0,
+
+    fn feed(self: *Modes, bytes: []const u8) void {
+        for (bytes) |c| switch (self.state) {
+            .ground => if (c == 0x1b) {
+                self.state = .esc;
+            },
+            .esc => switch (c) {
+                '[' => self.state = .csi,
+                // RIS: a full reset.
+                'c' => {
+                    self.on = default;
+                    self.state = .ground;
+                },
+                0x1b => {},
+                else => self.state = .ground,
+            },
+            .csi => if (c == '?') {
+                self.state = .private;
+                self.params[0] = 0;
+                self.n_params = 1;
+            } else {
+                self.state = if (c == 0x1b) .esc else .ground;
+            },
+            .private => switch (c) {
+                '0'...'9' => {
+                    const p = &self.params[self.n_params - 1];
+                    p.* = p.* *| 10 +| (c - '0');
+                },
+                ';' => if (self.n_params < self.params.len) {
+                    self.params[self.n_params] = 0;
+                    self.n_params += 1;
+                },
+                'h', 'l' => {
+                    for (self.params[0..self.n_params]) |p| {
+                        const i = std.mem.indexOfScalar(u16, &tracked, p) orelse continue;
+                        const bit = @as(u16, 1) << @intCast(i);
+                        if (c == 'h') self.on |= bit else self.on &= ~bit;
+                    }
+                    self.state = .ground;
+                },
+                0x1b => self.state = .esc,
+                else => self.state = .ground,
+            },
+        };
+    }
+
+    /// The sequences that take a new xterm.js to these modes.
+    fn replay(self: *const Modes, buf: *[replay_max]u8) []const u8 {
+        var w: std.Io.Writer = .fixed(buf);
+        for (tracked, 0..) |m, i| {
+            const bit = @as(u16, 1) << @intCast(i);
+            if ((self.on ^ default) & bit == 0) continue;
+            w.print("\x1b[?{d}{c}", .{ m, @as(u8, if (self.on & bit != 0) 'h' else 'l') }) catch unreachable;
+        }
+        return w.buffered();
+    }
+};
+
+test Modes {
+    var m: Modes = .{};
+    var buf: [Modes.replay_max]u8 = undefined;
+    try std.testing.expectEqualStrings("", m.replay(&buf));
+    // As tmux attaches with mouse on, split across reads.
+    m.feed("x\x1b[?1h\x1b=\x1b[?25l\x1b[?1006h\x1b[?10");
+    m.feed("00h\x1b[?1002h\x1b[?2004h\x1b[31mhi");
+    try std.testing.expectEqualStrings("\x1b[?1h\x1b[?25l\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h", m.replay(&buf));
+    // Several in one, one untracked; then turned off.
+    m.feed("\x1b[?25;1000;7l\x1b[?2004l");
+    try std.testing.expectEqualStrings("\x1b[?1h\x1b[?25l\x1b[?1002h\x1b[?1006h", m.replay(&buf));
+    // Not private: ignored.
+    m.feed("\x1b[1000h\x1b[4h");
+    try std.testing.expectEqualStrings("\x1b[?1h\x1b[?25l\x1b[?1002h\x1b[?1006h", m.replay(&buf));
+    // A reset.
+    m.feed("\x1bc");
+    try std.testing.expectEqualStrings("", m.replay(&buf));
+}
+
 test termId {
     try std.testing.expectEqualStrings("ab12", termId("/ws?t=ab12"));
     try std.testing.expectEqualStrings("ab12", termId("/ws?t=ab12&x=1"));
@@ -725,7 +832,9 @@ fn pumpOutput(state: *State, t: *Terminal) void {
         if (n == 0) break;
         t.mutex.lockUncancelable(io);
         defer t.mutex.unlock(io);
-        // Output while detached is dropped; reattaching repaints.
+        t.modes.feed(buf[0..n]);
+        // Output while detached is dropped; reattaching repaints, and the
+        // modes it set are replayed.
         if (t.ws) |ws| ws.writeMessage(buf[0..n], .binary) catch {};
     }
     state.mutex.lockUncancelable(io);

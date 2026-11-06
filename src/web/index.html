@@ -120,7 +120,9 @@
 
   // A swipe on a phone only scrolls xterm.js's own scrollback, and there is
   // none: replay it as wheel events, which xterm.js hands to tmux (mouse on)
-  // or turns into arrow keys for the chooser.
+  // or turns into arrow keys for the chooser. Arrow keys whenever xterm.js
+  // doesn't know mouse reporting is on, so a page that resumes a terminal
+  // gets the modes set again (Modes in web.zig).
   {
     const el = document.getElementById("term");
     let lastY = null;
@@ -225,8 +227,8 @@
     };
     sock.onmessage = (e) => {
       clearTimeout(probeTimer);
-      // "new" or "resumed": a resumed terminal keeps the modes its programs
-      // set (tmux's mouse reporting), which a reset would lose.
+      // "new" or "resumed". A resumed terminal's server sends the modes its
+      // programs set (tmux's mouse reporting) again, then a redraw.
       if (typeof e.data === "string") { if (e.data === "new") term.reset(); return; }
       term.write(new Uint8Array(e.data));
     };
