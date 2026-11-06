@@ -585,7 +585,8 @@ test localAddress {
 
 pub const Check = struct {
     text: []const u8,
-    pass: bool,
+    /// null: not tested (you sent the results before getting to it).
+    pass: ?bool = null,
     note: []const u8 = "",
 };
 
@@ -597,19 +598,42 @@ pub const StepResult = struct {
 };
 
 /// What you found, step by step, as a comment for the ticket, and whether all
-/// passed. Steps with nothing to say (no checks, no comment) are left out.
-pub fn recordResults(a: std.mem.Allocator, steps: []const StepResult, note: []const u8) !struct { passed: bool, commented: bool, text: []const u8 } {
+/// passed (a check not tested hasn't). Steps with nothing to say (no checks,
+/// no comment) are left out; a step none of whose checks were tested is one
+/// line, and the first line names those steps so Claude knows they still
+/// need testing.
+pub fn recordResults(a: std.mem.Allocator, steps: []const StepResult, note: []const u8) !struct { passed: bool, commented: bool, untested: bool, text: []const u8 } {
     var aw: std.Io.Writer.Allocating = .init(a);
     const w = &aw.writer;
-    var passed = true;
+    var failed = false;
+    var untested = false;
     var commented = std.mem.trim(u8, note, " \n").len > 0;
-    for (steps) |st| {
-        for (st.checks) |c| if (!c.pass) {
-            passed = false;
+    // Steps with a check not tested, as "2, 3".
+    var skipped: std.Io.Writer.Allocating = .init(a);
+    for (steps, 1..) |st, i| {
+        var some = false;
+        for (st.checks) |c| if (c.pass) |p| {
+            if (!p) failed = true;
+        } else {
+            some = true;
         };
+        if (some) {
+            if (untested) try skipped.writer.writeAll(", ");
+            try skipped.writer.print("{d}", .{i});
+            untested = true;
+        }
         if (std.mem.trim(u8, st.comment, " \n").len > 0) commented = true;
     }
-    try w.writeAll(if (!passed)
+    const which = skipped.written();
+    const plural = std.mem.indexOfScalar(u8, which, ',') != null;
+    if (untested) {
+        try w.print("Tested in part: {s} The human sent these before testing everything: step{s} {s} still need{s} testing (the checks marked [?] or \"not tested\" below).\n", .{
+            if (failed) "some checks failed. Please fix them, then finish the same way as before." else if (commented) "what was tested passed, with comments. Please look at them, then finish the same way as before." else "what was tested passed. Finish the same way as before.",
+            if (plural) "s" else "",
+            which,
+            if (plural) "" else "s",
+        });
+    } else try w.writeAll(if (failed)
         "Tested: some checks failed. Please fix them, then finish the same way as before.\n"
     else if (commented)
         "Tested: everything passed, with comments. Please look at them, then finish the same way as before.\n"
@@ -617,12 +641,20 @@ pub fn recordResults(a: std.mem.Allocator, steps: []const StepResult, note: []co
         "Tested: everything passed.\n");
     for (steps, 1..) |st, i| {
         if (st.checks.len == 0 and st.comment.len == 0) continue;
-        if (st.title.len > 0) try w.print("\nStep {d}: {s}\n", .{ i, st.title }) else try w.writeAll("\n");
-        for (st.checks) |c| try w.print("- [{s}] {s}{s}{s}\n", .{ if (c.pass) "x" else " ", c.text, if (c.note.len > 0) " — " else "", c.note });
+        const none = st.checks.len > 0 and for (st.checks) |c| {
+            if (c.pass != null) break false;
+        } else true;
+        if (st.title.len > 0) try w.print("\nStep {d}: {s}{s}\n", .{ i, st.title, if (none) " (not tested)" else "" }) else try w.writeAll("\n");
+        if (!none or st.title.len == 0) for (st.checks) |c| try w.print("- [{s}] {s}{s}{s}\n", .{
+            if (c.pass) |p| (if (p) "x" else " ") else "?",
+            c.text,
+            if (c.note.len > 0) " — " else "",
+            c.note,
+        });
         if (st.comment.len > 0) try w.print("Comment: {s}\n", .{st.comment});
     }
     if (note.len > 0) try w.print("\n{s}\n", .{note});
-    return .{ .passed = passed, .commented = commented, .text = aw.written() };
+    return .{ .passed = !failed and !untested, .commented = commented, .untested = untested, .text = aw.written() };
 }
 
 test recordResults {
@@ -653,6 +685,33 @@ test recordResults {
         \\Otherwise fine
         \\
     , r.text);
+    // Sent after the first step: what wasn't reached is "not tested", and
+    // nothing is "passed".
+    const part = try recordResults(arena_state.allocator(), &.{
+        .{ .title = "Start it", .checks = &.{ .{ .text = "Comes up", .pass = false, .note = "crashed" }, .{ .text = "Logs" } } },
+        .{ .title = "The hero", .checks = &.{ .{ .text = "AVIF" }, .{ .text = "WebP" } } },
+        .{ .title = "The footer", .checks = &.{.{ .text = "Links" }} },
+    }, "");
+    try std.testing.expect(!part.passed and part.untested and !part.commented);
+    try std.testing.expectEqualStrings(
+        \\Tested in part: some checks failed. Please fix them, then finish the same way as before. The human sent these before testing everything: steps 1, 2, 3 still need testing (the checks marked [?] or "not tested" below).
+        \\
+        \\Step 1: Start it
+        \\- [ ] Comes up — crashed
+        \\- [?] Logs
+        \\
+        \\Step 2: The hero (not tested)
+        \\
+        \\Step 3: The footer (not tested)
+        \\
+    , part.text);
+    // Everything tested passed, but not everything was tested: not a pass.
+    const half = try recordResults(arena_state.allocator(), &.{
+        .{ .title = "a", .checks = &.{.{ .text = "y", .pass = true }} },
+        .{ .title = "b", .checks = &.{.{ .text = "z" }} },
+    }, "");
+    try std.testing.expect(!half.passed and half.untested);
+    try std.testing.expect(std.mem.startsWith(u8, half.text, "Tested in part: what was tested passed. Finish the same way as before. The human sent these before testing everything: step 2 still needs testing (the checks marked [?] or \"not tested\" below).\n"));
 }
 
 test "done: each ticket keeps the test plan its own done gave" {

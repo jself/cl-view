@@ -90,7 +90,7 @@ pub const ticket_usage =
     \\  launch <key> [--step <n>] [--stop]
     \\                              run a step's run: command (the first one by default) in tmux
     \\                              session clrun_<key>_s<n>; --stop: that step's, or all
-    \\  test <key>                  walk through the test plan here; failures go back to Claude
+    \\  test <key>                  walk through the test plan here; failures go back to Claude; s at a check stops and sends what you have
     \\  relocate <key> worktree|queue
     \\                              move it to a worktree of its own, or back to the queue; one
     \\                              under way takes its jj change and conversation along and
@@ -830,7 +830,15 @@ fn walkTest(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8) !void
             return s.len == 0 or s[0] == 'y' or s[0] == 'Y';
         }
     }.of;
+    // "s" at a check stops there: what's left goes as not tested.
+    var stopped = false;
     for (plan.steps, 1..) |st, i| {
+        if (stopped) {
+            var rest: std.ArrayList(review.Check) = .empty;
+            for (st.checks) |c| try rest.append(a, .{ .text = c });
+            try results.append(a, .{ .title = st.title, .checks = rest.items });
+            continue;
+        }
         var aw: std.Io.Writer.Allocating = .init(a);
         try aw.writer.writeAll("\n");
         try printStep(&aw.writer, st, i, plan.steps.len);
@@ -844,7 +852,16 @@ fn walkTest(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8) !void
         for (st.open) |url| if (yes(try ask.line(&in, a, try std.fmt.allocPrint(a, "  Open {s}? [Y/n] ", .{url})))) openUrl(ctx, url);
         var checks: std.ArrayList(review.Check) = .empty;
         for (st.checks) |c| {
-            const ans = try ask.line(&in, a, try std.fmt.allocPrint(a, "  Check: {s}\n  Pass? [y/n] ", .{c}));
+            if (stopped) {
+                try checks.append(a, .{ .text = c });
+                continue;
+            }
+            const ans = try ask.line(&in, a, try std.fmt.allocPrint(a, "  Check: {s}\n  Pass? [y/n, s to stop and send what you have] ", .{c}));
+            if (ans.len > 0 and (ans[0] == 's' or ans[0] == 'S')) {
+                stopped = true;
+                try checks.append(a, .{ .text = c });
+                continue;
+            }
             const pass = ans.len > 0 and (ans[0] == 'y' or ans[0] == 'Y');
             const note = if (pass) "" else try ask.line(&in, a, "  What happened? ");
             try checks.append(a, .{ .text = c, .pass = pass, .note = note });

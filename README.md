@@ -392,7 +392,9 @@ it started) and how to finish: write a review guide for gutter
 `--test-plan -` and the plan on stdin if there is something to try: steps
 the Test tab walks you through one at a time, with buttons to run a command
 and open a page, checks to pass or fail and a comment box per step, all
-saved as you go (`cl t testplan --format`). The plan is kept in the ticket on the board, not in a file,
+saved as you go (`cl t testplan --format`). You can send what you have to
+Claude from any step: checks you didn't get to go as not tested, and Claude
+is told which steps still need testing. Finishing needs every check passed. The plan is kept in the ticket on the board, not in a file,
 so each ticket's Test tab shows only what its own session gave. An idle
 session that never said done stays in running.
 
@@ -466,7 +468,7 @@ on you, and clears when you act on it.
 cl t gutter QA-1 [--stop]          review the ticket's changes in gutter's window; Submit sends it to Claude
 cl t testplan QA-1                 Claude's test plan, step by step
 cl t launch QA-1 --step 2          run step 2's run: command (tmux session clrun_qa-1_s2; --stop ends it)
-cl t test QA-1                     walk through the plan here; failures go back to Claude
+cl t test QA-1                     walk through the plan here; failures go back to Claude (s at a check stops and sends what you have)
 cl t approve QA-1                  review -> testing -> done
 ```
 

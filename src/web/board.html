@@ -998,7 +998,7 @@ function testTab(d) {
     const rows = p.steps.map((st, si) => { const own = all.map((c, ci) => [c, ci]).filter(([c]) => c.si === si); const comment = state.checks["s" + si];
       if (!own.length && !comment) return "";
       return `<li><strong>${si + 1}. ${esc(st.title)}</strong><ul class="results">${own.map(([c, ci]) => { const r = state.checks["c" + ci] || {};
-        return `<li><span class="res ${r.pass === true ? "pass" : r.pass === false ? "fail" : ""}">${r.pass === true ? "Pass" : r.pass === false ? "Fail" : "—"}</span> ${esc(c.text)}${r.note ? ` <span class="muted">— ${esc(r.note)}</span>` : ""}</li>`; }).join("")}
+        return `<li><span class="res ${r.pass === true ? "pass" : r.pass === false ? "fail" : ""}">${r.pass === true ? "Pass" : r.pass === false ? "Fail" : "Not tested"}</span> ${esc(c.text)}${r.note ? ` <span class="muted">— ${esc(r.note)}</span>` : ""}</li>`; }).join("")}
         ${comment ? `<li class="muted">Comment: ${esc(comment)}</li>` : ""}</ul></li>`; }).join("");
     return `<div class="wiz">${dots}<strong>Results</strong><ul class="results">${rows}</ul>
       <label class="muted" style="display:flex;flex-direction:column;gap:calc(5 * var(--u));font-size:calc(12.5 * var(--u))">Anything else for Claude<textarea id="testNote" rows="2">${esc(state.checks.note || "")}</textarea></label>
@@ -1020,13 +1020,17 @@ function testTab(d) {
         <button type="button" class="btn fail ${r.pass === false ? "on" : ""}" data-check="${i}" data-pass="0">Fail</button></div>
         ${r.pass === false ? `<input type="text" data-note="${i}" placeholder="What happened?" value="${esc(r.note || "")}">` : ""}</div>`; }).join("")}</div>` : ""}
     <label class="muted" style="display:flex;flex-direction:column;gap:calc(5 * var(--u));font-size:calc(12.5 * var(--u))">Comment on this step (goes to Claude with the results)<textarea data-comment="${at}" rows="2">${esc(state.checks["s" + at] || "")}</textarea></label>
-    ${nav}</div>`;
+    ${nav}
+    <div class="actions" style="justify-content:flex-end"><button type="button" class="btn" id="sendResults" data-send="1" title="Checks you haven't marked go as not tested">Send what I have to Claude</button></div></div>`;
 }
-// What Submit does: anything failed goes to Claude; everything passed with
+// What Submit does: anything failed or not tested goes to Claude; everything passed with
 // comments lets you choose; everything passed and nothing to say approves a
 // ticket in Testing (earlier, it's only kept).
 function submitButtons(d, all) {
   const failed = all.some((c, ci) => state.checks["c" + ci]?.pass === false);
+  const untested = all.filter((c, ci) => state.checks["c" + ci]?.pass === undefined).length;
+  // Not everything tested: it can only go to Claude (finishing needs every check passed).
+  if (untested) return `<button type="button" class="btn primary" id="sendResults" data-send="1">Send results to Claude (${untested} not tested)</button>`;
   const commented = (state.checks.note || "").trim() || d.test_plan.steps.some((st, si) => (state.checks["s" + si] || "").trim());
   if (failed) return `<button type="button" class="btn primary" id="sendResults" data-send="1">Send results to Claude</button>`;
   const finish = d.ticket.stage === "testing" ? "Pass and finish" : "Pass (keep the results)";
@@ -1425,7 +1429,10 @@ document.addEventListener("click", async (e) => {
     return;
   }
   if (ds.unflag) return act(key, "dismiss", { kind: ds.unflag }, "Dismissed");
-  if (ds.check !== undefined) { const c = state.checks["c" + ds.check] || {}; c.pass = ds.pass === "1"; state.checks["c" + ds.check] = c; saveProgress(); renderDetail(); return; }
+  // Pressing the one already chosen un-marks the check (back to not tested).
+  if (ds.check !== undefined) { const c = state.checks["c" + ds.check] || {}; const pass = ds.pass === "1";
+    if (c.pass === pass) { delete c.pass; delete c.note; } else c.pass = pass;
+    state.checks["c" + ds.check] = c; saveProgress(); renderDetail(); return; }
   if (ds.stepGo !== undefined) { state.checks.step = Math.max(0, +ds.stepGo); saveProgress(); renderDetail(); document.getElementById("ticketDlg").scrollTop = 0; return; }
   if (ds.launch) return act(key, "launch", { step: +ds.launch }, "Started");
   if (ds.launchStop) return act(key, "launch-stop", { step: +ds.launchStop }, "Stopped");
@@ -1469,14 +1476,15 @@ document.addEventListener("click", async (e) => {
   if (el.id === "sendResults" || el.id === "sendResults2") {
     const send = el.dataset.send === "1";
     const checks = planChecks(state.detail.test_plan).map((c, i) => ({ text: c.text, si: c.si, pass: state.checks["c" + i]?.pass, note: state.checks["c" + i]?.note || "" }));
-    const miss = checks.findIndex((c) => c.pass === undefined);
-    if (miss >= 0) { state.checks.step = planChecks(state.detail.test_plan)[miss].si; renderDetail(); return toast("Pass or fail every check first", true); }
+    const note = state.checks.note || "";
+    if (checks.every((c) => c.pass === undefined) && !note.trim() && !state.detail.test_plan.steps.some((st, si) => (state.checks["s" + si] || "").trim()))
+      return toast("Mark a check or write a comment first", true);
     const extra = !send && checks.every((c) => c.pass) && state.detail.ticket.stage === "testing" ? await doneExtras(key) : {};
     if (!extra) return;
     const steps = state.detail.test_plan.steps.map((st, si) => ({ title: st.title, comment: state.checks["s" + si] || "",
       checks: checks.filter((c) => c.si === si).map(({ text, pass, note }) => ({ text, pass, note })) }));
     clearTimeout(progressTimer);
-    const r = await act(key, "test-results", { steps, send, note: document.getElementById("testNote").value, ...extra });
+    const r = await act(key, "test-results", { steps, send, note, ...extra });
     toast(r.sent ? "Sent to Claude" : r.unsent ? "No session to send to: kept as a comment" : !r.approved ? "All passed: kept on the ticket"
       : finishMsg(key, extra) ? "All passed: " + finishMsg(key, extra) : "All passed: done", r.unsent); state.checks = {};
     return;
