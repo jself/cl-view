@@ -392,7 +392,8 @@ cl t cleanup QA-1 --branch remove the worktree and its merged branch
 
 The first message tells Claude the ticket (with any notes you added before
 it started) and how to finish: write a review guide for gutter
-(`.claude/review-guide.md`, only asked for when gutter is installed), then `cl ticket done <key> --summary ...`, with
+(`.claude/review-guide.md`, only asked for when gutter is installed; Claude
+checks it with `gutter -open=false`, so no browser tab opens), then `cl ticket done <key> --summary ...`, with
 `--test-plan -` and the plan on stdin if there is something to try: steps
 the Test tab walks you through one at a time, with buttons to run a command
 and open a page, checks to pass or fail and a comment box per step, all

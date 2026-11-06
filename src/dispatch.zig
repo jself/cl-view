@@ -35,9 +35,10 @@ pub const Error = error{
 };
 
 /// What the ticket's session is told first. The key is spelled out, so the
-/// instructions work in sessions cl didn't start (no CL_TICKET). `gutter`:
-/// gutter is installed, so Claude writes a review guide for it.
-pub fn prompt(a: std.mem.Allocator, t: board.Ticket, notes: []const board.Comment, gutter: bool) ![]const u8 {
+/// instructions work in sessions cl didn't start (no CL_TICKET). `gutter_rev`:
+/// gutter is installed, so Claude writes a review guide for it and checks it
+/// against this revision (gutter's -r, "" for its default).
+pub fn prompt(a: std.mem.Allocator, t: board.Ticket, notes: []const board.Comment, gutter_rev: ?[]const u8) ![]const u8 {
     var aw: std.Io.Writer.Allocating = .init(a);
     const w = &aw.writer;
     try w.print("Ticket {s}: {s}\n", .{ t.key, t.title });
@@ -75,11 +76,11 @@ pub fn prompt(a: std.mem.Allocator, t: board.Ticket, notes: []const board.Commen
         \\
     , .{
         t.key,
-        if (gutter) "  1. Write a review guide to .claude/review-guide.md (`gutter -guide-format` shows the format).\n" else "",
-        @as(u8, if (gutter) 2 else 1),
+        if (gutter_rev) |rev| try guideStep(a, rev) else "",
+        @as(u8, if (gutter_rev != null) 2 else 1),
         if (t.change.len == 0 and t.mode == .worktree) "Commit your work on this branch (the review shows commits and new files that way). " else "",
         t.key,
-        @as(u8, if (gutter) 3 else 2),
+        @as(u8, if (gutter_rev != null) 3 else 2),
     });
     if (t.change.len > 0) try w.print(
         \\- This is a jj repo, and your work goes into the ticket's jj change {s}{s}{s} by itself:
@@ -87,6 +88,21 @@ pub fn prompt(a: std.mem.Allocator, t: board.Ticket, notes: []const board.Commen
         \\
     , .{ t.change[0..@min(t.change.len, 12)], if (t.branch.len > 0) ", bookmark " else "", t.branch });
     return aw.written();
+}
+
+/// The review guide step. Checking the guide means starting gutter, which
+/// opens a browser tab on the human's screen unless told not to (and the
+/// check's timeout leaves it blank): the command given never opens one.
+fn guideStep(a: std.mem.Allocator, rev: []const u8) ![]const u8 {
+    const r = if (rev.len > 0) try std.fmt.allocPrint(a, " -r '{s}'", .{rev}) else "";
+    return std.fmt.allocPrint(a,
+        \\  1. Write a review guide to .claude/review-guide.md (`gutter -guide-format` shows the format).
+        \\     To check it, run `timeout 5 gutter -open=false -port 0{s}` and read the line it prints
+        \\     starting "guide: N stop(s), D dead reference(s), U unassigned line(s)". Whenever you
+        \\     run gutter yourself, pass -open=false and never -window: otherwise it opens a browser
+        \\     tab or window on my screen.
+        \\
+    , .{r});
 }
 
 /// Where a planning session reads the code.
@@ -609,7 +625,8 @@ fn startIn(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: 
     // Projects added before jj was set up on add get it on their first start.
     if (worktree.ensureJj(ctx, a, p.dir)) try board.logEvent(ctx, db, t.id, "jj init", p.dir);
     // What gutter will diff against: the repo as it is now.
-    try board.setBase(db, t.id, worktree.baseRev(ctx, a, p.dir));
+    const base = worktree.baseRev(ctx, a, p.dir);
+    try board.setBase(db, t.id, base);
     // jj: the ticket's own change, on top of trunk. A queue ticket takes the
     // project's checkout over only when it gets the session to itself.
     const trunk = worktree.trunkBookmark(ctx, a, p.dir);
@@ -650,7 +667,10 @@ fn startIn(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: 
         },
     }
     const notes = try board.unsentNotes(db, a, t.id);
-    const body = if (resume_id != null) try resumePrompt(a, tc, notes) else try prompt(a, tc, notes, review.findGutter(ctx, a, cfg) != null);
+    const body = if (resume_id != null) try resumePrompt(a, tc, notes) else try prompt(a, tc, notes, if (review.findGutter(ctx, a, cfg) != null)
+        try worktree.reviewRev(ctx, a, if (wt.path.len > 0) wt.path else p.dir, base, tc.change)
+    else
+        null);
     const text = if (switched) try std.mem.concat(a, u8, &.{ switched_note, body }) else body;
     var sid: [36]u8 = undefined;
     switch (t.mode) {
@@ -941,15 +961,22 @@ test prompt {
         .mode = .queue, .plan = false, .skill = "", .target = "", .worktree = "", .branch = "", .profile = "",
         .tmux = "", .session_id = "", .summary = "", .round = 1, .created = 0, .updated = 0, .parent = "QA-1", .children = 0,
     };
-    const text = try prompt(arena_state.allocator(), t, &.{.{ .author = "you", .body = "keep it small", .sent = false, .at = 0 }}, true);
+    const text = try prompt(arena_state.allocator(), t, &.{.{ .author = "you", .body = "keep it small", .sent = false, .at = 0 }}, "abc::");
     try std.testing.expect(std.mem.indexOf(u8, text, "Ticket QA-3: Retry") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "sub-ticket of QA-1") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "- keep it small") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "approved plan") == null);
     try std.testing.expect(std.mem.indexOf(u8, text, "cl ticket done QA-3") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "  1. Write a review guide") != null);
+    // Checking the guide never opens a browser tab or window.
+    try std.testing.expect(std.mem.indexOf(u8, text, "`timeout 5 gutter -open=false -port 0 -r 'abc::'`") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "pass -open=false and never -window") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "  2. Run `cl ticket done QA-3") != null);
+    // No revision to give: gutter's default.
+    const no_rev = try prompt(arena_state.allocator(), t, &.{}, "");
+    try std.testing.expect(std.mem.indexOf(u8, no_rev, "`timeout 5 gutter -open=false -port 0`") != null);
     // Without gutter: no review guide, and the steps are numbered from 1.
-    const plain = try prompt(arena_state.allocator(), t, &.{}, false);
+    const plain = try prompt(arena_state.allocator(), t, &.{}, null);
     try std.testing.expect(std.mem.indexOf(u8, plain, "gutter") == null);
     try std.testing.expect(std.mem.indexOf(u8, plain, "me:\n  1. Run `cl ticket done QA-3") != null);
     try std.testing.expect(std.mem.indexOf(u8, plain, "  2. If there is something") != null);
@@ -980,7 +1007,7 @@ test "the session that builds a planned ticket is told the plan" {
         .tmux = "", .session_id = "", .summary = "", .round = 1, .created = 0, .updated = 0, .parent = "", .children = 0,
         .plan_md = "## Approach\nRetry fetch three times in api.ts.\n\n",
     };
-    const text = try prompt(arena_state.allocator(), t, &.{}, false);
+    const text = try prompt(arena_state.allocator(), t, &.{}, null);
     try std.testing.expect(std.mem.indexOf(u8, text, "approved plan") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "check the plan against the code as it is now") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "## Approach\nRetry fetch three times in api.ts.\n\nHow tickets work") != null);
