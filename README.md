@@ -286,7 +286,9 @@ cl window install
 - The web view has no browser shortcuts, so Ctrl+W, Ctrl+T, Ctrl+L, Ctrl+R
   and the rest go to the terminal. The window's own keys use Ctrl+Shift:
   R reloads, + / - / 0 zoom the page (terminal included), I opens the web
-  inspector. On the board, Ctrl+= / Ctrl+- resize it too (see `web.font_size`).
+  inspector. F5 reloads as well, from the board, a terminal or the chat
+  (so a terminal never gets F5), and Ctrl+F5 or Shift+F5 reloads past the
+  cache. On the board, Ctrl+= / Ctrl+- resize it too (see `web.font_size`).
 - The clipboard is the desktop's. In a terminal, a copy in tmux (a mouse
   selection) or by a program in it (Claude Code, via OSC 52) lands there;
   so does Ctrl+Shift+C on a Shift+drag selection. Ctrl+Shift+V pastes. A

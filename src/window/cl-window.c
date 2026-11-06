@@ -6,8 +6,9 @@
 // no browser shortcuts of its own, so keys like Ctrl+W, Ctrl+T, Ctrl+L and
 // Ctrl+R reach the page (the terminal). Ctrl+Q doesn't quit either: an
 // opened session's terminal takes it (and Alt+Q) as "back to the board".
-// The window's own keys all use Ctrl+Shift: R reloads, +/-/0 zoom, I opens
-// the web inspector.
+// The window's own keys use Ctrl+Shift: R reloads, +/-/0 zoom, I opens
+// the web inspector. F5 reloads too, as in a browser, and Ctrl+F5 or
+// Shift+F5 reloads past the cache; a terminal never sees F5.
 //
 // Cookies (the sign-in) and local storage live in <data dir>, and the window
 // remembers its page, size and zoom there, so reopening it comes back to the
@@ -133,6 +134,12 @@ static gboolean act_reload(GtkWidget *w, GVariant *args, gpointer _) {
     return TRUE;
 }
 
+static gboolean act_reload_fresh(GtkWidget *w, GVariant *args, gpointer _) {
+    (void)w, (void)args;
+    webkit_web_view_reload_bypass_cache(view);
+    return TRUE;
+}
+
 static gboolean act_zoom(GtkWidget *w, GVariant *args, gpointer data) {
     (void)w, (void)args;
     int dir = GPOINTER_TO_INT(data);
@@ -203,6 +210,9 @@ static void activate(GtkApplication *app, gpointer _) {
     gtk_event_controller_set_propagation_phase(keys, GTK_PHASE_CAPTURE);
     GtkShortcutController *kc = GTK_SHORTCUT_CONTROLLER(keys);
     add_key(kc, "<Control><Shift>r", act_reload, 0);
+    add_key(kc, "F5", act_reload, 0);
+    add_key(kc, "<Control>F5", act_reload_fresh, 0);
+    add_key(kc, "<Shift>F5", act_reload_fresh, 0);
     add_key(kc, "<Control><Shift>plus", act_zoom, 1);
     add_key(kc, "<Control><Shift>equal", act_zoom, 1);
     add_key(kc, "<Control><Shift>underscore", act_zoom, -1);
