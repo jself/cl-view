@@ -579,7 +579,7 @@ fn getTicket(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, r
         .tail = tail,
         .tail_cols = tail_cols,
         .dir = dir,
-        .guide = dir.len > 0 and review.hasGuide(ctx, a, dir),
+        .guide = review.hasGuide(ctx, db, a, t),
         .test_plan = plan,
         // Per step of the plan: its command's run, and whether its wait URL answers.
         .launches = if (plan) |p| try review.launchStates(ctx, a, t.key, p) else &.{},

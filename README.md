@@ -421,7 +421,11 @@ and open a page, checks to pass or fail and a comment box per step, all
 saved as you go (`cl t testplan --format`). You can send what you have to
 Claude from any step: checks you didn't get to go as not tested, and Claude
 is told which steps still need testing. Finishing needs every check passed. The plan is kept in the ticket on the board, not in a file,
-so each ticket's Test tab shows only what its own session gave. An idle
+so each ticket's Test tab shows only what its own session gave. So is the
+review guide: `done` moves `.claude/review-guide.md` into the ticket (a
+guide older than the ticket's session is someone else's and is dropped), and
+gutter gets the ticket's own (or none), never what another ticket left in a
+shared checkout. A later round without a new guide keeps the old one. An idle
 session that never said done stays in running.
 
 Sessions cl starts for tickets get `CL_TICKET` and hooks (`--settings

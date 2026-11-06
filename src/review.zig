@@ -1,5 +1,5 @@
 //! Reviewing and trying a ticket: gutter's window on its changes (with the
-//! review guide Claude wrote), whose submitted review goes to the session, and
+//! review guide Claude wrote, kept in the ticket at `done`), whose submitted review goes to the session, and
 //! the test plan Claude gave `cl ticket done --test-plan` (kept in the
 //! ticket): setup steps, one Launch command run in a hidden tmux session, and
 //! checks.
@@ -24,11 +24,6 @@ pub fn ticketDir(db: board.Db, a: std.mem.Allocator, t: board.Ticket) ![]const u
     return (try board.getProject(db, a, t.project)).dir;
 }
 
-fn exists(ctx: Ctx, path: []const u8) bool {
-    std.Io.Dir.cwd().access(ctx.io, path, .{}) catch return false;
-    return true;
-}
-
 pub fn guidePath(a: std.mem.Allocator, dir: []const u8) ![]const u8 {
     return std.fmt.allocPrint(a, "{s}/.claude/review-guide.md", .{dir});
 }
@@ -37,8 +32,47 @@ pub fn reviewPath(a: std.mem.Allocator, dir: []const u8) ![]const u8 {
     return std.fmt.allocPrint(a, "{s}/.claude/review.md", .{dir});
 }
 
-pub fn hasGuide(ctx: Ctx, a: std.mem.Allocator, dir: []const u8) bool {
-    return exists(ctx, guidePath(a, dir) catch return false);
+/// Move the review guide Claude wrote in `dir` into the ticket, so the next
+/// ticket working there (a queue project's tickets share its checkout) can't
+/// pick it up. No guide keeps the one from an earlier round. One written
+/// before the ticket's session took it up is someone else's: dropped.
+fn takeGuide(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, dir: []const u8) !void {
+    const path = try guidePath(a, dir);
+    std.Io.Dir.cwd().access(ctx.io, path, .{}) catch return;
+    if (freshGuide(ctx, db, a, t, dir)) |p| {
+        const md = try std.Io.Dir.cwd().readFileAlloc(ctx.io, p, a, .limited(4 << 20));
+        try board.setReviewGuide(ctx, db, t.id, md);
+    }
+    std.Io.Dir.cwd().deleteFile(ctx.io, path) catch {};
+}
+
+/// <dir>/.claude/review-guide.md when it was written since the ticket's
+/// session took it up, else null.
+fn freshGuide(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, dir: []const u8) ?[]const u8 {
+    const path = guidePath(a, dir) catch return null;
+    const st = std.Io.Dir.cwd().statFile(ctx.io, path, .{}) catch return null;
+    const started = board.startedAt(db, t.id) catch return null;
+    return if (st.mtime.toSeconds() >= started) path else null;
+}
+
+/// Whether gutter has a guide for the ticket: its own, or one its session
+/// wrote and hasn't said done with yet (or wrote before cl kept guides).
+pub fn hasGuide(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket) bool {
+    if (t.review_guide.len > 0) return true;
+    return freshGuide(ctx, db, a, t, ticketDir(db, a, t) catch return false) != null;
+}
+
+/// The ticket's guide as a file for gutter's -guide: its own, written to
+/// the board's directory (guides/<key>.md), else `freshGuide`, else
+/// /dev/null, so gutter doesn't fall back to a .claude/review-guide.md
+/// another ticket left in the checkout.
+fn guideFile(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: board.Ticket, dir: []const u8) ![]const u8 {
+    if (t.review_guide.len == 0) return freshGuide(ctx, db, a, t, dir) orelse "/dev/null";
+    const guides = try std.fmt.allocPrint(a, "{s}/guides", .{try board.dirPath(ctx, a, cfg)});
+    try std.Io.Dir.cwd().createDirPath(ctx.io, guides);
+    const path = try std.fmt.allocPrint(a, "{s}/{s}.md", .{ guides, t.key });
+    try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = path, .data = t.review_guide });
+    return path;
 }
 
 fn sessionName(a: std.mem.Allocator, prefix: []const u8, key: []const u8) ![]const u8 {
@@ -159,6 +193,7 @@ pub fn startGutter(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Alloca
     ;
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(a, &.{ "new-session", "-d", "-s", name, "-c", dir, "--", "sh", "-c", script, "sh", exe, t.key, gutter });
+    try argv.appendSlice(a, &.{ "-guide", guideFile(ctx, cfg, db, a, t, dir) catch "/dev/null" });
     if (rev.len > 0) try argv.appendSlice(a, &.{ "-r", rev });
     tmux.runQuiet(ctx, argv.items) catch return error.GutterFailed;
     tmux.runQuiet(ctx, &.{ "set-option", "-t", name, "remain-on-exit", "on" }) catch {};
@@ -450,7 +485,8 @@ pub fn readTestPlan(a: std.mem.Allocator, t: board.Ticket) ?TestPlan {
 }
 
 /// `done`, with the test plan Claude gives for something to try: null keeps
-/// the one from an earlier round, "" drops it. A plan without checks is
+/// the one from an earlier round, "" drops it. The review guide Claude wrote
+/// moves into the ticket (`takeGuide`). A plan without checks is
 /// refused (error.BadTestPlan), as is one during Planning (a plan being
 /// approved has nothing to try yet). `plan`, from a planning session, is
 /// kept for the session that builds it and shown on the board; outside
@@ -467,6 +503,7 @@ pub fn done(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, summa
         if (md.len > 0 and (try parseTestPlan(a, md)).checkCount() == 0) return error.BadTestPlan;
         try board.setTestPlan(ctx, db, t.id, md);
     }
+    if (t.stage != .planning) if (ticketDir(db, a, t)) |dir| try takeGuide(ctx, db, a, t, dir) else |_| {};
     try board.done(ctx, db, a, key, summary);
 }
 
@@ -773,4 +810,61 @@ test "done: a planning session's plan is kept and shown; elsewhere it is refused
     try std.testing.expectEqualStrings("## Steps\n1. retry\n", cs[0].body);
     _ = try board.approve(ctx, db, a, k);
     try std.testing.expectError(error.BadPlan, done(ctx, db, a, k, "built", null, "## Steps\n"));
+}
+
+test "done: each ticket keeps the review guide its own session wrote" {
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp" };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = dir_buf[0..try tmp.dir.realPath(ctx.io, &dir_buf)];
+    try tmp.dir.createDirPath(ctx.io, ".claude");
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    // Queue tickets sharing the project's checkout.
+    try board.addProject(db, .{ .name = "qa", .dir = dir });
+    const one = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "One" });
+    const two = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Two" });
+    const guide = struct {
+        fn of(d: board.Db, al: std.mem.Allocator, key: []const u8) ![]const u8 {
+            return (try board.getTicket(d, al, key)).review_guide;
+        }
+    }.of;
+
+    // One's guide moves into One, out of the checkout.
+    try tmp.dir.writeFile(ctx.io, .{ .sub_path = ".claude/review-guide.md", .data = "# One\n" });
+    try done(ctx, db, a, one, "did one", null, null);
+    try std.testing.expectEqualStrings("# One\n", try guide(db, a, one));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(ctx.io, ".claude/review-guide.md", .{}));
+
+    // Two wrote none: it has none, and One keeps its own.
+    try done(ctx, db, a, two, "did two", null, null);
+    try std.testing.expectEqualStrings("", try guide(db, a, two));
+    try std.testing.expectEqualStrings("# One\n", try guide(db, a, one));
+
+    // A later round without a new guide keeps the old one; a new one replaces it.
+    try done(ctx, db, a, one, "again", null, null);
+    try std.testing.expectEqualStrings("# One\n", try guide(db, a, one));
+    try tmp.dir.writeFile(ctx.io, .{ .sub_path = ".claude/review-guide.md", .data = "# One, again\n" });
+    try done(ctx, db, a, one, "again", null, null);
+    try std.testing.expectEqualStrings("# One, again\n", try guide(db, a, one));
+
+    // A guide left from before Two's session started (one that never said
+    // done) isn't Two's: dropped.
+    try tmp.dir.writeFile(ctx.io, .{ .sub_path = ".claude/review-guide.md", .data = "# Stale\n" });
+    const t2 = try board.getTicket(db, a, two);
+    try db.exec("INSERT INTO events (ticket, kind, detail, at) VALUES (?1, 'started', '', ?2)", .{ t2.id, ctx.nowSeconds() + 60 });
+    try done(ctx, db, a, two, "did two", null, null);
+    try std.testing.expectEqualStrings("", try guide(db, a, two));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(ctx.io, ".claude/review-guide.md", .{}));
+
+    // Before done, the board counts a guide only when Two's session wrote it.
+    try tmp.dir.writeFile(ctx.io, .{ .sub_path = ".claude/review-guide.md", .data = "# Stale\n" });
+    try std.testing.expect(!hasGuide(ctx, db, a, try board.getTicket(db, a, two)));
+    try db.exec("UPDATE events SET at = ?2 WHERE ticket = ?1", .{ t2.id, ctx.nowSeconds() - 60 });
+    try std.testing.expect(hasGuide(ctx, db, a, try board.getTicket(db, a, two)));
 }
