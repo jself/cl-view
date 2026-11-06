@@ -133,7 +133,12 @@ fn parseOption(line: []const u8) ?Option {
     while (n < s.len and std.ascii.isDigit(s[n])) n += 1;
     if (n == 0 or n > 2 or n + 1 >= s.len or s[n] != '.' or s[n + 1] != ' ') return null;
     const num = std.fmt.parseInt(u8, s[0..n], 10) catch return null;
-    return .{ .n = num, .label = std.mem.trim(u8, s[n + 2 ..], " ") };
+    var label = s[n + 2 ..];
+    // A question with previews draws the preview box to the right.
+    for ([_][]const u8{ "┌", "│", "├", "└" }) |box| {
+        if (std.mem.indexOf(u8, label, box)) |at| label = label[0..at];
+    }
+    return .{ .n = num, .label = std.mem.trim(u8, label, " ") };
 }
 
 test menuOptions {
@@ -169,6 +174,14 @@ test menuOptions {
         \\
         \\Enter to select
     ;
+    const preview = try menuOptions(arena_state.allocator(),
+        \\❯ 1. Small                        ┌──────────┐
+        \\  2. Large                        │ [ small ]│
+        \\                                  └──────────┘
+    );
+    try std.testing.expectEqualStrings("Small", preview[0].label);
+    try std.testing.expectEqualStrings("Large", preview[1].label);
+
     const q = try menuOptions(arena_state.allocator(), question);
     try std.testing.expectEqual(@as(usize, 4), q.len);
     try std.testing.expectEqualStrings("Small", q[0].label);
@@ -261,6 +274,90 @@ pub const Ask = struct {
     options: []const Option = &.{},
 };
 
+/// Whether a waiting session is on an AskUserQuestion menu rather than a
+/// permission prompt: the pending tool call says so, or, when the transcript
+/// doesn't have it (Claude writes the call only once it is answered), the
+/// registry's "input needed" (a permission prompt is "permission prompt").
+pub fn isQuestion(pend: ?Pending, info: ?claude.Info) bool {
+    if (pend) |p| return std.mem.eql(u8, p.name, "AskUserQuestion");
+    const i = info orelse return false;
+    return std.mem.indexOf(u8, i.waiting_for, "input") != null;
+}
+
+/// Whether the AskUserQuestion menu at the bottom of the pane is the kind
+/// with a preview beside its options. There a number key only moves to its
+/// option and Enter picks it; elsewhere the number picks it at once.
+pub fn previewMenu(pane: []const u8) bool {
+    const footer = std.mem.lastIndexOf(u8, pane, "Enter to select") orelse return false;
+    // The footer ends the menu (a narrow pane wraps it onto more lines);
+    // after it, it may only go on, not start another menu or prompt.
+    const rest = pane[footer..];
+    if (std.mem.indexOf(u8, rest, "❯") != null or std.mem.count(u8, std.mem.trimEnd(u8, rest, " \n"), "\n") > 2) return false;
+    // Compare without spaces, which wrapping may have turned into line breaks.
+    var buf: [1024]u8 = undefined;
+    var n: usize = 0;
+    for (rest) |ch| if (!std.ascii.isWhitespace(ch) and n < buf.len) {
+        buf[n] = ch;
+        n += 1;
+    };
+    return std.mem.indexOf(u8, buf[0..n], "ntoaddnotes") != null;
+}
+
+test previewMenu {
+    try std.testing.expect(previewMenu(
+        \\Which line?
+        \\❯ 1. Both lines                   ┌───────────────┐
+        \\  2. from one                     │ const one = 1;│
+        \\                                  └───────────────┘
+        \\                                  Notes: press n to add notes
+        \\──────────────
+        \\  Chat about this
+        \\Enter to select · ↑/↓ to navigate · n to add notes · Esc to cancel
+        \\
+    ));
+    try std.testing.expect(!previewMenu(
+        \\Which size?
+        \\❯ 1. Small
+        \\  2. Large
+        \\  3. Type something.
+        \\──────────────
+        \\  4. Chat about this
+        \\Enter to select · ↑/↓ to navigate · Esc to cancel
+    ));
+    try std.testing.expect(!previewMenu("Enter to select · n to add notes\n❯ \n"));
+    // A narrow pane wraps the footer.
+    try std.testing.expect(previewMenu("❯ 1. Small   ┌──┐\nEnter to select · ↑/↓ to navigate · n to add\nnotes · Tab to switch questions ·\nEsc to cancel\n\n"));
+}
+
+/// How many questions the AskUserQuestion menu at the bottom of the pane
+/// asks, from its tab bar ("←  ☐ Size  ☒ Color  ✔ Submit  →"; a lone
+/// question has no bar). 0 when no menu is on screen.
+pub fn menuQuestions(pane: []const u8) usize {
+    const footer = std.mem.lastIndexOf(u8, pane, "Enter to select") orelse return 0;
+    const top = pane[0..footer];
+    const bar = std.mem.lastIndexOf(u8, top, "←") orelse return 1;
+    const end = std.mem.indexOfPos(u8, top, bar, "→") orelse return 1;
+    // A bar further up belongs to an earlier menu: this one starts below a rule.
+    if (std.mem.indexOf(u8, top[bar..end], "Submit") == null) return 1;
+    return std.mem.count(u8, top[bar..end], "☐") + std.mem.count(u8, top[bar..end], "☒");
+}
+
+test menuQuestions {
+    try std.testing.expectEqual(@as(usize, 2), menuQuestions(
+        \\←  ☒ Size  ☐ Color  ✔ Submit  →
+        \\Which color?
+        \\❯ 1. Red
+        \\Enter to select · Tab/Arrow keys to navigate · Esc to cancel
+    ));
+    try std.testing.expectEqual(@as(usize, 1), menuQuestions(
+        \\ ☐ Line
+        \\Which line?
+        \\❯ 1. Both lines
+        \\Enter to select · ↑/↓ to navigate · Esc to cancel
+    ));
+    try std.testing.expectEqual(@as(usize, 0), menuQuestions("❯ \n"));
+}
+
 /// Update the ticket's `question` and `input` flags from its session.
 pub fn sync(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, info: ?claude.Info, status: claude.Status) !void {
     const waiting = status == .waiting or status == .blocked;
@@ -274,7 +371,7 @@ pub fn sync(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, info:
     if (pane_raw.len > 0) ctx.gpa.free(pane_raw);
     var ask: Ask = .{ .kind = "permission", .options = try menuOptions(a, pane) };
     const pend: ?Pending = if (info) |inf| pendingFor(ctx, a, inf) else null;
-    const asking = if (pend) |p| std.mem.eql(u8, p.name, "AskUserQuestion") else (info != null and std.mem.indexOf(u8, info.?.waiting_for, "input") != null);
+    const asking = isQuestion(pend, info);
     if (pend) |p| {
         ask.tool = p.name;
         if (asking) {

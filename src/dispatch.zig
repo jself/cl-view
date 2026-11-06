@@ -903,13 +903,23 @@ pub fn hook(ctx: Ctx, cfg: config.Config, event: []const u8, input: []const u8) 
     const t = board.getTicket(db, a, key) catch return;
     const in = std.json.parseFromSliceLeaky(HookInput, a, input, .{ .ignore_unknown_fields = true }) catch HookInput{};
     if (std.mem.eql(u8, event, "stop")) {
-        // A finished turn: nothing is waiting on a permission prompt any more.
+        // A finished turn: nothing is waiting on a prompt or question any more.
         board.clearFlagId(ctx, db, t.id, board.flag_input) catch {};
+        board.clearFlagId(ctx, db, t.id, board.flag_question) catch {};
         board.logEvent(ctx, db, t.id, "turn ended", "") catch {};
     } else if (std.mem.eql(u8, event, "notify")) {
         const msg = in.message orelse "";
         const kind = in.notification_type orelse "";
         if (std.mem.eql(u8, kind, "permission_prompt") or std.mem.indexOf(u8, msg, "permission") != null) {
+            // An AskUserQuestion menu sends this too. Claude's registry
+            // (already "waiting" by now) tells the two apart, as the
+            // dispatcher does; this way it is right even where the
+            // dispatcher doesn't look (a ticket not in progress).
+            const statuses = claude.readStatuses(ctx, a, cfg) catch claude.StatusMap.empty;
+            if (t.tmux.len > 0 and t.tmux[0] != '(') if (statuses.get(t.tmux)) |info| {
+                signals.sync(ctx, db, a, t, info, .blocked) catch {};
+                return;
+            };
             board.setFlagId(ctx, db, t.id, board.flag_input, "auto", msg) catch {};
         }
     }

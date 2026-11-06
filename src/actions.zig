@@ -472,7 +472,14 @@ fn isNumber(s: []const u8) bool {
 /// One AskUserQuestion question, as the flag detail holds it.
 pub const Question = struct {
     multiSelect: bool = false,
-    options: ?[]const struct { label: []const u8 = "" } = null,
+    options: ?[]const struct { label: []const u8 = "", preview: ?[]const u8 = null } = null,
+
+    /// Its menu shows a preview beside the options, and has no "Type
+    /// something" row for your own words.
+    fn hasPreview(q: Question) bool {
+        for (q.options orelse &.{}) |o| if (o.preview) |p| if (p.len > 0) return true;
+        return false;
+    }
 };
 
 /// A step of an answer typed into the session.
@@ -481,12 +488,16 @@ pub const Press = union(enum) {
     text: []const u8,
     /// A named key (Enter, Down).
     key: []const u8,
+    /// A single-select option's number: typed, then Enter when the menu on
+    /// screen has previews (there the number only moves to the option).
+    pick: []const u8,
     pause: u32,
 };
 
 /// The keypresses that answer AskUserQuestion's menu, one answer per
-/// question. A single-select answer is an option's number (pressing it picks
-/// it and moves on) or your own words (typed after "Type something"). A
+/// question. A single-select answer is an option's number (a `pick`) or your
+/// own words (typed after "Type something", which menus with previews
+/// don't have). A
 /// multi-select answer lists option numbers, by commas or spaces, and may end
 /// in your own words ("1,3", "2 4 something else", "1;3 more"): each number toggles its
 /// option without moving the cursor, Down from the first row reaches "Type
@@ -518,9 +529,9 @@ pub fn questionKeys(a: std.mem.Allocator, qs: []const Question, answers: []const
             try out.append(a, .{ .key = "Down" });
             try out.append(a, .{ .key = "Enter" });
         } else if (isNumber(ans)) {
-            try out.append(a, .{ .text = ans });
+            try out.append(a, .{ .pick = ans });
         } else {
-            if (n_opts == 0) return error.BadAnswer;
+            if (n_opts == 0 or qs[i].hasPreview()) return error.BadAnswer;
             try out.append(a, .{ .text = try std.fmt.allocPrint(a, "{d}", .{n_opts + 1}) });
             try out.append(a, .{ .pause = 300 });
             try out.append(a, .{ .text = ans });
@@ -572,7 +583,7 @@ test "questionKeys: single-select keeps the old keys" {
     const qs = try std.json.parseFromSliceLeaky([]const Question, a,
         \\[{"question":"Color?","options":[{"label":"Red"},{"label":"Blue"}]}]
     , .{ .ignore_unknown_fields = true });
-    try std.testing.expectEqualDeep(@as([]const Press, &.{.{ .text = "2" }}), try questionKeys(a, qs, &.{"2"}));
+    try std.testing.expectEqualDeep(@as([]const Press, &.{.{ .pick = "2" }}), try questionKeys(a, qs, &.{"2"}));
     try std.testing.expectEqualDeep(@as([]const Press, &.{
         .{ .text = "3" }, .{ .pause = 300 }, .{ .text = "green" }, .{ .pause = 200 }, .{ .key = "Enter" },
     }), try questionKeys(a, qs, &.{"green"}));
@@ -591,13 +602,13 @@ test "questionKeys: multi-select toggles each pick, types its own words, then Ne
         .{ .text = "1" },   .{ .pause = 200 },   .{ .text = "3" },    .{ .pause = 200 },
         .{ .key = "Down" }, .{ .key = "Down" },  .{ .key = "Down" },  .{ .pause = 200 },
         .{ .text = "kiwi" }, .{ .pause = 200 },  .{ .key = "Down" },  .{ .key = "Enter" },
-        .{ .pause = 500 },  .{ .text = "2" },    .{ .pause = 500 },   .{ .text = "1" },
+        .{ .pause = 500 },  .{ .pick = "2" },    .{ .pause = 500 },   .{ .text = "1" },
     }), try questionKeys(a, qs, &.{ "1,3,kiwi", "2" }));
     // Spaces work too, repeats count once, and no own words skips straight to Next.
     try std.testing.expectEqualDeep(@as([]const Press, &.{
         .{ .text = "2" },   .{ .pause = 200 },  .{ .key = "Down" },  .{ .key = "Down" },
         .{ .key = "Down" }, .{ .pause = 200 },  .{ .key = "Down" },  .{ .key = "Enter" },
-        .{ .pause = 500 },  .{ .text = "1" },   .{ .pause = 500 },   .{ .text = "1" },
+        .{ .pause = 500 },  .{ .pick = "1" },   .{ .pause = 500 },   .{ .text = "1" },
     }), try questionKeys(a, qs, &.{ "2 2", "1" }));
     try std.testing.expectError(error.BadAnswer, questionKeys(a, qs, &.{ "4", "1" }));
     try std.testing.expectError(error.BadAnswer, questionKeys(a, qs, &.{ ",", "1" }));
@@ -620,11 +631,25 @@ test "questionKeys: a lone multi-select question still submits on the review scr
     try std.testing.expectEqualDeep(Press{ .text = "hamster; gerbil" }, (try questionKeys(a, qs, &.{"hamster; gerbil"}))[4]);
 }
 
+test "questionKeys: a question with previews takes numbers, not your own words" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const qs = try std.json.parseFromSliceLeaky([]const Question, a,
+        \\[{"question":"Which line?","options":[{"label":"Both lines","preview":"a\\nb"},{"label":"from one","preview":"a"}]}]
+    , .{ .ignore_unknown_fields = true });
+    try std.testing.expectEqualDeep(@as([]const Press, &.{.{ .pick = "2" }}), try questionKeys(a, qs, &.{"2"}));
+    try std.testing.expectError(error.BadAnswer, questionKeys(a, qs, &.{"neither"}));
+}
+
 /// Answer what the session is waiting on, by keypress, as you would in the
 /// terminal. Questions: one answer per question (see `questionKeys`); a lone
 /// multi-select question also takes its picks as separate answers. Permission
-/// prompts: the option's number. It returns once the session has taken the
-/// answer, or fails with NotDelivered.
+/// prompts: the option's number. Which of the two it is comes from the
+/// session itself when it can tell (Claude's Notification hook flags an
+/// AskUserQuestion menu as `input`, "Claude needs your permission"), else
+/// from the flag. It returns once the session has taken the answer, or fails
+/// with NotDelivered.
 pub fn answer(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, key: []const u8, answers_in: []const []const u8) !void {
     const t = try board.getTicket(db, a, key);
     const s = liveSession(ctx, t) orelse return error.NoSession;
@@ -636,14 +661,35 @@ pub fn answer(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, 
     if (answers_in.len == 0) return error.BadAnswer;
     var answers = answers_in;
     const before = signals.Waiting.of(ctx, cfg, a, s);
+    const statuses = claude.readStatuses(ctx, a, cfg) catch claude.StatusMap.empty;
+    const info = statuses.get(s);
+    const pend = if (info) |i| signals.pendingFor(ctx, a, i) else null;
+    const live = if (info) |i| i.status == .waiting or i.status == .blocked else false;
+    const question = if (live) signals.isQuestion(pend, info) else std.mem.eql(u8, f.kind, board.flag_question);
 
-    if (std.mem.eql(u8, f.kind, board.flag_input)) {
+    if (!question) {
         if (answers.len != 1 or !isNumber(answers[0])) return error.BadAnswer;
         try tmux.runQuiet(ctx, &.{ "send-keys", "-l", "-t", s, answers[0] });
     } else {
         const Detail = struct { questions: ?[]const Question = null };
         const d = std.json.parseFromSliceLeaky(Detail, a, f.detail, .{ .ignore_unknown_fields = true }) catch Detail{};
-        const qs = d.questions orelse &.{};
+        var qs = d.questions orelse &.{};
+        if (pend) |p| if (std.mem.eql(u8, p.name, "AskUserQuestion") and p.input == .object) {
+            if (p.input.object.get("questions")) |v| {
+                qs = std.json.parseFromValueLeaky([]const Question, a, v, .{ .ignore_unknown_fields = true }) catch qs;
+            }
+        };
+        if (qs.len == 0) {
+            // Not known in detail (Claude writes the call to the transcript
+            // only once it is answered): the menu on screen says how many.
+            const pane = tmux.capturePlainLines(ctx, s, 60) catch "";
+            defer if (pane.len > 0) ctx.gpa.free(pane);
+            const n = signals.menuQuestions(pane);
+            if (n > 0 and n != answers.len) return error.BadAnswer;
+            const unknown = try a.alloc(Question, answers.len);
+            @memset(unknown, .{});
+            qs = unknown;
+        }
         if (qs.len == 1 and qs[0].multiSelect and answers.len > 1) {
             const joined = try std.mem.join(a, ",", answers);
             answers = try a.dupe([]const u8, &.{joined});
@@ -651,6 +697,16 @@ pub fn answer(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, 
         for (try questionKeys(a, qs, answers)) |p| switch (p) {
             .text => |x| try tmux.runQuiet(ctx, &.{ "send-keys", "-l", "-t", s, x }),
             .key => |x| try tmux.runQuiet(ctx, &.{ "send-keys", "-t", s, x }),
+            .pick => |x| {
+                const pane = tmux.capturePlainLines(ctx, s, 60) catch "";
+                defer if (pane.len > 0) ctx.gpa.free(pane);
+                const preview = signals.previewMenu(pane);
+                try tmux.runQuiet(ctx, &.{ "send-keys", "-l", "-t", s, x });
+                if (preview) {
+                    ctx.sleepMs(200);
+                    try tmux.runQuiet(ctx, &.{ "send-keys", "-t", s, "Enter" });
+                }
+            },
             .pause => |ms| ctx.sleepMs(ms),
         };
     }
