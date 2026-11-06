@@ -118,7 +118,28 @@ pub fn move(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, ke
     }
     if (stage == .queued or stage == .backlog) if (try stopFor(ctx, cfg, db, a, key, stage)) return;
     try board.move(ctx, db, a, key, stage);
+    // Before the session closes: this may be running in it.
+    if (stage == .done and finish == .close) try checkLanded(ctx, db, a, key, "It went to Done with Close, not Merge or PR");
     if (stage == .done) try closeSession(ctx, db, a, key);
+}
+
+/// A ticket that went to Done without cl merging it (closed, or finished by
+/// Claude): when its branch or jj change still holds work trunk lacks, it is
+/// flagged `unmerged`, so it isn't left behind unseen. Not for a custom close
+/// (Claude said what to do with it instead, and you chose that). `how` says
+/// how it got there.
+pub fn checkLanded(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, how: []const u8) !void {
+    const t = try board.getTicket(db, a, key);
+    if (t.stage != .done or t.custom_close.len > 0) return;
+    if (t.change.len == 0 and t.branch.len == 0) return;
+    const dir = (try board.getProject(db, a, t.project)).dir;
+    const main = if (t.change.len > 0) worktree.trunkBookmark(ctx, a, dir) orelse return else worktree.mainBranch(ctx, a, dir);
+    const left = worktree.unmergedWork(ctx, a, dir, t.change, t.branch, main) orelse return;
+    const fix: []const u8 = if (t.change.len > 0)
+        try std.fmt.allocPrint(a, "Merge it now (the board's Not merged tab, or `cl ticket move {s} done --merge`)", .{t.key})
+    else
+        "Move it back to Review and finish it with Merge";
+    try board.setFlagId(ctx, db, t.id, board.flag_unmerged, "auto", try std.fmt.allocPrint(a, "{s}\n{s}. {s}, or dismiss this if it wasn't meant to land.", .{ left, how, fix }));
 }
 
 /// A ticket in progress (running, review, testing) moved back to Queued or
@@ -198,6 +219,7 @@ fn adoptStray(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, dir
     const desc = try std.fmt.allocPrint(a, "{s}: {s}", .{ t.key, t.title });
     const c = worktree.adoptChange(ctx, a, dir, desc, try worktree.slug(a, t.key, t.title)) catch {
         try board.logEvent(ctx, db, t.id, "merge failed", worktree.lastError());
+        try board.setFlagId(ctx, db, t.id, board.flag_merge_failed, "auto", try std.fmt.allocPrint(a, "cl couldn't make the work in {s} a change of its own, so nothing was merged\n{s}", .{ dir, worktree.lastError() }));
         return error.MergeFailed;
     };
     try board.setChange(db, t.id, c.id, c.bookmark);
@@ -214,6 +236,7 @@ fn adoptStray(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, dir
 fn mergeBack(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, dir: []const u8) !bool {
     const trunk = worktree.trunkBookmark(ctx, a, dir) orelse {
         try board.logEvent(ctx, db, t.id, "merge failed", "no trunk bookmark");
+        try board.setFlagId(ctx, db, t.id, board.flag_merge_failed, "auto", try std.fmt.allocPrint(a, "cl couldn't tell which bookmark is trunk in {s}, so nothing was merged", .{dir}));
         return error.MergeFailed;
     };
     switch (try merge(ctx, db, a, t, dir, trunk)) {
@@ -312,6 +335,7 @@ const Merged = enum { merged, empty, conflicts };
 fn merge(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, dir: []const u8, trunk: []const u8) !Merged {
     const m = worktree.mergeChange(ctx, a, dir, t.worktree, t.change, t.branch, trunk) catch {
         try board.logEvent(ctx, db, t.id, "merge failed", worktree.lastError());
+        try board.setFlagId(ctx, db, t.id, board.flag_merge_failed, "auto", try std.fmt.allocPrint(a, "cl couldn't merge its change into {s}; {s} is where it was\n{s}", .{ trunk, trunk, worktree.lastError() }));
         return error.MergeFailed;
     };
     if (!m.merged) {
@@ -320,6 +344,9 @@ fn merge(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, dir: []c
         return .conflicts;
     }
     try board.clearFlagId(ctx, db, t.id, board.flag_conflict);
+    // It landed: whatever said it hadn't no longer holds.
+    try board.clearFlagId(ctx, db, t.id, board.flag_merge_failed);
+    try board.clearFlagId(ctx, db, t.id, board.flag_unmerged);
     try board.setChange(db, t.id, t.change, "");
     _ = worktree.catchUp(ctx, a, dir, trunk);
     if (t.worktree.len > 0) _ = worktree.catchUp(ctx, a, t.worktree, trunk);
@@ -357,7 +384,19 @@ pub fn finished(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, s
     if (pr.len > 0) _ = try board.addComment(ctx, db, a, key, "claude", try std.fmt.allocPrint(a, "Pull request: {s}", .{pr}), false);
     try board.logEvent(ctx, db, t.id, "finished", t.finishing);
     try board.move(ctx, db, a, key, .done);
+    // A PR lands through the PR; anything else should have put it on trunk.
+    // Checked before the session closes: this runs in it.
+    if (!std.mem.eql(u8, t.finishing, "pr") and pr.len == 0)
+        try checkLanded(ctx, db, a, key, if (std.mem.eql(u8, t.finishing, "tell")) "Claude finished what you told it without merging it" else "Claude said it was merged, but it isn't");
     try closeSession(ctx, db, a, key);
+}
+
+/// What Claude is doing for a ticket finishing `how`.
+pub fn finishingWhat(how: []const u8) []const u8 {
+    if (std.mem.eql(u8, how, "pr")) return "opening a PR";
+    if (std.mem.eql(u8, how, "after-merge")) return "doing the after-merge steps";
+    if (std.mem.eql(u8, how, "tell")) return "doing what you told it";
+    return "merging its branch";
 }
 
 /// A finished ticket lets go of its session, so the project's queue (or a
@@ -384,6 +423,7 @@ pub fn approve(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, sp
         if (try startFinish(ctx, db, a, key, finish)) return .testing;
     }
     const from = try board.approve(ctx, db, a, key);
+    if (from == .testing and finish == .close) try checkLanded(ctx, db, a, key, "It went to Done with Close, not Merge or PR");
     if (from == .testing) try closeSession(ctx, db, a, key);
     return from;
 }
@@ -816,4 +856,97 @@ test "gutterSubmitted: an empty review sends nothing and leaves the ticket alone
     try std.testing.expectEqual(before.round, after.round);
     try std.testing.expectEqual(before.flags.len, after.flags.len);
     try std.testing.expectEqual(comments, try db.int(count, .{before.id}));
+}
+
+/// The flag of `kind` on the ticket, if it has it.
+fn flagOf(t: board.Ticket, kind: []const u8) ?board.Flag {
+    for (t.flags) |f| if (std.mem.eql(u8, f.kind, kind)) return f;
+    return null;
+}
+
+/// The ticket is in Needs You (as `cl ticket needs` lists it), done or not.
+fn inNeeds(db: board.Db, a: std.mem.Allocator, key: []const u8) !bool {
+    for (try board.listTickets(db, a, .{ .needs = true })) |t| if (std.mem.eql(u8, t.key, key)) return true;
+    return false;
+}
+
+test "work that doesn't land is flagged in Needs You until it does: conflicts, closed unmerged" {
+    // tmux blocked: no session is live, and nothing reaches a real server.
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp", .tmux_blocked = true };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const sh = struct {
+        fn run(c: Ctx, al: std.mem.Allocator, argv: []const []const u8) !void {
+            const r = try std.process.run(al, c.io, .{ .argv = argv });
+            if (r.term != .exited or r.term.exited != 0) return error.CommandFailed;
+        }
+    }.run;
+    sh(ctx, a, &.{ "jj", "--version" }) catch return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const repo = try tmp.dir.realPathFileAlloc(ctx.io, ".", a);
+    sh(ctx, a, &.{ "git", "init", "-q", "-b", "master", repo }) catch return error.SkipZigTest;
+    try tmp.dir.writeFile(ctx.io, .{ .sub_path = "a.txt", .data = "base\n" });
+    try sh(ctx, a, &.{ "git", "-C", repo, "add", "a.txt" });
+    try sh(ctx, a, &.{ "git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init" });
+    try std.testing.expect(worktree.ensureJj(ctx, a, repo));
+    const trunk = worktree.trunkBookmark(ctx, a, repo).?;
+
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    // No after-merge command or steps: a merge runs nothing after it.
+    try board.addProject(db, .{ .name = "qa", .dir = repo, .after_merge_claude = "none" });
+    const cfg: config.Config = .{ .profiles = &.{}, .default = "", .operator = "" };
+    const ticket = struct {
+        fn make(c: Ctx, d: board.Db, al: std.mem.Allocator, dir: []const u8, tr: []const u8, title: []const u8, text: []const u8) ![]const u8 {
+            const k = try board.createTicket(c, d, al, .{ .project = "qa", .title = title, .stage = .testing });
+            const ch = try worktree.newChange(c, al, dir, tr, title, try worktree.slug(al, k, title));
+            var f = try std.Io.Dir.cwd().openDir(c.io, dir, .{});
+            defer f.close(c.io);
+            try f.writeFile(c.io, .{ .sub_path = "a.txt", .data = text });
+            try board.setChange(d, (try board.getTicket(d, al, k)).id, ch.id, ch.bookmark);
+            return k;
+        }
+    }.make;
+    const one = try ticket(ctx, db, a, repo, trunk, "One", "one\n");
+    const two = try ticket(ctx, db, a, repo, trunk, "Two", "two\n");
+
+    // One merges; Two now conflicts. It stays in Testing, in Needs You with
+    // the file that conflicts.
+    try move(ctx, cfg, db, a, one, .done, false, .merge);
+    try std.testing.expectEqual(board.Stage.done, (try board.getTicket(db, a, one)).stage);
+    try std.testing.expectError(error.Conflicts, move(ctx, cfg, db, a, two, .done, false, .merge));
+    const t2 = try board.getTicket(db, a, two);
+    try std.testing.expectEqual(board.Stage.testing, t2.stage);
+    try std.testing.expect(std.mem.startsWith(u8, flagOf(t2, board.flag_conflict).?.detail, "a.txt"));
+    try std.testing.expect(try inNeeds(db, a, two));
+
+    // Closed as it is, it is Done with its work left out of master: still in
+    // Needs You, saying so.
+    try move(ctx, cfg, db, a, two, .done, false, .close);
+    const closed = try board.getTicket(db, a, two);
+    try std.testing.expectEqual(board.Stage.done, closed.stage);
+    const un = flagOf(closed, board.flag_unmerged).?;
+    try std.testing.expect(std.mem.indexOf(u8, un.detail, "isn't in master") != null);
+    try std.testing.expect(try inNeeds(db, a, two));
+
+    // Settled in its change, merging it (Done already) clears it all.
+    _ = try worktree.editChange(ctx, a, repo, closed.change);
+    try tmp.dir.writeFile(ctx.io, .{ .sub_path = "a.txt", .data = "one and two\n" });
+    try move(ctx, cfg, db, a, two, .done, false, .merge);
+    const landed = try board.getTicket(db, a, two);
+    try std.testing.expect(flagOf(landed, board.flag_unmerged) == null);
+    try std.testing.expect(flagOf(landed, board.flag_conflict) == null);
+    try std.testing.expect(!try inNeeds(db, a, two));
+    const shown = try std.process.run(a, ctx.io, .{ .argv = &.{ "git", "-C", repo, "show", "master:a.txt" } });
+    try std.testing.expectEqualStrings("one and two\n", shown.stdout);
+
+    // Closing a ticket whose work is on master already raises nothing.
+    try std.testing.expect(flagOf(try board.getTicket(db, a, one), board.flag_unmerged) == null);
+    const three = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Three", .stage = .testing });
+    try board.setChange(db, (try board.getTicket(db, a, three)).id, (try board.getTicket(db, a, one)).change, "");
+    try move(ctx, cfg, db, a, three, .done, false, .close);
+    try std.testing.expect(!try inNeeds(db, a, three));
 }

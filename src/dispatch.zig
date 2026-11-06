@@ -788,13 +788,21 @@ fn releaseGone(ctx: Ctx, db: board.Db, a: std.mem.Allocator, view: View) !void {
     }
 }
 
+/// A ticket finishing (Claude merging it, opening its PR, ...) whose session
+/// went away before it reached Done: it didn't land. It stops finishing (so
+/// Merge can be tried again) and is flagged merge-failed.
+fn finishingGone(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket) !void {
+    try board.setFinishing(ctx, db, t.id, "");
+    try board.setFlagId(ctx, db, t.id, stoppedFlag(t.finishing), "auto", try std.fmt.allocPrint(a, "its session ({s}) ended while Claude was {s}, before it reached Done\nNothing more was merged or opened. Try again (Merge, PR or Tell Claude), or close it.", .{ t.tmux, actions.finishingWhat(t.finishing) }));
+}
+
 /// One dispatcher pass: start what can start, and flag tickets whose session
 /// went away. Returns how many tickets it started.
 pub fn tick(ctx: Ctx, cfg: config.Config, db: board.Db) !usize {
     // Parked tickets' checks (they run detached; a passing one resumes its ticket).
     park.checkDue(ctx, db) catch {};
     // Nothing queued or in progress, and no session to let go of: nothing to look at.
-    if ((try db.int("SELECT 1 FROM tickets WHERE stage IN ('queued', 'planning', 'running') OR (stage = 'backlog' AND tmux != '') OR tmux LIKE '%-plan\\_%' ESCAPE '\\' LIMIT 1", .{})) == null) return 0;
+    if ((try db.int("SELECT 1 FROM tickets WHERE stage IN ('queued', 'planning', 'running') OR (stage = 'backlog' AND tmux != '') OR finishing != '' OR tmux LIKE '%-plan\\_%' ESCAPE '\\' LIMIT 1", .{})) == null) return 0;
     var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);
     defer arena_state.deinit();
     const a = arena_state.allocator();
@@ -805,6 +813,10 @@ pub fn tick(ctx: Ctx, cfg: config.Config, db: board.Db) !usize {
     // several tickets speaks for the newest one in progress there.
     var current: std.StringHashMapUnmanaged(board.Ticket) = .empty;
     for (try board.listTickets(db, a, .{ .done = false })) |t| {
+        if (t.finishing.len > 0 and t.tmux.len > 0 and t.tmux[0] != '(' and !view.alive(t.tmux)) {
+            finishingGone(ctx, db, a, t) catch {};
+            continue;
+        }
         if (t.stage != .running and t.stage != .planning) continue;
         if (t.tmux.len == 0 or t.tmux[0] == '(') continue;
         if (!view.alive(t.tmux)) {
@@ -990,6 +1002,8 @@ pub fn loop(ctx: Ctx, cfg: config.Config, log: *const fn ([]const u8) void) void
 
 const HookInput = struct {
     hook_event_name: ?[]const u8 = null,
+    /// Stop: what Claude said last (newer Claude Code versions send it).
+    last_assistant_message: ?[]const u8 = null,
     message: ?[]const u8 = null,
     notification_type: ?[]const u8 = null,
 };
@@ -1011,6 +1025,8 @@ pub fn hook(ctx: Ctx, cfg: config.Config, event: []const u8, input: []const u8) 
         board.clearFlagId(ctx, db, t.id, board.flag_input) catch {};
         board.clearFlagId(ctx, db, t.id, board.flag_question) catch {};
         board.logEvent(ctx, db, t.id, "turn ended", "") catch {};
+        // Finishing still: Claude stopped before it ran `done --close`.
+        if (t.finishing.len > 0 and t.stage != .done) stoppedFinishing(ctx, db, a, t, in.last_assistant_message orelse "") catch {};
     } else if (std.mem.eql(u8, event, "notify")) {
         const msg = in.message orelse "";
         const kind = in.notification_type orelse "";
@@ -1027,6 +1043,41 @@ pub fn hook(ctx: Ctx, cfg: config.Config, event: []const u8, input: []const u8) 
             board.setFlagId(ctx, db, t.id, board.flag_input, "auto", msg) catch {};
         }
     }
+}
+
+/// Claude ended its turn while finishing a ticket, without taking it to Done:
+/// the merge (or PR, or what you told it) hasn't landed, so it needs you.
+/// It stays finishing: an answer lets Claude carry on.
+fn stoppedFinishing(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, said: []const u8) !void {
+    const tail = lastLines(said, 12);
+    try board.setFlagId(ctx, db, t.id, stoppedFlag(t.finishing), "auto", try std.fmt.allocPrint(a, "Claude stopped while {s}, without taking it to Done; its session says why{s}{s}", .{ actions.finishingWhat(t.finishing), if (tail.len > 0) "\n" else "", tail }));
+}
+
+/// The flag for finishing `how` cut short: merged already ("after-merge":
+/// cl merged it, Claude was doing the steps after) it is the after-merge
+/// that failed; otherwise the merge (or PR) didn't land.
+fn stoppedFlag(how: []const u8) []const u8 {
+    return if (std.mem.eql(u8, how, "after-merge")) board.flag_after_merge else board.flag_merge_failed;
+}
+
+/// The last `n` lines of `text`, trimmed.
+fn lastLines(text: []const u8, n: usize) []const u8 {
+    const t = std.mem.trim(u8, text, " \t\r\n");
+    var i = t.len;
+    var seen: usize = 0;
+    while (i > 0) : (i -= 1) {
+        if (t[i - 1] == '\n') {
+            seen += 1;
+            if (seen == n) break;
+        }
+    }
+    return t[i..];
+}
+
+test lastLines {
+    try std.testing.expectEqualStrings("c\nd", lastLines("a\nb\nc\nd\n", 2));
+    try std.testing.expectEqualStrings("only", lastLines("  only ", 3));
+    try std.testing.expectEqualStrings("", lastLines("", 3));
 }
 
 test prompt {
@@ -1476,4 +1527,44 @@ test "a pause survives a restart, and an older board gets the column" {
     defer db.close();
     try board.migrate(db);
     try std.testing.expect((try board.getProject(db, a, "qa")).paused);
+}
+
+test "a finishing ticket whose session ends or stops short is flagged; trying again clears it" {
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp", .tmux_blocked = true };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "qa", .dir = "/x/qa" });
+    const k = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "T", .stage = .review });
+    const id = (try board.getTicket(db, a, k)).id;
+    try board.setSession(ctx, db, id, "cl_qa-1_x", "", "", "");
+
+    // Claude opening the PR stops and says why: flagged with what it said.
+    try board.setFinishing(ctx, db, id, "pr");
+    try stoppedFinishing(ctx, db, a, try board.getTicket(db, a, k), "Working...\ngh: authentication required");
+    var t = try board.getTicket(db, a, k);
+    try std.testing.expectEqualStrings(board.flag_merge_failed, t.flags[0].kind);
+    try std.testing.expect(std.mem.indexOf(u8, t.flags[0].detail, "opening a PR") != null);
+    try std.testing.expect(std.mem.endsWith(u8, t.flags[0].detail, "gh: authentication required"));
+    try std.testing.expectEqualStrings("pr", t.finishing);
+
+    // Merge tried again: the old failure goes. Its session then ends.
+    try board.setFinishing(ctx, db, id, "merge");
+    try std.testing.expectEqual(@as(usize, 0), (try board.getTicket(db, a, k)).flags.len);
+    try finishingGone(ctx, db, a, try board.getTicket(db, a, k));
+    t = try board.getTicket(db, a, k);
+    try std.testing.expectEqualStrings("", t.finishing);
+    try std.testing.expectEqualStrings(board.flag_merge_failed, t.flags[0].kind);
+    try std.testing.expect(std.mem.indexOf(u8, t.flags[0].detail, "cl_qa-1_x") != null);
+    try std.testing.expectEqual(@as(usize, 1), (try board.listTickets(db, a, .{ .needs = true })).len);
+
+    // Cut short after the merge (Claude doing the steps after it): the after-merge failed.
+    try board.setFinishing(ctx, db, id, "after-merge");
+    try finishingGone(ctx, db, a, try board.getTicket(db, a, k));
+    var after = false;
+    for ((try board.getTicket(db, a, k)).flags) |f| after = after or std.mem.eql(u8, f.kind, board.flag_after_merge);
+    try std.testing.expect(after);
 }

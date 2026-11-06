@@ -392,6 +392,31 @@ pub fn changeState(ctx: Ctx, a: std.mem.Allocator, dir: []const u8, change: []co
     return if (std.mem.trim(u8, merged, " \n").len > 0) .merged else .open;
 }
 
+/// What of a ticket's work isn't on trunk, said in a line ("2 changes on
+/// cl-9-x aren't in master"), or null when it all is (or there is none, or
+/// it can't tell). jj: `change`, unless it is in `main`, and what was built
+/// on top of it, that hold edits. git (no change): commits on `branch` that
+/// `main` lacks.
+pub fn unmergedWork(ctx: Ctx, a: std.mem.Allocator, dir: []const u8, change: []const u8, branch: []const u8, main: []const u8) ?[]const u8 {
+    const m = sym(a, main) catch return null;
+    if (change.len > 0) {
+        // In trunk itself: it landed (and what came later on top of it is
+        // other tickets' work).
+        if (changeState(ctx, a, dir, change, main) != .open) return null;
+        const revs = std.fmt.allocPrint(a, "({s}:: ~ empty()) ~ ::{s}", .{ change, m }) catch return null;
+        const left = changes(ctx, a, dir, revs) catch return null;
+        if (left.len == 0) return null;
+        const on = if (branch.len > 0) branch else change[0..@min(change.len, 12)];
+        return std.fmt.allocPrint(a, "{d} change{s} on {s} {s} in {s}", .{ left.len, if (left.len == 1) "" else "s", on, if (left.len == 1) "isn't" else "aren't", main }) catch null;
+    }
+    if (branch.len == 0) return null;
+    const range = std.fmt.allocPrint(a, "{s}..{s}", .{ main, branch }) catch return null;
+    const outp = run(ctx, a, &.{ "git", "-C", dir, "rev-list", "--count", range }) catch return null;
+    const n = std.fmt.parseInt(usize, std.mem.trim(u8, outp, " \n"), 10) catch return null;
+    if (n == 0) return null;
+    return std.fmt.allocPrint(a, "{d} commit{s} on {s} {s} in {s}", .{ n, if (n == 1) "" else "s", branch, if (n == 1) "isn't" else "aren't", main }) catch null;
+}
+
 /// Lines of `jj log` output for `revs` (one change id each).
 fn changes(ctx: Ctx, a: std.mem.Allocator, dir: []const u8, revs: []const u8) Error![][]const u8 {
     const outp = try run(ctx, a, &.{ "jj", "-R", dir, "log", "--no-graph", "-r", revs, "-T", "change_id ++ \"\\n\"" });
@@ -633,6 +658,10 @@ test "a change per ticket: switch, merge back, conflicts" {
     try std.testing.expect(try editChange(ctx, a, repo, six.id));
     try std.testing.expectEqualStrings("worktree\n", read(ctx, tmp.dir, a, "d.txt"));
     try std.testing.expectEqual(ChangeState.open, changeState(ctx, a, repo, six.id, trunk));
+    // Its work isn't on master; merged work (T-5's) and a change that's gone aren't reported.
+    try std.testing.expectEqualStrings("1 change on t-6-moves isn't in master", unmergedWork(ctx, a, repo, six.id, six.bookmark, trunk).?);
+    try std.testing.expect(unmergedWork(ctx, a, repo, five.id, "", trunk) == null);
+    try std.testing.expect(unmergedWork(ctx, a, repo, four.id, "", trunk) == null);
 
     // cl's own files stay out of changes.
     excludeClFiles(ctx, a, repo);

@@ -54,10 +54,10 @@ pub const Seen = struct {
         return false;
     }
 
-    /// A flag that puts it in Needs You. On a Done ticket only a failed
-    /// after-merge run still asks (it comes after the merge).
+    /// A flag that puts it in Needs You. On a Done ticket only work that
+    /// didn't land or a failed after-merge run still asks (board.asksWhenDone).
     fn asks(self: Seen, f: SeenFlag) bool {
-        return !f.hidden and (self.stage != .done or std.mem.eql(u8, f.kind, board.flag_after_merge));
+        return !f.hidden and (self.stage != .done or board.asksWhenDone(f.kind));
     }
 
     /// The kinds of the flags that put it in Needs You, comma-separated.
@@ -425,7 +425,8 @@ test "ticket watch: Needs You, as the board decides it" {
     const s6 = try snapshot(db, a, .{});
     try testing.expectEqualStrings("QA-1 qa needs question T\n", try needsLines(a, s5, s6));
 
-    // Parked: out. Done: out too (only a failed after-merge run stays).
+    // Parked: out. Done: out too (only work that didn't land, or a failed
+    // after-merge run, stays).
     try db.exec("INSERT INTO parks (ticket, reason, at) VALUES ((SELECT id FROM tickets WHERE key = ?1), 'pr', 0)", .{k});
     const s7 = try snapshot(db, a, .{});
     try testing.expectEqualStrings("QA-1 qa left question T\n", try needsLines(a, s6, s7));
@@ -436,6 +437,9 @@ test "ticket watch: Needs You, as the board decides it" {
     try board.setFlag(ctx, db, a, k, board.flag_after_merge, "auto", "build failed");
     const s9 = try snapshot(db, a, .{});
     try testing.expectEqualStrings("QA-1 qa needs after-merge T\n", try needsLines(a, s8, s9));
+    try board.setFlag(ctx, db, a, k, board.flag_unmerged, "auto", "2 changes on qa-1-t aren't in master");
+    const s10 = try snapshot(db, a, .{});
+    try testing.expectEqualStrings("QA-1 qa needs after-merge,unmerged T\n", try needsLines(a, s9, s10));
 }
 
 test "ticket watch: filters" {

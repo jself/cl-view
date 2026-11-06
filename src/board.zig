@@ -48,6 +48,8 @@ pub const flag_review = "review"; // Claude said done; review it
 pub const flag_testing = "testing"; // try it out
 pub const flag_conflict = "conflict"; // merging it back conflicts
 pub const flag_after_merge = "after-merge"; // the project's after-merge command failed
+pub const flag_merge_failed = "merge-failed"; // approved, but its merge (or PR) didn't land
+pub const flag_unmerged = "unmerged"; // Done, but its branch's work isn't on trunk
 pub const flag_unparked = "unparked"; // its park's condition came true; it resumed
 pub const flag_park_expired = "park-expired"; // its park's check never passed in time
 pub const flag_idle = "idle"; // Claude ended its turn; nothing else asks, so it waits on you
@@ -1053,6 +1055,8 @@ fn moveId(ctx: Ctx, db: Db, id: i64, from: Stage, to: Stage) Error!void {
     // All but a failed after-merge run's: that comes after the merge, so it
     // stays until the next run (or the human) clears it.
     if (to == .done) try db.exec("UPDATE flags SET cleared = ?2 WHERE ticket = ?1 AND cleared IS NULL AND kind != ?3", .{ id, now(ctx), flag_after_merge });
+    // Out of Done, it is under way again: "done without merging" no longer holds.
+    if (from == .done) try clearFlagId(ctx, db, id, flag_unmerged);
     try touch(ctx, db, id);
 }
 
@@ -1112,6 +1116,16 @@ pub fn clearFlagId(ctx: Ctx, db: Db, id: i64, kind: []const u8) Error!void {
         try touch(ctx, db, id);
         try logEvent(ctx, db, id, "unflagged", kind);
     }
+}
+
+/// Flags that still ask something of a Done ticket, so Needs You keeps it:
+/// its work didn't land (not merged, or merging it later conflicted) or what
+/// runs after the merge failed. Going to Done clears the others.
+pub fn asksWhenDone(kind: []const u8) bool {
+    for ([_][]const u8{ flag_after_merge, flag_unmerged, flag_merge_failed, flag_conflict }) |k| {
+        if (std.mem.eql(u8, kind, k)) return true;
+    }
+    return false;
 }
 
 /// Flags that wait on the human to do something with the ticket: Claude is
@@ -1267,6 +1281,8 @@ pub fn approve(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8) Error!St
 /// and then moves it to Done; it stays in its stage until then.
 pub fn setFinishing(ctx: Ctx, db: Db, id: i64, how: []const u8) Error!void {
     try db.exec("UPDATE tickets SET finishing = ?2 WHERE id = ?1", .{ id, how });
+    // Another try: the last one's failure no longer says where it stands.
+    if (how.len > 0) try clearFlagId(ctx, db, id, flag_merge_failed);
     try logEvent(ctx, db, id, "finishing", how);
     try touch(ctx, db, id);
 }

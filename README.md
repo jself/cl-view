@@ -657,8 +657,8 @@ new flag; its flags stay ("not now"). Dismiss clears the card's flag, as
 and the flag comes back only if the same thing happens again. When two or
 more cards share a kind, "Dismiss all" clears that kind on them after you
 confirm. Dismiss is only offered on informational flags (didn't start,
-session ended, after-merge failed, woke from park, park expired, flags set by
-hand); a question, a permission prompt, a review, a test or a conflict waits
+session ended, after-merge failed, didn't land, not merged, woke from park,
+park expired, flags set by hand); a question, a permission prompt, a review, a test or a conflict waits
 on you, and clears when you act on it.
 
 `cl t watch` prints a line each time a ticket's flags or stage change, until
@@ -772,6 +772,29 @@ the ticket as a `conflict` flag listing the files; trunk stays put, and Claude
 is asked to settle them in the change and run `cl t done QA-1 --close`, which
 merges it then (and refuses while any are left). Git branches are merged by
 Claude as before.
+
+#### When it doesn't land
+
+Work that was approved but didn't reach trunk is flagged, so it shows in
+Needs You with the ticket's key and why, Done or not:
+
+- `conflict`: merging it conflicts; the flag lists the files (above).
+- `merge-failed` (Didn't land): cl couldn't merge it (jj failed, no trunk
+  bookmark; jj's error is on the flag), or the ticket was finishing (Claude
+  merging it, opening its PR, doing what you told it) and Claude ended its turn
+  without running `done --close` (the flag has the end of what it said) or its
+  session ended (the ticket stops finishing, so Merge can be tried again).
+  Trying again (Merge, PR, Tell Claude) clears it, and so does reaching Done.
+- `unmerged` (Not merged): it went to Done without cl merging it (Close, a
+  Tell Claude, or a git branch Claude said it merged) while its jj change or
+  branch still holds work trunk doesn't have. A custom close isn't checked:
+  Claude said what to do with it instead, and you chose that. Its Not merged
+  tab merges a jj change from there (`cl t move QA-1 done --merge` does the
+  same), which clears it; so does reopening the ticket. Dismiss it when it
+  wasn't meant to land.
+
+A flag rather than a prompt at Close: the board, the CLI and Claude all close
+tickets, and only the result says whether the work is on trunk.
 
 #### After merge
 

@@ -194,7 +194,8 @@ fn flagColor(kind: []const u8) vaxis.Color {
     if (eql(u8, kind, board.flag_question) or eql(u8, kind, board.flag_input)) return .{ .index = 1 };
     if (eql(u8, kind, board.flag_review) or eql(u8, kind, board.flag_unparked)) return .{ .index = 2 };
     if (eql(u8, kind, board.flag_testing)) return .{ .index = 6 };
-    if (eql(u8, kind, board.flag_conflict) or eql(u8, kind, board.flag_after_merge) or eql(u8, kind, board.flag_park_expired)) return .{ .index = 5 };
+    if (eql(u8, kind, board.flag_conflict) or eql(u8, kind, board.flag_after_merge) or eql(u8, kind, board.flag_park_expired) or
+        eql(u8, kind, board.flag_merge_failed) or eql(u8, kind, board.flag_unmerged)) return .{ .index = 5 };
     return .{ .index = 3 };
 }
 
@@ -341,7 +342,7 @@ pub fn askFlag(t: board.Ticket) ?board.Flag {
 pub fn needsFlag(t: board.Ticket) ?board.Flag {
     for (t.flags) |f| {
         if (f.hidden) continue;
-        if (t.stage == .done and !std.mem.eql(u8, f.kind, board.flag_after_merge)) continue;
+        if (t.stage == .done and !board.asksWhenDone(f.kind)) continue;
         return f;
     }
     return null;
@@ -402,6 +403,14 @@ fn askLineRaw(a: std.mem.Allocator, t: board.Ticket, f: board.Flag) ![]const u8 
     if (eql(u8, f.kind, board.flag_after_merge)) {
         const first = std.mem.sliceTo(f.detail, '\n');
         return std.fmt.allocPrint(a, "After-merge command failed{s}{s}", .{ if (first.len > 0) ": " else "", first });
+    }
+    if (eql(u8, f.kind, board.flag_merge_failed)) {
+        const first = std.mem.sliceTo(f.detail, '\n');
+        return std.fmt.allocPrint(a, "Merge didn't land{s}{s}", .{ if (first.len > 0) ": " else "", first });
+    }
+    if (eql(u8, f.kind, board.flag_unmerged)) {
+        const first = std.mem.sliceTo(f.detail, '\n');
+        return std.fmt.allocPrint(a, "Done but not merged{s}{s}", .{ if (first.len > 0) ": " else "", first });
     }
     if (eql(u8, f.kind, "start-failed")) return std.fmt.allocPrint(a, "Its session didn't start ({s})", .{if (f.detail.len > 0) f.detail else "no reason given"});
     if (eql(u8, f.kind, board.flag_park_expired)) return std.fmt.allocPrint(a, "Its park's check never passed{s}{s}", .{ if (f.detail.len > 0) ": " else "", f.detail });

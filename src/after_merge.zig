@@ -311,3 +311,47 @@ fn setError(text: []const u8) void {
     @memcpy(last_error[0..n], text[0..n]);
     last_error_len = n;
 }
+
+test "a failing after-merge command flags the ticket in Needs You with the log's tail; a passing run clears it" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var env: std.process.Environ.Map = .init(a);
+    try env.put("PATH", std.mem.span(std.c.getenv("PATH") orelse return error.SkipZigTest));
+    // tmux blocked: nothing here reaches a real server.
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = &env, .home = "/tmp", .tmux_blocked = true };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = try tmp.dir.realPathFileAlloc(ctx.io, ".", a);
+    const repo = try std.fmt.allocPrint(a, "{s}/repo", .{base});
+    _ = run(ctx, a, null, &.{ "git", "init", "-q", "-b", "master", repo }) catch return error.SkipZigTest;
+    _ = try run(ctx, a, null, &.{ "git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init" });
+    var cfg: config.Config = .{ .profiles = &.{}, .default = "", .operator = "" };
+    cfg.board.dir = try std.fmt.allocPrint(a, "{s}/state", .{base});
+
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    // Claude's after-merge steps off: a failure doesn't go to the operator.
+    try board.addProject(db, .{ .name = "qa", .dir = repo, .after_merge = "echo 'src/x.zig:3: error: boom'; exit 1", .after_merge_claude = "none" });
+    const k = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Merged", .stage = .done });
+
+    try runOnce(ctx, cfg, db, a, "qa", &.{k});
+    const t = try board.getTicket(db, a, k);
+    try std.testing.expectEqual(@as(usize, 1), t.flags.len);
+    const f = t.flags[0];
+    try std.testing.expectEqualStrings(board.flag_after_merge, f.kind);
+    try std.testing.expect(std.mem.startsWith(u8, f.detail, "exit 1 at "));
+    try std.testing.expect(std.mem.indexOf(u8, f.detail, "after-merge-qa.log") != null);
+    try std.testing.expect(std.mem.indexOf(u8, f.detail, "src/x.zig:3: error: boom") != null);
+    // Done, and still in Needs You.
+    const needs = try board.listTickets(db, a, .{ .needs = true });
+    try std.testing.expectEqual(@as(usize, 1), needs.len);
+    try std.testing.expectEqualStrings(k, needs[0].key);
+
+    // Fixed, the next run passes and the flag goes.
+    try board.updateProject(db, "qa", .{ .name = "qa", .dir = repo, .after_merge = "true" });
+    try runOnce(ctx, cfg, db, a, "qa", &.{k});
+    try std.testing.expectEqual(@as(usize, 0), (try board.getTicket(db, a, k)).flags.len);
+    try std.testing.expectEqual(@as(usize, 0), (try board.listTickets(db, a, .{ .needs = true })).len);
+}

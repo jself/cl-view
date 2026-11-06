@@ -1029,12 +1029,7 @@ fn finishNote(db: board.Db, a: std.mem.Allocator, key: []const u8) !void {
     }));
 }
 
-fn finishingWhat(how: []const u8) []const u8 {
-    if (std.mem.eql(u8, how, "pr")) return "opening a PR";
-    if (std.mem.eql(u8, how, "after-merge")) return "doing the after-merge steps";
-    if (std.mem.eql(u8, how, "tell")) return "doing what you told it";
-    return "merging its branch";
-}
+const finishingWhat = actions.finishingWhat;
 
 fn logLine(text: []const u8) void {
     var buf: [512]u8 = undefined;

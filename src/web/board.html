@@ -412,7 +412,7 @@
 "use strict";
 const STAGES = ["backlog", "planning", "queued", "running", "review", "testing", "done"];
 const STAGE_NAME = { backlog: "Backlog", planning: "Planning", queued: "Queued", running: "Running", review: "Review", testing: "Testing", done: "Done" };
-const FLAG_NAME = { input: "Needs input", question: "Question", review: "Ready for review", testing: "Needs testing", ended: "Session ended", "start-failed": "Didn't start", conflict: "Conflicts", "after-merge": "After-merge failed", unparked: "Woke from park", "park-expired": "Park expired", idle: "Idle" };
+const FLAG_NAME = { input: "Needs input", question: "Question", review: "Ready for review", testing: "Needs testing", ended: "Session ended", "start-failed": "Didn't start", conflict: "Conflicts", "after-merge": "After-merge failed", "merge-failed": "Didn't land", unmerged: "Not merged", unparked: "Woke from park", "park-expired": "Park expired", idle: "Idle" };
 const STATUS_NAME = { paused: "Paused", busy: "Working", waiting: "Waiting on you", blocked: "Waiting on you", idle: "Idle", shell: "Idle · background task", starting: "Starting", gone: "Session ended", killed: "Killed · restart it", parked: "Parked", unknown: "Unknown" };
 
 const store = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch { return null; } };
@@ -462,8 +462,9 @@ async function sendAnswer(key, answers, btn) {
 
 const flagDetail = (f) => { try { return JSON.parse(f.detail); } catch { return null; } };
 // The human is holding it up: it has a flag they haven't hidden, and Claude isn't working on it.
-// A Done ticket only for a failed after-merge run (it comes after the merge).
-const asksStill = (t, f) => t.stage !== "done" || f.kind === "after-merge";
+// A Done ticket only for work that didn't land or a failed after-merge run (board.zig asksWhenDone).
+const DONE_ASKS = ["after-merge", "unmerged", "merge-failed", "conflict"];
+const asksStill = (t, f) => t.stage !== "done" || DONE_ASKS.includes(f.kind);
 // Parked, it waits on something outside cl, not on you.
 const needsMe = (row) => !row.ticket.park && row.ticket.flags.some((f) => !f.hidden && asksStill(row.ticket, f)) && !row.working;
 // Hidden from Needs you: every flag it has is hidden (a new one brings it back).
@@ -498,6 +499,8 @@ function askLine(t, f, quick) {
   if (f.kind === "idle") return "Idle: waiting for you";
   if (f.kind === "conflict") { const n = f.detail.split("\n").filter((l) => l.trim()).length; return `Merge conflicts in ${n} file${n === 1 ? "" : "s"}`; }
   if (f.kind === "after-merge") return "After-merge command failed: " + f.detail.split("\n")[0];
+  if (f.kind === "merge-failed") return "Merge didn't land: " + f.detail.split("\n")[0];
+  if (f.kind === "unmerged") return "Done but not merged: " + f.detail.split("\n")[0];
   if (f.kind === "start-failed") return `${f.detail || "Didn't start"} · ` + (retries(t) ? "the dispatcher will retry" : "start it again");
   return askText(t, f);
 }
@@ -512,7 +515,7 @@ const DISMISS_TIP = "Remove this alert for good. The ticket itself doesn't chang
 // A failed start of a queued (or planning) ticket is retried by the dispatcher.
 const retries = (t) => (t.stage === "queued" || t.stage === "planning") && !t.tmux && !t.killed && !t.park;
 const flagLabel = (f) => f.kind === "review" && f.detail === "plan" ? "Plan ready" : (FLAG_NAME[f.kind] || f.kind);
-const flagClass = (k) => k === "after-merge" || k === "park-expired" ? "f-conflict" : k === "unparked" ? "f-review" : ["input", "question", "review", "testing", "conflict"].includes(k) ? "f-" + k : "";
+const flagClass = (k) => ["after-merge", "park-expired", "merge-failed", "unmerged"].includes(k) ? "f-conflict" : k === "unparked" ? "f-review" : ["input", "question", "review", "testing", "conflict"].includes(k) ? "f-" + k : "";
 // Finishing: Claude is merging the branch or opening a PR before it goes to Done.
 const finishPill = (t) => t.finishing ? `<span class="pill f-finishing" title="${t.finishing === "pr" ? "Claude is opening a PR" : t.finishing === "after-merge" ? "It's merged; Claude is doing the after-merge steps (rebuilding, restarting)" : t.finishing === "tell" ? "Claude is doing what you told it" : "Claude is merging its branch"}; it goes to Done after">Finishing</span>` : "";
 // Claude asked to close it its own way (cl ticket custom-close).
@@ -713,6 +716,7 @@ function renderNeeds() {
       : f.kind === "review" ? `<button type="button" class="btn primary" data-open="${esc(t.key)}" data-tab="review">Review</button>`
       : f.kind === "testing" ? `<button type="button" class="btn primary" data-open="${esc(t.key)}" data-tab="test">Test it</button>`
       : f.kind === "after-merge" ? `<button type="button" class="btn primary" data-open="${esc(t.key)}" data-tab="after-merge">See the log</button>`
+      : f.kind === "merge-failed" || f.kind === "unmerged" ? `<button type="button" class="btn primary" data-open="${esc(t.key)}" data-tab="landing">See why</button>`
       : f.kind === "idle" ? `<button type="button" class="btn primary" data-open="${esc(t.key)}" data-tab="session">Open session</button>`
       : `<button type="button" class="btn primary" data-open="${esc(t.key)}" data-tab="needs">Open</button>`;
     const shell = t.tmux && r.status && r.status !== "gone" ? `<a class="btn" href="${shellHref(t)}">Shell</a>` : "";
@@ -991,6 +995,7 @@ function tabsFor(d) {
   const t = d.ticket; const tabs = [];
   if (t.flags.some((f) => f.kind === "question" || f.kind === "input")) tabs.push(["needs", "Needs you"]);
   if (t.flags.some((f) => f.kind === "after-merge")) tabs.push(["after-merge", "After merge"]);
+  if (t.flags.some((f) => f.kind === "merge-failed" || f.kind === "unmerged")) tabs.push(["landing", "Not merged"]);
   if (t.stage === "review" || d.guide || d.review) tabs.push(["review", "Review"]);
   if (d.test_plan) tabs.push(["test", "Test"]);
   tabs.push(["comments", `Comments${d.comments.length ? " " + d.comments.length : ""}`]);
@@ -1066,6 +1071,7 @@ function tabHtml(d) {
       `<li>${esc(e.kind)}${e.detail ? " · " + esc(e.detail) : ""} <span class="mono" style="font-size:calc(11.5 * var(--u))">${new Date(e.at * 1000).toLocaleString()}</span></li>`).join("")}</ol>`;
     case "details": return detailsTab(d);
     case "after-merge": return afterMergeTab(d);
+    case "landing": return landingTab(d);
   }
   return "";
 }
@@ -1077,6 +1083,19 @@ function afterMergeTab(d) {
       ${rest.length ? `<pre class="term">${esc(rest.join("\n"))}</pre>` : ""}
       <div class="actions"><button type="button" class="btn primary" data-after-merge="${esc(d.ticket.project)}">Run it again</button>
       <button type="button" class="btn" data-unflag="after-merge" title="Remove this alert for good; the log stays and the ticket doesn't change">Dismiss</button></div></div>`;
+}
+// Its work didn't reach trunk: the merge (or PR) failed or was cut short, or it went to
+// Done without one. A jj change can be merged from here, Done or not; a git branch needs
+// its session (reopen it and finish with Merge).
+function landingTab(d) {
+  const t = d.ticket;
+  return t.flags.filter((x) => x.kind === "merge-failed" || x.kind === "unmerged").map((f) => {
+    const [head, ...rest] = f.detail.split("\n");
+    const merge = t.change ? `<button type="button" class="btn primary" data-merge-now="1" title="cl merges its change into trunk now (conflicts come back here)">Merge it now</button>` : "";
+    return `<div class="q"><span class="muted" style="font-size:calc(12 * var(--u))">${f.kind === "unmerged" ? "Done, but its work isn't merged" : "Its merge didn't land"}: ${esc(head)}</span>
+      ${rest.length ? `<pre class="term">${esc(rest.join("\n"))}</pre>` : ""}
+      <div class="actions">${merge}<button type="button" class="btn" data-unflag="${esc(f.kind)}" title="Remove this alert for good (you meant it not to be merged, or you dealt with it); the ticket doesn't change">Dismiss</button></div></div>`;
+  }).join("");
 }
 function needsTab(d) {
   const t = d.ticket; const f = t.flags.find((x) => x.kind === "question") || t.flags.find((x) => x.kind === "input"); const det = flagDetail(f) || {};
@@ -1665,6 +1684,7 @@ document.addEventListener("click", async (e) => {
     return;
   }
   if (ds.unflag) return act(key, "dismiss", { kind: ds.unflag }, "Dismissed");
+  if (ds.mergeNow) return act(key, "move", { stage: "done", finish: "merge" }, "Merging it").catch(() => refresh());
   // Pressing the one already chosen un-marks the check (back to not tested).
   if (ds.check !== undefined) { const c = state.checks["c" + ds.check] || {}; const pass = ds.pass === "1";
     if (c.pass === pass) { delete c.pass; delete c.note; } else c.pass = pass;
