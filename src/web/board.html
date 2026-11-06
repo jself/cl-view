@@ -253,7 +253,7 @@
     <button type="button" data-view="board">Board</button><button type="button" data-view="lanes">Lanes</button><button type="button" data-view="list">List</button>
   </div>
   <a class="btn" href="/">Terminal</a>
-  <a class="btn" href="/?attach=operator" title="Talk to the operator: it can make tickets and check on sessions">Chat</a>
+  <a class="btn" id="chatBtn" href="/?attach=operator" title="Talk to the operator: it can make tickets and check on sessions (O)">Chat</a>
   <button type="button" class="btn" id="quickBtn" title="Tell the operator what to add; it makes the ticket">Quick ticket</button>
   <button type="button" class="btn primary" id="newBtn">New ticket</button>
 </header>
@@ -1298,6 +1298,15 @@ document.addEventListener("change", (e) => {
 });
 document.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && e.target.id === "msg") { e.preventDefault(); document.getElementById("sendMsg").click(); }
+});
+// O opens the operator chat, like the Chat button, unless you're typing
+// somewhere or a dialog is open.
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "o" || e.ctrlKey || e.metaKey || e.altKey || e.isComposing || e.repeat) return;
+  const t = e.target;
+  if (t.isContentEditable || t.closest?.("input, textarea, select") || document.querySelector("dialog[open]")) return;
+  e.preventDefault();
+  document.getElementById("chatBtn").click();
 });
 // Ctrl+= / Ctrl+- / Ctrl+0 zoom the board, as browser zoom would (and in
 // place of it), in the browser's own steps. Remembered per browser; 0 goes

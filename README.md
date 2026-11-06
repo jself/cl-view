@@ -194,6 +194,8 @@ web.font_size = 16              # text size of the board and terminal pages, in 
   On the board, Ctrl+= / Ctrl+- / Ctrl+0 make it bigger, smaller, or back to
   `web.font_size`, like browser zoom; each browser (and `cl window`)
   remembers its own.
+- On the board, O (outside a text box, with no dialog open) opens the
+  operator chat, like the Chat button.
 - Attaching from the phone resizes that session to the phone's width
   (`window-size latest`); it switches back when you use it at the desk.
 - `CL_PORT=8422` (or `cl web --port 8422`) replaces the port of every
