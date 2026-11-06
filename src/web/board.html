@@ -22,6 +22,7 @@
     --review: #9cc6ff; --review-bg: #11294a; --testing: #7ee6d6; --testing-bg: #0f3330;
     --other: #d6d7da; --other-bg: #2c2e33; --finishing: #b6e3a0; --finishing-bg: #1b3317; --parked: #c4b5fd; --parked-bg: #2a2342;
     --conflict: #ffb4b4; --conflict-bg: #3d1a1a;
+    --lane-a: var(--panel); --lane-a-line: #222428; --lane-b: #1a1f28; --lane-b-line: #2a3241; /* the lanes view's zebra stripes */
     --mono: ui-monospace, SFMono-Regular, Menlo, "DejaVu Sans Mono", monospace;
     --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
@@ -167,19 +168,21 @@
      a lane taller than the window its name sticks under the headers (at --hd,
      the header row's fixed height). Each grid cell pads its panel by half a gap
      rather than using grid gaps, so the stuck cells' background covers the
-     cards that scroll under them. */
+     cards that scroll under them. Every other lane's cells carry .alt (set
+     when rendering, counting only the lanes shown) for the zebra stripes. */
   .lanes { --lane: calc(160 * var(--u)); --stage: minmax(calc(230 * var(--u)), 1fr); --hg: calc(6 * var(--u)); --hh: calc(40 * var(--u)); --hd: calc(var(--hh) + var(--hg));
            flex: 1 1 auto; min-height: 0; overflow: auto; display: grid; grid-template-columns: var(--lane) repeat(var(--n), var(--stage)); align-content: start;
            scroll-snap-type: x mandatory; scroll-padding-left: var(--lane); overscroll-behavior-x: contain; }
-  .lanes > div { padding: var(--hg); display: flex; flex-direction: column; min-width: 0; }
+  .lanes > div { padding: var(--hg); display: flex; flex-direction: column; min-width: 0; --lb: var(--lane-a); --lbl: var(--lane-a-line); }
+  .lanes > .alt { --lb: var(--lane-b); --lbl: var(--lane-b-line); }
   .lanes .lhd { position: sticky; top: 0; z-index: 2; background: var(--bg); padding-top: 0; scroll-snap-align: start; }
   .lanes .lhd.corner { left: 0; z-index: 3; scroll-snap-align: none; }
   .lanes .lhd h2 { box-sizing: border-box; height: var(--hh); background: var(--panel); border: 1px solid #222428; border-radius: calc(12 * var(--u)); padding: 0 calc(14 * var(--u)); }
   .lanes .lane { position: sticky; left: 0; z-index: 1; background: var(--bg); }
-  .lanes .lane > div { flex: 1; background: var(--panel); padding: calc(10 * var(--u)); border-radius: calc(12 * var(--u)); border: 1px solid #222428; }
-  .lanes .lt { position: sticky; top: calc(var(--hd) + calc(10 * var(--u))); display: flex; flex-direction: column; gap: calc(6 * var(--u)); background: var(--panel); }
+  .lanes .lane > div { flex: 1; background: var(--lb); padding: calc(10 * var(--u)); border-radius: calc(12 * var(--u)); border: 1px solid var(--lbl); }
+  .lanes .lt { position: sticky; top: calc(var(--hd) + calc(10 * var(--u))); display: flex; flex-direction: column; gap: calc(6 * var(--u)); background: var(--lb); }
   .lanes .lane strong { overflow-wrap: anywhere; }
-  .lanes .cell { flex: 1; background: var(--panel); border: 1px solid #222428; border-radius: calc(12 * var(--u)); padding: calc(10 * var(--u));
+  .lanes .cell { flex: 1; background: var(--lb); border: 1px solid var(--lbl); border-radius: calc(12 * var(--u)); padding: calc(10 * var(--u));
                  display: flex; flex-direction: column; gap: calc(8 * var(--u)); min-height: calc(60 * var(--u)); }
 
   .list { overflow-x: auto; border: 1px solid var(--line2); border-radius: calc(12 * var(--u)); }
@@ -650,10 +653,11 @@ function lanesHtml(rows) {
   const lanes = projects.map((p) => [p, rows.filter((r) => r.ticket.project === p.name)]);
   const count = (s) => lanes.reduce((n, [, mine]) => n + mine.filter((r) => r.ticket.stage === s).length, 0);
   return `<div class="lanes" style="--n:${columns().length}"><div class="lhd corner"></div>${columns().map((s) => `<div class="lhd"><h2>${STAGE_NAME[s]}<span class="n">${count(s)}</span></h2></div>`).join("")}
-    ${lanes.map(([p, mine]) => {
+    ${lanes.map(([p, mine], i) => {
+      const alt = i % 2 ? " alt" : "";
       const running = mine.filter((r) => r.ticket.stage === "running" && r.status && r.status !== "gone").length;
-      return `<div class="lane"><div><div class="lt"><strong>${esc(p.name)}</strong><span class="mono muted" style="font-size:calc(11.5 * var(--u))">${p.mode === "worktree" ? `${running} of ${p.slots} running` : "queue"}</span><button type="button" class="add" data-new-project="${esc(p.name)}" aria-label="New ticket in ${esc(p.name)}">+</button></div></div></div>
-        ${columns().map((s) => `<div><div class="cell" data-drop="${s}" data-project="${esc(p.name)}">${inColumn(mine, s).map((r) => cardHtml(r, true)).join("")}</div></div>`).join("")}`; }).join("")}
+      return `<div class="lane${alt}"><div><div class="lt"><strong>${esc(p.name)}</strong><span class="mono muted" style="font-size:calc(11.5 * var(--u))">${p.mode === "worktree" ? `${running} of ${p.slots} running` : "queue"}</span><button type="button" class="add" data-new-project="${esc(p.name)}" aria-label="New ticket in ${esc(p.name)}">+</button></div></div></div>
+        ${columns().map((s) => `<div class="${alt.trim()}"><div class="cell" data-drop="${s}" data-project="${esc(p.name)}">${inColumn(mine, s).map((r) => cardHtml(r, true)).join("")}</div></div>`).join("")}`; }).join("")}
   </div>`;
 }
 function listHtml(rows) {
