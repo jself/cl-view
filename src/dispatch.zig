@@ -356,7 +356,7 @@ fn startPlanning(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocato
     const text = if (resume_id != null) try resumePrompt(a, t, notes) else try planPrompt(a, t, notes, where);
     var sid: [36]u8 = undefined;
     const name = try std.fmt.allocPrint(a, "{s}-plan", .{try std.ascii.allocLowerString(a, t.key)});
-    const tmux_name = try newSession(ctx, cfg, a, t, dir, name, text, &sid, true, resume_id);
+    const tmux_name = try newSession(ctx, cfg, a, t, dir, name, text, &sid, resume_id);
     // Its worktree and bookmark (from an earlier round) stay as they are.
     try board.setSession(ctx, db, t.id, tmux_name, &sid, t.worktree, t.branch);
     try board.markNotesSent(db, t.id);
