@@ -68,7 +68,9 @@
   .ask.hidden { opacity: .6; }
   #needs .sum { font-weight: 400; font-size: calc(13 * var(--u)); color: #b9ad94; }
   #needs .strip { display: flex; gap: calc(12 * var(--u)); overflow-x: auto; padding: 0 calc(14 * var(--u)) calc(14 * var(--u)); scroll-snap-type: x mandatory; }
-  #needs.closed .strip { display: none; }
+  #needs.closed .strip, #needs.closed .bulk { display: none; }
+  #needs .bulk { display: flex; flex-wrap: wrap; gap: calc(8 * var(--u)); padding: 0 calc(14 * var(--u)) calc(10 * var(--u)); }
+  #needs .bulk:empty { display: none; }
   .ask { flex: none; width: calc(300 * var(--u)); max-width: 85vw; scroll-snap-align: start; background: #1a1b1e; border: 1px solid var(--line);
          border-radius: calc(12 * var(--u)); padding: calc(12 * var(--u)); display: flex; flex-direction: column; gap: calc(8 * var(--u)); }
   .ask .what { font-size: calc(12.5 * var(--u)); color: var(--dim); line-height: 1.45; overflow-wrap: anywhere;
@@ -284,6 +286,7 @@
   <div class="nhd"><button type="button" id="needsToggle" aria-expanded="true"><span>Needs you</span><span class="count" id="needsCount">0</span>
     <span class="sum" id="needsSum"></span><span style="flex:1"></span><span class="sum" id="needsHint">Collapse</span></button>
     <button type="button" id="needsHiddenBtn" aria-pressed="false" hidden></button></div>
+  <div class="bulk" id="needsBulk"></div>
   <div class="strip" id="needsStrip"></div>
 </section>
 
@@ -320,6 +323,7 @@
     <div class="actions"><button type="submit" class="btn primary">Park it</button></div></form></div></dialog>
 <dialog id="projDlg" aria-label="Project" style="width:min(calc(620 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="projBody"></div></dialog>
 <dialog id="projRmDlg" aria-label="Delete the project" style="width:min(calc(520 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="projRmBody"></div></dialog>
+<dialog id="dismissDlg" aria-label="Dismiss alerts" style="width:min(calc(480 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="dismissBody"></div></dialog>
 <dialog id="killDlg" aria-label="Kill the session" style="width:min(calc(480 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="killBody"></div></dialog>
 <div id="toast" role="status"></div>
 
@@ -390,6 +394,8 @@ function askText(t, f) {
   if (f.kind === "input") return d ? `${d.tool || "Permission"}: ${d.summary || "wants permission"}` : (f.detail || "Waiting on a prompt");
   if (f.kind === "review") return (d === null && f.detail === "plan") || f.detail === "plan" ? "The plan is ready for approval" : (t.summary || "Claude says it's done");
   if (f.kind === "testing") return "Ready to try";
+  if (f.kind === "start-failed") return `Its session didn't start (${f.detail || "no reason given"}). `
+    + (retries(t) ? "The dispatcher keeps trying by itself and clears this once it starts; nothing to do unless it keeps failing" : "Start it again from the ticket");
   if (f.kind === "conflict") return "Merging it back conflicts in: " + f.detail.split("\n").map((l) => l.trim().split(/\s+/)[0]).join(", ");
   return f.detail || FLAG_NAME[f.kind] || f.kind;
 }
@@ -402,8 +408,18 @@ function askLine(t, f, quick) {
   if (f.kind === "review") return f.detail === "plan" ? "Plan ready for approval" : "Ready for review";
   if (f.kind === "conflict") { const n = f.detail.split("\n").filter((l) => l.trim()).length; return `Merge conflicts in ${n} file${n === 1 ? "" : "s"}`; }
   if (f.kind === "after-merge") return "After-merge command failed: " + f.detail.split("\n")[0];
+  if (f.kind === "start-failed") return `${f.detail || "Didn't start"} · ` + (retries(t) ? "the dispatcher will retry" : "start it again");
   return askText(t, f);
 }
+// Dismiss clears a flag for good ("seen it, it's dealt with"); it comes back only if the same
+// thing happens again. Not offered on flags that wait on you (board.zig waitingFlag): Claude
+// blocked on a question or prompt, or the ticket's next step (review, test, conflict). Acting
+// on those clears them; Hide is for "not now".
+const WAITING = ["question", "input", "review", "testing", "conflict"];
+const dismissable = (f) => !WAITING.includes(f.kind);
+const DISMISS_TIP = "Remove this alert for good. The ticket itself doesn't change; the alert comes back only if the same thing happens again";
+// A failed start of a queued (or planning) ticket is retried by the dispatcher.
+const retries = (t) => (t.stage === "queued" || t.stage === "planning") && !t.tmux && !t.killed && !t.park;
 const flagLabel = (f) => f.kind === "review" && f.detail === "plan" ? "Plan ready" : (FLAG_NAME[f.kind] || f.kind);
 const flagClass = (k) => k === "after-merge" || k === "park-expired" ? "f-conflict" : k === "unparked" ? "f-review" : ["input", "question", "review", "testing", "conflict"].includes(k) ? "f-" + k : "";
 // Finishing: Claude is merging the branch or opening a PR before it goes to Done.
@@ -543,10 +559,16 @@ function renderNeeds() {
     // Hiding keeps the flags (the card still shows them); a new flag brings it back.
     const hide = isHidden ? `<button type="button" class="btn" data-unhide="${esc(t.key)}" title="Put it back in Needs you">Unhide</button>`
       : `<button type="button" class="btn" data-hide="${esc(t.key)}" title="Take it out of Needs you until it raises a new flag; its card keeps the flag">Hide</button>`;
+    const dismiss = dismissable(f) ? `<button type="button" class="btn" data-dismiss="${esc(t.key)}" data-kind="${esc(f.kind)}" title="${DISMISS_TIP}">Dismiss</button>` : "";
     return `<div class="ask${isHidden ? " hidden" : ""}"><div class="pills"><span class="pill ${flagClass(f.kind)}">${esc(flagLabel(f))}</span>${isHidden ? `<span class="pill">Hidden</span>` : ""}<span class="mono muted" style="font-size:calc(11.5 * var(--u))">${esc(t.key)} · ${ago(f.at)}</span></div>
       <div style="font-weight:500">${esc(t.title)}</div><div class="what" title="${esc(askText(t, f))}">${esc(askLine(t, f, quick))}</div>
-      ${quick ? `<div class="acts">${quick}</div>` : ""}<div class="acts">${main}${shell}${hide}</div></div>`;
+      ${quick ? `<div class="acts">${quick}</div>` : ""}<div class="acts">${main}${shell}${hide}${dismiss}</div></div>`;
   }).join(""));
+  // Dismiss all: one button per kind that can be dismissed, when two or more cards shown have it.
+  const byKind = {};
+  for (const r of shown) for (const f of r.ticket.flags) if (dismissable(f) && asksStill(r.ticket, f)) (byKind[f.kind] ||= []).push(r.ticket.key);
+  setHtml(document.getElementById("needsBulk"), Object.entries(byKind).filter(([, keys]) => keys.length > 1).map(([k, keys]) =>
+    `<button type="button" class="btn" data-dismiss-all="${esc(k)}" data-keys="${esc(keys.join(" "))}" title="Remove the ${esc((FLAG_NAME[k] || k).toLowerCase())} alert from ${keys.length} tickets (you confirm first). The tickets don't change">Dismiss all ${keys.length} ${esc(FLAG_NAME[k] || k)}</button>`).join(""));
 }
 
 function renderFilters() {
@@ -888,7 +910,7 @@ function afterMergeTab(d) {
   return `<div class="q"><span class="muted" style="font-size:calc(12 * var(--u))">${esc(d.ticket.project)}'s after-merge command failed: ${esc(head)}</span>
       ${rest.length ? `<pre class="term">${esc(rest.join("\n"))}</pre>` : ""}
       <div class="actions"><button type="button" class="btn primary" data-after-merge="${esc(d.ticket.project)}">Run it again</button>
-      <button type="button" class="btn" data-unflag="after-merge" title="Take the flag off; the log stays">Dismiss</button></div></div>`;
+      <button type="button" class="btn" data-unflag="after-merge" title="Remove this alert for good; the log stays and the ticket doesn't change">Dismiss</button></div></div>`;
 }
 function needsTab(d) {
   const t = d.ticket; const f = t.flags.find((x) => x.kind === "question") || t.flags.find((x) => x.kind === "input"); const det = flagDetail(f) || {};
@@ -1245,6 +1267,20 @@ function confirmKill(d) {
   dlg.returnValue = ""; dlg.showModal();
   return new Promise((res) => { dlg.onclose = () => res(dlg.returnValue === "yes"); });
 }
+function confirmDismissAll(kind, keys) {
+  const dlg = document.getElementById("dismissDlg"); const name = FLAG_NAME[kind] || kind;
+  document.getElementById("dismissBody").innerHTML = `<h2 style="margin:0;font-size:calc(17 * var(--u))">Dismiss ${keys.length} “${esc(name)}” alerts?</h2>
+    <p style="margin:0">This clears the ${esc(name.toLowerCase())} flag on <span class="mono">${keys.map(esc).join(", ")}</span>, as <span class="mono">cl ticket unflag</span> does. Their other flags stay, and the tickets don't change.
+      A flag comes back if the same thing happens again.</p>
+    <div class="actions"><button type="button" class="btn primary" data-dismiss-yes="yes">Dismiss ${keys.length}</button><button type="button" class="btn" data-dismiss-yes="">Cancel</button></div>`;
+  dlg.returnValue = ""; dlg.showModal();
+  return new Promise((res) => { dlg.onclose = () => res(dlg.returnValue === "yes"); });
+}
+async function dismissAll(kind, keys) {
+  if (!await confirmDismissAll(kind, keys)) return;
+  try { const r = await api("flags/dismiss", { kind, keys }); toast(`Dismissed ${r.dismissed} ${(FLAG_NAME[kind] || kind).toLowerCase()} alert${r.dismissed === 1 ? "" : "s"}`); await refresh(); }
+  catch (e) { toast(e.message, true); }
+}
 // Everything going to Done asks: sub-tickets first, then how to finish.
 // The extra request fields, or null when cancelled.
 async function doneExtras(key) {
@@ -1324,6 +1360,9 @@ document.addEventListener("click", async (e) => {
   if (el.id === "needsHiddenBtn") { state.needsHidden = !state.needsHidden; store("cl-needs-hidden", state.needsHidden ? "1" : "0"); renderNeeds(); return; }
   if (ds.hide) return act(ds.hide, "hide", {}, `${ds.hide} hidden from Needs you; a new flag brings it back`);
   if (ds.unhide) return act(ds.unhide, "unhide", {}, `${ds.unhide} is back in Needs you`);
+  if (ds.dismiss) return act(ds.dismiss, "dismiss", { kind: ds.kind }, `${ds.dismiss}: ${(FLAG_NAME[ds.kind] || ds.kind).toLowerCase()} alert dismissed`).catch(() => {});
+  if (ds.dismissAll) return dismissAll(ds.dismissAll, ds.keys.split(" "));
+  if (ds.dismissYes !== undefined) { document.getElementById("dismissDlg").close(ds.dismissYes); return; }
   if (ds.answer) { e.stopPropagation(); return sendAnswer(ds.answer, [ds.n], el); }
   if (ds.approve) {
     const extra = state.data.tickets.find((r) => r.ticket.key === ds.approve)?.ticket.stage === "testing" ? await doneExtras(ds.approve) : {};
@@ -1351,7 +1390,7 @@ document.addEventListener("click", async (e) => {
     try { await api(`project/${encodeURIComponent(ds.afterMerge)}/after-merge`, { key }); toast("Running it again; the result comes back here"); } catch (e) { toast(e.message, true); }
     return;
   }
-  if (ds.unflag) return act(key, "unflag", { kind: ds.unflag }, "Dismissed");
+  if (ds.unflag) return act(key, "dismiss", { kind: ds.unflag }, "Dismissed");
   if (ds.check !== undefined) { const c = state.checks["c" + ds.check] || {}; c.pass = ds.pass === "1"; state.checks["c" + ds.check] = c; saveProgress(); renderDetail(); return; }
   if (ds.stepGo !== undefined) { state.checks.step = Math.max(0, +ds.stepGo); saveProgress(); renderDetail(); document.getElementById("ticketDlg").scrollTop = 0; return; }
   if (ds.launch) return act(key, "launch", { step: +ds.launch }, "Started");

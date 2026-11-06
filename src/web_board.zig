@@ -6,10 +6,11 @@
 //!   GET  /api/board                     projects, tickets, sessions, profiles
 //!   GET  /api/ticket/<key>              one ticket in full (+ session tail, review, test plan)
 //!   POST /api/ticket                    new ticket
-//!   POST /api/ticket/<key>/<action>     edit move rank comment flag unflag done approve start
-//!                                       answer key kill hide unhide rm cleanup gutter
+//!   POST /api/ticket/<key>/<action>     edit move rank comment flag unflag dismiss done approve
+//!                                       start answer key kill hide unhide rm cleanup gutter
 //!                                       gutter-stop launch launch-stop test-progress
 //!                                       test-results relocate park unpark
+//!   POST /api/flags/dismiss             dismiss one kind of flag on several tickets
 //!   POST /api/project                   add a project
 //!   POST /api/project/<name>/<action>   set rm hide unhide after-merge
 const std = @import("std");
@@ -99,6 +100,7 @@ pub fn handle(ctx: Ctx, cfg: config.Config, req: *std.http.Server.Request, path:
             error.NoSuchDir => .{ .bad_request, "no such directory" },
             error.NoSession => .{ .conflict, "the ticket has no live session" },
             error.CustomClose => .{ .conflict, "Claude asked to close it its own way; tell Claude, or just close it" },
+            error.WaitingFlag => .{ .bad_request, "that flag is waiting on you (a question, a prompt, a review, a test or a conflict); answer it or act on the ticket instead" },
             error.NothingAsked => .{ .conflict, "nothing is waiting for an answer" },
             error.BadAnswer => .{ .bad_request, "one answer per question: an option number or your own words (several numbers for a multi-select one)" },
             error.GutterFailed => .{ .internal_server_error, "gutter didn't start" },
@@ -142,6 +144,8 @@ const Body = struct {
     text: ?[]const u8 = null,
     send: ?bool = null,
     kind: ?[]const u8 = null,
+    /// flags/dismiss: the tickets whose `kind` flag goes.
+    keys: ?[]const []const u8 = null,
     detail: ?[]const u8 = null,
     summary: ?[]const u8 = null,
     now: ?bool = null,
@@ -238,6 +242,20 @@ fn route(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: 
         }
         try ticketAction(ctx, cfg, db, a, req, name, action, b);
         return;
+    }
+    // Dismiss all of one kind in Needs You: the keys the board showed, so a
+    // flag raised since isn't cleared unseen.
+    if (std.mem.eql(u8, what, "flags") and std.mem.eql(u8, name, "dismiss")) {
+        const kind = b.kind orelse return error.BadInput;
+        if (board.waitingFlag(kind)) return error.WaitingFlag;
+        var n: usize = 0;
+        for (b.keys orelse return error.BadInput) |k| {
+            if (board.dismissFlag(ctx, db, a, k, kind) catch |e| switch (e) {
+                error.NotFound => false, // deleted meanwhile
+                else => return e,
+            }) n += 1;
+        }
+        return ok(req, a, .{ .dismissed = n });
     }
     // The Quick Ticket button: hand the human's words to the operator.
     if (std.mem.eql(u8, what, "operator") and std.mem.eql(u8, name, "quick-ticket")) {
@@ -346,6 +364,10 @@ fn ticketAction(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator
         try board.setFlag(ctx, db, a, key, b.kind orelse return error.BadInput, "manual", b.detail orelse "");
     } else if (eql(u8, action, "unflag")) {
         try board.clearFlag(ctx, db, a, key, b.kind orelse return error.BadInput);
+    } else if (eql(u8, action, "dismiss")) {
+        const kind = b.kind orelse return error.BadInput;
+        if (board.waitingFlag(kind)) return error.WaitingFlag;
+        return ok(req, a, .{ .dismissed = try board.dismissFlag(ctx, db, a, key, kind) });
     } else if (eql(u8, action, "done")) {
         try review.done(ctx, db, a, key, b.summary orelse "", null, null);
     } else if (eql(u8, action, "approve")) {

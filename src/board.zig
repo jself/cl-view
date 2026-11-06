@@ -1033,6 +1033,34 @@ pub fn clearFlagId(ctx: Ctx, db: Db, id: i64, kind: []const u8) Error!void {
     }
 }
 
+/// Flags that wait on the human to do something with the ticket: Claude is
+/// blocked on a question or a permission prompt, or the ticket's next step is
+/// theirs (review it, test it, sort out a conflict). Answering or acting
+/// clears them, so the board doesn't offer to dismiss them; Hide is for "not
+/// now". `cl ticket unflag` still clears any flag.
+pub fn waitingFlag(kind: []const u8) bool {
+    for ([_][]const u8{ flag_question, flag_input, flag_review, flag_testing, flag_conflict }) |k| {
+        if (std.mem.eql(u8, kind, k)) return true;
+    }
+    return false;
+}
+
+/// Dismiss a flag from the board: "seen it, it's dealt with". It clears the
+/// flag as `cl ticket unflag` does (logged as unflagged, dismissed) and
+/// changes nothing else about the ticket; the flag comes back only if the
+/// same thing happens again. BadInput for a waiting flag; false when the
+/// ticket doesn't have the flag (already cleared).
+pub fn dismissFlag(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, kind: []const u8) Error!bool {
+    if (waitingFlag(kind)) return error.BadInput;
+    const t = try getTicket(db, a, key);
+    try db.exec("UPDATE flags SET cleared = ?3 WHERE ticket = ?1 AND kind = ?2 AND cleared IS NULL", .{ t.id, kind, now(ctx) });
+    if (db.changes() == 0) return false;
+    try touch(ctx, db, t.id);
+    var buf: [64]u8 = undefined;
+    try logEvent(ctx, db, t.id, "unflagged", std.fmt.bufPrint(&buf, "{s} (dismissed)", .{kind}) catch kind);
+    return true;
+}
+
 /// Hide the ticket from Needs You (and `cl ticket needs`), or bring it back.
 /// Its flags stay set, so its card still shows them; a new flag brings it
 /// back by itself. False when it has no flag to hide.
@@ -1611,4 +1639,37 @@ test "hiding a ticket from Needs You keeps its flags until it raises a new one" 
     _ = try hideNeeds(ctx, db, a, k, true);
     _ = try hideNeeds(ctx, db, a, k, false);
     for ((try getTicket(db, a, k)).flags) |f| try testing.expect(!f.hidden);
+}
+
+test "dismissing a flag clears it for good, but never a waiting one" {
+    const ctx = testCtx();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try Db.open(":memory:");
+    defer db.close();
+    try migrate(db);
+    try addProject(db, .{ .name = "qa", .dir = "/x/qa" });
+    const k = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Didn't start", .stage = .queued });
+    try setFlag(ctx, db, a, k, "start-failed", "auto", "SessionFailed");
+    try setFlag(ctx, db, a, k, flag_question, "auto", "{}");
+    _ = try hideNeeds(ctx, db, a, k, true);
+
+    // A question is Claude waiting: the board can't dismiss it.
+    try testing.expectError(error.BadInput, dismissFlag(ctx, db, a, k, flag_question));
+    try testing.expect(try dismissFlag(ctx, db, a, k, "start-failed"));
+    try testing.expect(!try dismissFlag(ctx, db, a, k, "start-failed")); // already gone
+    const t = try getTicket(db, a, k);
+    try testing.expectEqual(@as(usize, 1), t.flags.len);
+    try testing.expectEqualStrings(flag_question, t.flags[0].kind);
+    try testing.expectEqual(Stage.queued, t.stage); // nothing else changes
+    var st = try db.query("SELECT detail FROM events WHERE ticket = ?1 AND kind = 'unflagged'", .{t.id});
+    defer st.finalize();
+    try testing.expect(try st.step());
+    try testing.expectEqualStrings("start-failed (dismissed)", st.text(0));
+
+    // The same thing happening again brings it back, not hidden.
+    try setFlag(ctx, db, a, k, "start-failed", "auto", "SessionFailed");
+    const f = (try getTicket(db, a, k)).flags;
+    for (f) |x| if (std.mem.eql(u8, x.kind, "start-failed")) try testing.expect(!x.hidden);
 }

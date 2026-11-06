@@ -440,6 +440,16 @@ cl t key QA-1 esc | interrupt      press a key in the session
 
 Answers are keypresses in the session, the same as typing them yourself.
 
+On the board's Needs You, Hide takes a card out until the ticket raises a
+new flag; its flags stay ("not now"). Dismiss clears the card's flag, as
+`cl t unflag` does ("seen it, it's dealt with"): the ticket doesn't change,
+and the flag comes back only if the same thing happens again. When two or
+more cards share a kind, "Dismiss all" clears that kind on them after you
+confirm. Dismiss is only offered on informational flags (didn't start,
+session ended, after-merge failed, woke from park, park expired, flags set by
+hand); a question, a permission prompt, a review, a test or a conflict waits
+on you, and clears when you act on it.
+
 ### Review and testing
 
 ```
