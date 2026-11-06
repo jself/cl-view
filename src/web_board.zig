@@ -121,6 +121,8 @@ pub fn handle(ctx: Ctx, cfg: config.Config, req: *std.http.Server.Request, path:
             error.NoLaunch => .{ .not_found, "the test plan has no launch command" },
             error.Conflicts => .{ .conflict, "merging it back conflicts (the files are on the ticket); it stays in Testing" },
             error.MergeFailed => .{ .internal_server_error, worktree.lastError() },
+            error.SharedSession => .{ .conflict, "another ticket is in progress in its session, so stopping it would cut that one off; move or finish that ticket first, or kill the session for both" },
+            error.Starting => .{ .conflict, "it is starting right now; try again in a moment" },
             error.Sqlite => .{ .internal_server_error, db.message() },
             else => .{ .internal_server_error, @errorName(err) },
         };
@@ -354,7 +356,7 @@ fn ticketAction(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator
         const stage = board.Stage.parse(b.stage orelse "") orelse return error.BadInput;
         // Ranked first, so the dispatcher never sees it queued in the wrong place.
         if (nonEmpty(b.after) != null or nonEmpty(b.before) != null) try board.rankTicket(db, a, key, nonEmpty(b.after), nonEmpty(b.before));
-        try actions.move(ctx, db, a, key, stage, b.spin_off orelse false, try finishOf(b));
+        try actions.move(ctx, cfg, db, a, key, stage, b.spin_off orelse false, try finishOf(b));
     } else if (eql(u8, action, "rank")) {
         try board.rankTicket(db, a, key, nonEmpty(b.after), nonEmpty(b.before));
     } else if (eql(u8, action, "comment")) {

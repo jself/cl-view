@@ -34,6 +34,10 @@ pub const Error = error{
     /// Merge or PR on a ticket Claude asked to close its own way
     /// (`Ticket.custom_close`).
     CustomClose,
+    /// Moving it back would kill a session another ticket is in progress in.
+    SharedSession,
+    /// It is being started right now.
+    Starting,
 };
 
 pub fn liveSession(ctx: Ctx, t: board.Ticket) ?[]const u8 {
@@ -106,13 +110,48 @@ pub const Finish = union(enum) {
 /// Move a ticket. Reaching Done closes its session; with `finish` merge or
 /// pr, a ticket with a branch of its own first stays put while Claude merges
 /// or opens the PR, and goes to Done when it runs `cl ticket done --close`.
-pub fn move(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, stage: board.Stage, spin_off: bool, finish: Finish) !void {
+/// Moved back to Queued or Backlog while in progress, it stops: see `stopFor`.
+pub fn move(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, key: []const u8, stage: board.Stage, spin_off: bool, finish: Finish) !void {
     if (stage == .done) {
         try readyForDone(ctx, db, a, key, spin_off);
         if (try startFinish(ctx, db, a, key, finish)) return;
     }
+    if (stage == .queued or stage == .backlog) if (try stopFor(ctx, cfg, db, a, key, stage)) return;
     try board.move(ctx, db, a, key, stage);
     if (stage == .done) try closeSession(ctx, db, a, key);
+}
+
+/// A ticket in progress (running, review, testing) moved back to Queued or
+/// Backlog stops working: its session is killed as `kill` does, so Claude
+/// doesn't carry on unseen (and keep the project's slot) while the board
+/// says it waits. Its conversation
+/// and jj change are kept; queued, the dispatcher starts it again and it
+/// resumes. Refused while another ticket is in progress in that session (a
+/// queue project's shared one, or a parent's): it would be cut off too.
+/// True when it moved; false when there was no session of its own to end.
+fn stopFor(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, key: []const u8, stage: board.Stage) !bool {
+    const t = try board.getTicket(db, a, key);
+    const s = try sessionToStop(db, t, if (liveSession(ctx, t)) |_| true else false) orelse return false;
+    review.stopGutter(ctx, a, key) catch {};
+    review.stopLaunch(ctx, a, key, null) catch {};
+    _ = try endSession(ctx, cfg, db, a, t, s, stage);
+    return true;
+}
+
+/// The session `stopFor` kills: `t`'s own while it is in progress there
+/// (`live`: it is running). null when there is none to end.
+pub fn sessionToStop(db: board.Db, t: board.Ticket, live: bool) !?[]const u8 {
+    switch (t.stage) {
+        .running, .review, .testing => {},
+        // Planning runs in a session of its own, which the dispatcher ends
+        // once the ticket leaves Planning. Not in progress, a session it
+        // still names is no longer its own.
+        else => return null,
+    }
+    if (t.tmux.len > 0 and t.tmux[0] == '(') return error.Starting;
+    if (t.tmux.len == 0 or !live) return null;
+    if (try board.sessionHasTicket(db, t.tmux, t.id)) return error.SharedSession;
+    return t.tmux;
 }
 
 /// Type the merge or PR instruction into the ticket's session; false when
@@ -366,6 +405,12 @@ pub const KillResult = struct {
 pub fn kill(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, key: []const u8) !KillResult {
     const t = try board.getTicket(db, a, key);
     const s = liveSession(ctx, t) orelse return error.NoSession;
+    return endSession(ctx, cfg, db, a, t, s, null);
+}
+
+/// `kill` on `t`'s live session `s`; with `to`, the ticket also moves there
+/// (Queued: it waits for the dispatcher, no longer killed).
+fn endSession(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: board.Ticket, s: []const u8, to: ?board.Stage) !KillResult {
     // Its own conversation may have a new id since it started (/clear): keep
     // the one it has now, so a restart resumes that.
     if (t.session_id.len > 0) {
@@ -381,9 +426,16 @@ pub fn kill(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, ke
     while (try st.step()) try others.append(a, try st.dupe(a, 0));
     // The board first: run from inside the session (Claude parking its own
     // ticket), this process goes with it.
-    try board.sessionKilled(ctx, db, a, s);
+    try letGo(ctx, db, a, t, s, to);
     try tmux.kill(ctx, s);
     return .{ .session = s, .others = others.items, .resumes = t.session_id.len == 36 };
+}
+
+/// The board's side of ending `s`: its tickets let go of it, and with `to`
+/// `t` moves there (Queued: no longer killed, so the dispatcher starts it).
+pub fn letGo(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, s: []const u8, to: ?board.Stage) !void {
+    try board.sessionKilled(ctx, db, a, s);
+    if (to) |stage| try board.moveTicket(ctx, db, t, stage);
 }
 
 /// A session killed outside the board (`cl kill`, the chooser): its tickets

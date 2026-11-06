@@ -1089,6 +1089,15 @@ pub fn sessionKilled(ctx: Ctx, db: Db, a: std.mem.Allocator, tmux_name: []const 
     }
 }
 
+/// The stages of a ticket in progress: it holds its session (planning
+/// runs in one of its own; see `dispatch.in_progress`).
+pub const in_progress = "('running', 'review', 'testing')";
+
+/// A ticket other than `id` is in progress in `tmux_name`.
+pub fn sessionHasTicket(db: Db, tmux_name: []const u8, id: i64) Error!bool {
+    return (try db.int("SELECT 1 FROM tickets WHERE tmux = ?1 AND id != ?2 AND stage IN " ++ in_progress, .{ tmux_name, id })) != null;
+}
+
 /// Keep the ticket's conversation id current (/clear starts a new one).
 pub fn setSessionId(db: Db, id: i64, session_id: []const u8) Error!void {
     try db.exec("UPDATE tickets SET session_id = ?2 WHERE id = ?1", .{ id, session_id });

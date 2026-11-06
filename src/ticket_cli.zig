@@ -46,7 +46,10 @@ pub const ticket_usage =
     \\                              opens a PR, then it goes to done (a jj change cl merges
     \\                              itself; Claude settles conflicts); --close, the default, and
     \\                              tickets without a branch of their own go straight there;
-    \\                              --tell: Claude first does what <text> says, branch or not)
+    \\                              --tell: Claude first does what <text> says, branch or not;
+    \\                              queued or backlog stops one in progress: its session ends as
+    \\                              kill does, and queued it restarts and resumes when its turn
+    \\                              comes. Refused while another ticket is in progress there)
     \\  rank <key> --before <key> | --after <key> | --top | --bottom
     \\                              reorder: next to another ticket, as dragging its card on
     \\                              the board does, or first or last in its stage across all
@@ -220,6 +223,8 @@ fn boardFail(db: board.Db, err: anyerror, what: []const u8) noreturn {
         error.OpenSubtickets => fail("it has sub-tickets that aren't done yet; finish them, or make them tickets of their own with `cl ticket move <key> done --spin-off`", .{}),
         error.Conflicts => fail("merging it back conflicts (see `cl ticket show`); resolve them in its change, then try again", .{}),
         error.MergeFailed => fail("jj couldn't merge it: {s}", .{worktree.lastError()}),
+        error.SharedSession => fail("another ticket is in progress in its session (a shared queue session, or its parent's), so it can't be stopped without cutting that one off; move or finish that ticket first, or end the session for both with `cl ticket kill`", .{}),
+        error.Starting => fail("it is starting right now; try again in a moment", .{}),
         error.Sqlite => fail("board database: {s}", .{db.message()}),
         else => fail("{s}: {s}", .{ what, @errorName(err) }),
     }
@@ -482,7 +487,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         args.only(&.{ "--spin-off", "--merge", "--pr", "--tell", "--close" }, ticket_usage);
         if (pos.len != 2) fail("usage: cl ticket move <key> <stage> [--spin-off] [--merge | --pr | --tell <text> | --close]", .{});
         const finish = finishArg(args);
-        actions.move(ctx, db, a, pos[0], parseStage(pos[1]), args.has("--spin-off"), finish) catch |e| boardFail(db, e, "ticket");
+        actions.move(ctx, cfg, db, a, pos[0], parseStage(pos[1]), args.has("--spin-off"), finish) catch |e| boardFail(db, e, "ticket");
         return finishNote(db, a, pos[0]);
     }
     if (std.mem.eql(u8, cmd, "rank")) {

@@ -18,6 +18,7 @@ const signals = @import("signals.zig");
 const history = @import("history.zig");
 const review = @import("review.zig");
 const park = @import("park.zig");
+const actions = @import("actions.zig");
 
 pub const Error = error{
     AlreadyStarted,
@@ -276,7 +277,7 @@ const View = struct {
 /// Stages where a ticket still holds its session (or worktree slot): it is
 /// not finished until it reaches done. Planning holds neither: it runs in a
 /// session and workspace of its own (see `startPlanning`).
-const in_progress = "('running', 'review', 'testing')";
+const in_progress = board.in_progress;
 
 /// Where a queue ticket runs: its target, else its parent's session, else
 /// the project's own session (see `homeSession`).
@@ -398,10 +399,7 @@ fn projectBusy(db: board.Db, a: std.mem.Allocator, view: View, t: board.Ticket) 
     return false;
 }
 
-/// Another ticket is in progress in `tmux_name`.
-fn targetHasTicket(db: board.Db, tmux_name: []const u8, id: i64) !bool {
-    return (try db.int("SELECT 1 FROM tickets WHERE tmux = ?1 AND id != ?2 AND stage IN " ++ in_progress, .{ tmux_name, id })) != null;
-}
+const targetHasTicket = board.sessionHasTicket;
 
 /// Start `t` now, or again if its session is gone. `force` types a queue
 /// ticket into its target even when the target is busy (Claude queues
@@ -1123,5 +1121,69 @@ test "a parked ticket isn't started, even moved to Queued" {
     try std.testing.expectEqualStrings(kq, w[0].key);
     // Unparked (without resuming), it waits its turn like the others.
     _ = try board.takePark(ctx, db, a, (try board.getTicket(db, a, kp)).id, null);
+    try std.testing.expectEqual(@as(usize, 2), (try waitingToStart(db, a)).len);
+}
+
+test "a running ticket moved back to Queued is stopped, then started again where it left off" {
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp" };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "qa", .dir = "/x/qa-tool" });
+    const sid = "0b9e2c1a-6a51-4c1e-9d0e-2f6a8d3c4b5e";
+    const kr = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Jumped ahead", .stage = .running });
+    const kq = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Next", .stage = .queued });
+    const ko = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Other", .stage = .done });
+    try db.exec("UPDATE tickets SET tmux = 'cl_qa-tool_1', session_id = ?2 WHERE key = ?1", .{ kr, sid });
+    try board.setChange(db, (try board.getTicket(db, a, kr)).id, "morxntynnxtk", "qa-1-jumped-ahead");
+    try board.setFlagId(ctx, db, (try board.getTicket(db, a, kr)).id, board.flag_question, "auto", "which one?");
+    // Its session holds a done ticket too: that one isn't cut off by a kill.
+    try db.exec("UPDATE tickets SET tmux = 'cl_qa-tool_1' WHERE key = ?1", .{ko});
+
+    // While it runs there, that session is the one to end; with none live,
+    // there is nothing to end and it just moves.
+    const t = try board.getTicket(db, a, kr);
+    try std.testing.expectEqualStrings("cl_qa-tool_1", (try actions.sessionToStop(db, t, true)).?);
+    try std.testing.expect(try actions.sessionToStop(db, t, false) == null);
+    // Another ticket in progress in the same (shared) session: refused.
+    try db.exec("UPDATE tickets SET stage = 'running' WHERE key = ?1", .{ko});
+    try std.testing.expectError(error.SharedSession, actions.sessionToStop(db, t, true));
+    try db.exec("UPDATE tickets SET stage = 'done' WHERE key = ?1", .{ko});
+    // Not in progress, a session it still names isn't its own any more.
+    try std.testing.expect(try actions.sessionToStop(db, try board.getTicket(db, a, kq), true) == null);
+    var starting = t;
+    starting.tmux = "(starting)";
+    try std.testing.expectError(error.Starting, actions.sessionToStop(db, starting, true));
+
+    // Stopped and queued: no session, not killed, its question gone with
+    // the session, and its conversation and change kept for the restart.
+    try actions.letGo(ctx, db, a, t, "cl_qa-tool_1", .queued);
+    const q = try board.getTicket(db, a, kr);
+    try std.testing.expectEqual(board.Stage.queued, q.stage);
+    try std.testing.expectEqualStrings("", q.tmux);
+    try std.testing.expect(!q.killed);
+    try std.testing.expectEqual(@as(usize, 0), q.flags.len);
+    try std.testing.expectEqualStrings(sid, q.session_id);
+    try std.testing.expectEqualStrings("morxntynnxtk", q.change);
+    // Nothing holds the project's slot now: the dispatcher starts it again,
+    // first in board order, and with its conversation id it resumes.
+    const none: View = .{ .sessions = &.{}, .statuses = .empty };
+    try std.testing.expect(!try projectBusy(db, a, none, q));
+    const w = try waitingToStart(db, a);
+    try std.testing.expectEqual(@as(usize, 2), w.len);
+    try std.testing.expectEqualStrings(kr, w[0].key);
+    try std.testing.expectEqualStrings(kq, w[1].key);
+
+    // Shelved in Backlog it stops the same way, and waits for you: queued
+    // again, the dispatcher takes it.
+    try db.exec("UPDATE tickets SET stage = 'running', tmux = 'cl_qa-tool_1' WHERE key = ?1", .{kr});
+    try actions.letGo(ctx, db, a, try board.getTicket(db, a, kr), "cl_qa-tool_1", .backlog);
+    const b = try board.getTicket(db, a, kr);
+    try std.testing.expectEqual(board.Stage.backlog, b.stage);
+    try std.testing.expectEqualStrings("", b.tmux);
+    try board.move(ctx, db, a, kr, .queued);
     try std.testing.expectEqual(@as(usize, 2), (try waitingToStart(db, a)).len);
 }

@@ -326,6 +326,13 @@ cl t done QA-1 --summary "Fixed the race"
   to running and its round goes up. Without `--send` a comment is a note.
 - Entering testing sets `testing`; leaving review or testing clears its flag;
   done clears every flag.
+- Moving a ticket in progress back to queued or backlog stops it: its session
+  ends as `cl t kill` does, so Claude doesn't carry on unseen (holding the
+  project's slot) while the board says it waits. Its conversation and change
+  are kept; queued, the dispatcher starts it again when its turn comes and it
+  resumes; in backlog it waits until you queue or start it. It is refused while
+  another ticket is in progress in that session (a queue project's shared
+  session, or its parent's), which would be cut off too.
 - Inside a ticket's session (`CL_TICKET` set) the key can be left out:
   `cl t done --summary ...`, `cl t comment "..."` (as claude).
 - `--plan` starts a ticket in planning: Claude runs in plan mode, interviews
