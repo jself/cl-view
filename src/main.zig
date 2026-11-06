@@ -12,6 +12,7 @@ const window = @import("window.zig");
 const board = @import("board.zig");
 const ticket_cli = @import("ticket_cli.zig");
 const actions = @import("actions.zig");
+const alerts = @import("alerts.zig");
 
 pub const panic = @import("vaxis").panic_handler;
 pub const std_options: std.Options = .{ .log_level = .warn };
@@ -29,7 +30,8 @@ const usage =
     \\  cl watch                  print a line whenever a session's status changes
     \\  cl closed                 closed sessions, most recently closed first (R in the chooser)
     \\  cl operator               attach to the operator session (o in the chooser)
-    \\  cl alert <text> | --clear  flag the chooser header from the operator
+    \\  cl alert <text> | --clear  alert the human from this session (the operator's outside one):
+    \\                            the chooser and the web board's Needs You show it
     \\  cl web                    serve the chooser to a browser (see web.* in the config)
     \\  cl web password | start | stop
     \\                            set the web password, or run the server in the background
@@ -322,13 +324,19 @@ fn cmdClosed(ctx: Ctx, cfg: config.Config) !void {
     try out(aw.writer.buffered());
 }
 
+/// Raise (or clear) the alert of the session this runs in: the operator's when
+/// run outside any cl session. In a ticket's session it is about $CL_TICKET.
 fn cmdAlert(ctx: Ctx, argv: []const []const u8) !void {
     if (argv.len != 1) fail("usage: cl alert <text> | --clear", .{});
     var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);
     defer arena_state.deinit();
-    const op = (try tmux.operator(ctx, arena_state.allocator())) orelse fail("the operator is not running", .{});
-    const text = if (std.mem.eql(u8, argv[0], "--clear")) "" else argv[0];
-    try tmux.setAlert(ctx, op.tmux_name, text);
+    const a = arena_state.allocator();
+    const caller = try tmux.callerSession(ctx, a);
+    const target = caller orelse (try tmux.operator(ctx, a)) orelse fail("the operator is not running", .{});
+    const text = try alerts.oneLine(a, argv[0]);
+    if (std.mem.eql(u8, argv[0], "--clear") or text.len == 0) return tmux.clearAlert(ctx, target.tmux_name);
+    const ticket = if (caller != null) ctx.env.get("CL_TICKET") orelse "" else "";
+    try tmux.setAlert(ctx, target.tmux_name, text, ticket);
 }
 
 /// With web.autostart, make sure `cl web` is running in the background.
@@ -348,8 +356,7 @@ fn cmdOperator(ctx: Ctx, cfg: config.Config) !void {
         error.NoSuchProfile => fail("operator profile not found: {s}", .{cfg.operator}),
         else => return err,
     };
-    tmux.setAlert(ctx, tmux_name, "") catch {};
-    try tmux.attach(ctx, tmux_name);
+    try tmux.attach(ctx, tmux_name); // which clears its alert
     try ui.run(ctx, cfg, null);
 }
 
@@ -371,4 +378,5 @@ test {
     std.testing.refAllDecls(@import("ticket_watch.zig"));
     std.testing.refAllDecls(@import("board_view.zig"));
     std.testing.refAllDecls(@import("images.zig"));
+    std.testing.refAllDecls(alerts);
 }

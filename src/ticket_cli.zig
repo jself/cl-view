@@ -15,6 +15,7 @@ const review = @import("review.zig");
 const after_merge = @import("after_merge.zig");
 const park = @import("park.zig");
 const ticket_watch = @import("ticket_watch.zig");
+const alerts = @import("alerts.zig");
 
 pub const ticket_usage =
     \\usage: cl ticket <command>    (cl t for short)
@@ -32,7 +33,10 @@ pub const ticket_usage =
     \\  needs [--hidden] [--hidden-projects]
     \\                              tickets with a flag, oldest first (the inbox); a ticket
     \\                              whose session is working on it is left out until it stops,
-    \\                              and a hidden one until it raises a new flag (--hidden: those)
+    \\                              and a hidden one until it raises a new flag (--hidden: those).
+    \\                              First the sessions' alerts (cl alert), one line each:
+    \\                              alert, from (operator or a session), ticket or -, raised
+    \\                              (unix s), text. --json: {"tickets": [...], "alerts": [...]}
     \\                              list and needs leave out hidden projects' tickets (cl project
     \\                              hide) unless --hidden-projects, --project or --parent names them
     \\  watch [<key>...] [--project <p,...>] [--change set,cleared,moved,new,needs,left]
@@ -460,8 +464,18 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
             // Hidden projects stay out unless asked for, by name or flag.
             .shown = !args.has("--hidden-projects") and args.get("--project") == null and args.get("--parent") == null,
         }) catch |e| boardFail(db, e, "ticket");
-        if (args.has("--json")) return out(try std.fmt.allocPrint(a, "{f}\n", .{std.json.fmt(ts, .{})}));
+        // `needs` is all of Needs You: the sessions' alerts (cl alert) too.
+        const with_alerts = std.mem.eql(u8, cmd, "needs") and for ([_][]const u8{ "--hidden", "--stage", "--project", "--flag", "--search", "--parent", "--parked" }) |o| {
+            if (args.has(o)) break false;
+        } else true;
+        const als: []const alerts.Alert = if (with_alerts) alerts.list(ctx, db, a, args.has("--hidden-projects")) catch &.{} else &.{};
+        if (args.has("--json")) {
+            if (with_alerts) return out(try std.fmt.allocPrint(a, "{f}\n", .{std.json.fmt(.{ .tickets = ts, .alerts = als }, .{})}));
+            return out(try std.fmt.allocPrint(a, "{f}\n", .{std.json.fmt(ts, .{})}));
+        }
         var aw: std.Io.Writer.Allocating = .init(a);
+        // alert, from, ticket, raised (unix s), text
+        for (als) |al| try aw.writer.print("alert\t{s}\t{s}\t{d}\t{s}\n", .{ al.from, if (al.ticket.len > 0) al.ticket else "-", al.at, al.text });
         // key, stage, project, flags, parent, title
         for (ts) |t| try aw.writer.print("{s}\t{s}\t{s}\t{s}\t{s}\t{s}{s}{s}\n", .{ t.key, @tagName(t.stage), t.project, try flagList(a, t.flags), if (t.parent.len > 0) t.parent else "-", t.title, if (t.park != null) "\tparked: " else "", if (t.park) |p| p.reason else "" });
         return out(aw.writer.buffered());

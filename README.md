@@ -97,7 +97,7 @@ cl output <name> [lines]  status, latest reply, and pane tail (default 40 lines)
 cl watch                  print a line whenever a session's status changes
 cl closed                 closed sessions, most recently closed first
 cl operator               attach to the operator session (o in the chooser)
-cl alert <text> | --clear flag the chooser header from the operator
+cl alert <text> | --clear alert you from this session (Needs you and the chooser)
 cl web                    serve the chooser to a browser (foreground)
 cl web password           set the web password (stored as an argon2id hash)
 cl web start | stop       run the web server in the background / stop it
@@ -163,9 +163,30 @@ about status changes, and `cl ticket watch` to hear when a ticket needs feedback
 running like any other session. It is hidden from the list and from `cl list`,
 `send` and `kill`; the header shows its status while it runs.
 
-When something needs you, the operator runs `cl alert "<text>"` and the chooser
-shows a ⚑ flag with that text in the top-right corner. Opening the operator
-clears it (or `cl alert --clear`).
+When something needs you, the operator runs `cl alert "<text>"`: the chooser
+shows a ⚑ flag with that text in the top-right corner, and the web board's
+Needs you an Alert card with the text, who raised it and when (see Alerts).
+Opening the operator clears it (or `cl alert --clear`).
+
+#### Alerts
+
+Any cl session can raise one, not only the operator: `cl alert "<text>"` run
+inside a session belongs to that session (and to its ticket, `$CL_TICKET`, if
+it has one); run anywhere else it is the operator's. Each session holds one at
+most, so a new one from the same session replaces the last, while alerts from
+different sessions show separately. They live on the session in tmux, like
+everything else about it, so they survive a `cl web` restart and go when the
+session does.
+
+Where they show: the chooser (the operator's at the top right, any other
+session's on its row), the web board's Needs you (an Alert card with Open,
+which opens the session's terminal or the operator's chat, and Dismiss), and
+`cl ticket needs` (an `alert` line each; `--json` puts them under `alerts`).
+Opening the session anywhere (the chooser, `cl attach`, the web terminal, or
+Open) or dismissing it clears it everywhere, as does `cl alert --clear` from
+that session. A hidden session's alerts never show, nor do those about a hidden
+project's ticket. The board's tab title counts what needs you, so it shows from
+another tab.
 
 It continues its last conversation when it starts again, so the chat carries
 on across restarts (`/clear` in it starts a new one). For the board it has a
@@ -641,7 +662,8 @@ Reload banner while you are typing.
 ### The web board
 
 `/board` shows Board, Lanes (a row per project) and List views, with "Needs
-you" across the top: every ask, with quick answers. Filters pick what needs
+you" across the top: every ask, with quick answers, and the sessions' alerts
+(`cl alert`, see Alerts). Filters pick what needs
 you, a project, and whether sub-tickets show. A ticket opens in a popup:
 answer its questions, comment or send it back, watch its session or open it
 in the terminal (`/?attach=<session>`), open gutter, launch and test, see
@@ -680,7 +702,7 @@ the board every second and keeps the cursor on its ticket as cards move. The
 operator's alert shows at the top right, as in the session list, and `o`
 opens the operator from the board too.
 
-Over the columns, Needs you lists what `cl ticket needs` does, oldest ask
+Over the columns, Needs you lists the tickets `cl ticket needs` does, oldest ask
 first, each with what it actually asks: the question and its numbered
 options, the command a permission prompt is about, the plan or review
 summary waiting for approval, the files that conflict, a failed after-merge

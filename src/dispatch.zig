@@ -994,10 +994,10 @@ test "the session is told to open the description's images" {
         .tmux = "", .session_id = "", .summary = "", .round = 1, .created = 0, .updated = 0, .parent = "", .children = 0,
     };
     const want = "![image](/b/images/QA-3/0a1b.png)\n\nThe description has an image (pasted on the board). Open it with your Read tool to see it:\n- /b/images/QA-3/0a1b.png\n";
-    try std.testing.expect(std.mem.indexOf(u8, try prompt(a, t, &.{}, false), want) != null);
+    try std.testing.expect(std.mem.indexOf(u8, try prompt(a, t, &.{}, null), want) != null);
     try std.testing.expect(std.mem.indexOf(u8, try planPrompt(a, t, &.{}, .checkout), want) != null);
     t.body = "no pictures";
-    try std.testing.expect(std.mem.indexOf(u8, try prompt(a, t, &.{}, false), "Read tool") == null);
+    try std.testing.expect(std.mem.indexOf(u8, try prompt(a, t, &.{}, null), "Read tool") == null);
 }
 
 test "the session that builds a planned ticket is told the plan" {

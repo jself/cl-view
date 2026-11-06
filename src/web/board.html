@@ -70,6 +70,9 @@
   #needsHiddenBtn { flex: none; min-height: calc(46 * var(--u)); padding: 0 calc(14 * var(--u)); border: 0; background: transparent; cursor: pointer;
                     font-size: calc(13 * var(--u)); color: #b9ad94; text-decoration: underline dotted; text-underline-offset: 3px; }
   .ask.hidden { opacity: .6; }
+  /* A session's alert (cl alert): its text is the message, so it gets more lines. */
+  .ask.alert { border-color: #5a4a22; } .ask.alert .msg { font-weight: 500; overflow-wrap: anywhere; line-height: 1.4;
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; line-clamp: 4; overflow: hidden; }
   #needs .sum { font-weight: 400; font-size: calc(13 * var(--u)); color: #b9ad94; }
   #needs .strip { display: flex; gap: calc(12 * var(--u)); overflow-x: auto; padding: 0 calc(14 * var(--u)) calc(14 * var(--u)); scroll-snap-type: x mandatory; }
   #needs.closed .strip, #needs.closed .bulk { display: none; }
@@ -157,6 +160,7 @@
   .f-input { background: var(--input-bg); color: var(--input); } .f-question { background: var(--question-bg); color: var(--question); }
   .f-review { background: var(--review-bg); color: var(--review); } .f-testing { background: var(--testing-bg); color: var(--testing); }
   .f-conflict { background: var(--conflict-bg); color: var(--conflict); }
+  .f-alert { background: #e3b341; color: #17150f; font-weight: 600; }
   .f-finishing { background: var(--finishing-bg); color: var(--finishing); }
   /* Parked: waiting on something outside cl. The reason is cut to the card's width. */
   .f-parked { background: var(--parked-bg); color: var(--parked); max-width: 100%; }
@@ -595,12 +599,36 @@ function render() {
   setHtml(main, state.view === "lanes" ? lanesHtml(rows) : state.view === "list" ? listHtml(rows) : boardHtml(rows));
 }
 
+// Sessions' alerts (cl alert): the server leaves out hidden sessions'; a
+// hidden project's ticket's stay out like its tickets.
+const shownAlerts = () => (state.data.alerts || []).filter((a) => !a.project || projectShown(a.project));
+// Open goes to the session's terminal (the operator's chat for its own).
+const alertHref = (a) => a.operator ? "/?attach=operator"
+  : `/?attach=${encodeURIComponent(a.tmux)}${a.ticket ? `&ticket=${encodeURIComponent(a.ticket)}` : ""}`;
+function alertHtml(a) {
+  const title = a.ticket ? state.data.tickets.find((r) => r.ticket.key === a.ticket)?.ticket.title : "";
+  const who = a.operator ? "The operator" : a.from;
+  return `<div class="ask alert"${a.ticket ? ` data-ask="${esc(a.ticket)}"` : ""}><div class="pills"><span class="pill f-alert">⚑ Alert</span><span class="mono muted" style="font-size:calc(11.5 * var(--u))">${esc(who)}${a.ticket ? ` · ${esc(a.ticket)}` : ""} · ${ago(a.at)}</span></div>
+    <div class="msg" title="${esc(a.text)}">${esc(a.text)}</div>${title ? `<div class="what">${esc(title)}</div>` : ""}
+    <div class="acts"><a class="btn primary" href="${alertHref(a)}" data-alert-open="${esc(a.tmux)}" title="Open ${a.operator ? "the chat with the operator" : "its session"}; this clears the alert">Open</a>
+    <button type="button" class="btn" data-alert-dismiss="${esc(a.tmux)}" title="Remove this alert; ${a.operator ? "the operator" : "the session"} can raise a new one">Dismiss</button></div></div>`;
+}
+async function dismissAlert(tmux, msg) {
+  try { await api(`alert/${encodeURIComponent(tmux)}/dismiss`, {}); if (msg) toast("Alert dismissed"); }
+  catch (e) { if (msg) toast(e.message, true); }
+  await refresh();
+}
+
 function renderNeeds() {
+  const alerts = shownAlerts();
   const rows = shownRows().filter(needsMe);
   const hidden = shownRows().filter(hiddenNeeds);
   rows.sort((a, b) => Math.min(...a.ticket.flags.map((f) => f.at)) - Math.min(...b.ticket.flags.map((f) => f.at)));
   const box = document.getElementById("needs");
-  box.style.display = rows.length || hidden.length ? "" : "none";
+  box.style.display = alerts.length || rows.length || hidden.length ? "" : "none";
+  // The tab's title counts what needs you, so it shows from another tab.
+  const n = alerts.length + rows.length;
+  document.title = n ? `(${n}) cl board` : "cl board";
   const hb = document.getElementById("needsHiddenBtn");
   hb.hidden = !hidden.length; hb.textContent = state.needsHidden ? `Hide ${hidden.length} hidden` : `${hidden.length} hidden`;
   hb.setAttribute("aria-pressed", state.needsHidden);
@@ -609,10 +637,11 @@ function renderNeeds() {
   box.classList.toggle("closed", !state.needsOpen);
   document.getElementById("needsToggle").setAttribute("aria-expanded", state.needsOpen);
   document.getElementById("needsHint").textContent = state.needsOpen ? "Collapse" : "Expand";
-  document.getElementById("needsCount").textContent = rows.length;
+  document.getElementById("needsCount").textContent = n;
   const counts = {}; for (const r of rows) for (const f of r.ticket.flags) counts[f.kind] = (counts[f.kind] || 0) + 1;
-  document.getElementById("needsSum").textContent = Object.entries(counts).map(([k, n]) => `${n} ${(FLAG_NAME[k] || k).toLowerCase()}`).join(" · ");
-  setHtml(document.getElementById("needsStrip"), shown.map((r) => {
+  document.getElementById("needsSum").textContent = [alerts.length ? `${alerts.length} alert${alerts.length === 1 ? "" : "s"}` : "",
+    ...Object.entries(counts).map(([k, n]) => `${n} ${(FLAG_NAME[k] || k).toLowerCase()}`)].filter(Boolean).join(" · ");
+  setHtml(document.getElementById("needsStrip"), alerts.map(alertHtml).join("") + shown.map((r) => {
     const t = r.ticket; const isHidden = hiddenNeeds(r); const f = isHidden ? t.flags[0] : t.flags.find((x) => !x.hidden && asksStill(t, x)); const d = flagDetail(f);
     let quick = "";
     if (f.kind === "question" && d?.questions?.length === 1 && !d.questions[0].multiSelect)
@@ -1529,6 +1558,13 @@ document.addEventListener("click", async (e) => {
   if (ds.hide) return act(ds.hide, "hide", {}, `${ds.hide} hidden from Needs you; a new flag brings it back`);
   if (ds.unhide) return act(ds.unhide, "unhide", {}, `${ds.unhide} is back in Needs you`);
   if (ds.dismiss) return act(ds.dismiss, "dismiss", { kind: ds.kind }, `${ds.dismiss}: ${(FLAG_NAME[ds.kind] || ds.kind).toLowerCase()} alert dismissed`).catch(() => {});
+  if (ds.alertDismiss) return dismissAlert(ds.alertDismiss, true);
+  if (ds.alertOpen) {
+    // Opening it clears it (attaching does too, but a terminal the page already has open doesn't attach again).
+    e.preventDefault();
+    if (e.ctrlKey || e.metaKey) { window.open(el.href); return dismissAlert(ds.alertOpen); }
+    await dismissAlert(ds.alertOpen); location.href = el.href; return;
+  }
   if (ds.dismissAll) return dismissAll(ds.dismissAll, ds.keys.split(" "));
   if (ds.dismissYes !== undefined) { document.getElementById("dismissDlg").close(ds.dismissYes); return; }
   if (ds.answer) { e.stopPropagation(); return sendAnswer(ds.answer, [ds.n], el); }
@@ -1726,7 +1762,9 @@ async function restorePlace() {
 }
 
 restorePlace();
-setInterval(() => { if (!document.hidden) refresh(); }, 3000);
+// In a background tab, every 30 s: enough to keep the title's count current.
+let ticks = 0;
+setInterval(() => { if (!document.hidden || ++ticks % 10 === 0) refresh(); }, 3000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
 </script>
 </body>

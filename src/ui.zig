@@ -386,8 +386,7 @@ const App = struct {
             if (self.inBoard()) self.bv.setMsg(true, msg, args) else self.setMessage(msg, args);
             return;
         };
-        // Opening the operator is how you acknowledge its alert.
-        tmux.setAlert(self.ctx, tmux_name, "") catch {};
+        // Attaching clears its alert (opening it is how you acknowledge it).
         try self.attach(try self.form().dupe(u8, tmux_name));
     }
 
@@ -671,7 +670,11 @@ const App = struct {
             const age = try ageText(self.arena(), self.ctx.nowSeconds() - ageSince(s, info));
             // "  ● name  profile  summary  age": fit the summary into what is left.
             const fixed = 2 + 1 + 1 + cols(s.name) + 2 + cols(s.profile) + (if (s.hidden) @as(usize, 10) else 2) + 2 + age.len;
-            const summary = if (info) |i| try truncate(self.arena(), i.summary, width -| fixed) else "";
+            // Its alert (cl alert), when it raised one, says more than the summary.
+            const alert = s.alert.len > 0;
+            const summary = if (alert)
+                try std.fmt.allocPrint(self.arena(), " ⚑ {s} ", .{try truncate(self.arena(), s.alert, width -| fixed -| 4)})
+            else if (info) |i| try truncate(self.arena(), i.summary, width -| fixed) else "";
             try lines.append(self.arena(), .{ .vi = vi, .segs = try self.arena().dupe(vaxis.Segment, &.{
                 .{ .text = "  " },
                 .{ .text = "●", .style = .{ .fg = color } },
@@ -680,7 +683,7 @@ const App = struct {
                 .{ .text = "  " },
                 .{ .text = s.profile, .style = .{ .dim = true } },
                 .{ .text = if (s.hidden) "  hidden  " else "  ", .style = .{ .dim = true, .italic = true } },
-                .{ .text = summary },
+                .{ .text = summary, .style = if (alert) .{ .fg = .{ .index = 0 }, .bg = .{ .index = 3 }, .bold = true } else .{} },
                 .{ .text = try std.fmt.allocPrint(self.arena(), "  {s}", .{age}), .style = .{ .dim = true } },
             }) });
             if (!self.expanded) continue;

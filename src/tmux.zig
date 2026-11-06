@@ -19,8 +19,13 @@ pub const Session = struct {
     activity: i64,
     /// "operator" or "web" for cl's own hidden sessions, "" for Claude sessions.
     role: []const u8,
-    /// The operator's pending alert for the human (@cl_alert), "" if none.
+    /// The session's pending alert for the human (@cl_alert, from `cl alert`),
+    /// "" if none.
     alert: []const u8,
+    /// When it was raised (@cl_alert_at, unix seconds; 0 if unknown).
+    alert_at: i64 = 0,
+    /// The ticket the session was working on when it raised it (@cl_alert_ticket).
+    alert_ticket: []const u8 = "",
     /// Hidden from the chooser (h) while it keeps running (@cl_hidden).
     hidden: bool = false,
 };
@@ -295,7 +300,7 @@ pub fn ensureDetachBinding(ctx: Ctx) !void {
 /// after "❯ "). Menus hide the cursor, so their Left still works.
 const agents_guard = "#{&&:#{m:cl_*,#{session_name}},#{&&:#{==:#{pane_current_command},claude},#{&&:#{cursor_flag},#{e|<=:#{cursor_x},2}}}}";
 
-const list_format = "#{session_name}\t#{@cl_name}\t#{@cl_dir}\t#{@cl_profile}\t#{@cl_created}\t#{pane_dead}\t#{session_activity}\t#{@cl_role}\t#{@cl_alert}\t#{@cl_hidden}\t#{pane_title}";
+const list_format = "#{session_name}\t#{@cl_name}\t#{@cl_dir}\t#{@cl_profile}\t#{@cl_created}\t#{pane_dead}\t#{session_activity}\t#{@cl_role}\t#{@cl_alert}\t#{@cl_alert_at}\t#{@cl_alert_ticket}\t#{@cl_hidden}\t#{pane_title}";
 
 /// List Claude sessions, oldest first, leaving out cl's own (operator, web).
 /// Caller owns the slice and its strings (use an arena).
@@ -319,7 +324,8 @@ pub fn findRole(ctx: Ctx, arena: std.mem.Allocator, role: []const u8) !?Session 
     return null;
 }
 
-fn listAll(ctx: Ctx, arena: std.mem.Allocator) ![]Session {
+/// Every cl session, cl's own (operator, web) included, oldest first.
+pub fn listAll(ctx: Ctx, arena: std.mem.Allocator) ![]Session {
     const out = run(ctx, &.{ "list-sessions", "-F", list_format }) catch |err| switch (err) {
         error.TmuxFailed => return &.{}, // no server running
         else => return err,
@@ -339,6 +345,8 @@ fn listAll(ctx: Ctx, arena: std.mem.Allocator) ![]Session {
         const act_s = f.next() orelse continue;
         const role = f.next() orelse continue;
         const alert = f.next() orelse continue;
+        const alert_at_s = f.next() orelse continue;
+        const alert_ticket = f.next() orelse continue;
         const hidden_s = f.next() orelse continue;
         const title = f.rest();
         try sessions.append(arena, .{
@@ -351,6 +359,8 @@ fn listAll(ctx: Ctx, arena: std.mem.Allocator) ![]Session {
             .activity = std.fmt.parseInt(i64, act_s, 10) catch 0,
             .role = try arena.dupe(u8, role),
             .alert = try arena.dupe(u8, alert),
+            .alert_at = std.fmt.parseInt(i64, alert_at_s, 10) catch 0,
+            .alert_ticket = try arena.dupe(u8, alert_ticket),
             .hidden = std.mem.eql(u8, hidden_s, "1"),
             .pane_title = try arena.dupe(u8, title),
         });
@@ -376,9 +386,45 @@ pub fn kill(ctx: Ctx, tmux_name: []const u8) !void {
     try runQuiet(ctx, &.{ "kill-session", "-t", tmux_name });
 }
 
-/// Set (or with "" clear) the alert shown in the chooser's header.
-pub fn setAlert(ctx: Ctx, tmux_name: []const u8, text: []const u8) !void {
-    try runQuiet(ctx, &.{ "set-option", "-t", tmux_name, "@cl_alert", text });
+/// Raise the session's alert for the human, replacing the one it had: the
+/// chooser and the web board's Needs You show it until someone opens the
+/// session or dismisses it. `ticket` is the ticket it is about ("" for none).
+pub fn setAlert(ctx: Ctx, tmux_name: []const u8, text: []const u8, ticket: []const u8) !void {
+    var at_buf: [24]u8 = undefined;
+    const at = try std.fmt.bufPrint(&at_buf, "{d}", .{ctx.nowSeconds()});
+    try runQuiet(ctx, &.{
+        "set-option", "-t", tmux_name, "@cl_alert", text, ";",
+        "set-option", "-t", tmux_name, "@cl_alert_at", at, ";",
+        "set-option", "-t", tmux_name, "@cl_alert_ticket", ticket,
+    });
+}
+
+/// Clear the session's alert (nothing happens if it has none).
+pub fn clearAlert(ctx: Ctx, tmux_name: []const u8) !void {
+    try runQuiet(ctx, &.{
+        "set-option", "-qu", "-t", tmux_name, "@cl_alert", ";",
+        "set-option", "-qu", "-t", tmux_name, "@cl_alert_at", ";",
+        "set-option", "-qu", "-t", tmux_name, "@cl_alert_ticket",
+    });
+}
+
+/// The cl session this process runs in (cl sessions set CL_SESSION; the
+/// pane, TMUX_PANE, says which one), or null outside one. The pane must be on
+/// cl's tmux server (TMUX names the server the pane is on): a pane id from
+/// another server could name an unrelated pane on this one.
+pub fn callerSession(ctx: Ctx, arena: std.mem.Allocator) !?Session {
+    _ = ctx.env.get("CL_SESSION") orelse return null;
+    const pane = ctx.env.get("TMUX_PANE") orelse return null;
+    const tmux_env = ctx.env.get("TMUX") orelse return null;
+    const out = run(ctx, &.{ "display-message", "-p", "-t", pane, "#{socket_path}\t#{session_name}" }) catch return null;
+    defer ctx.gpa.free(out);
+    const tab = std.mem.indexOfScalar(u8, out, '\t') orelse return null;
+    const sock = out[0..tab];
+    const tmux_name = std.mem.trimEnd(u8, out[tab + 1 ..], "\n");
+    const env_sock = tmux_env[0 .. std.mem.indexOfScalar(u8, tmux_env, ',') orelse tmux_env.len];
+    if (!std.mem.eql(u8, sock, env_sock)) return null;
+    for (try listAll(ctx, arena)) |s| if (std.mem.eql(u8, s.tmux_name, tmux_name)) return s;
+    return null;
 }
 
 /// Hide a session from the chooser (it keeps running), or show it again.
@@ -451,6 +497,8 @@ pub fn pasteText(ctx: Ctx, tmux_name: []const u8, text: []const u8) !void {
 /// Attach the current terminal to a session; returns when the client detaches.
 pub fn attach(ctx: Ctx, tmux_name: []const u8) !void {
     try ensureDetachBinding(ctx);
+    // Opening a session is how you acknowledge its alert, wherever it shows.
+    clearAlert(ctx, tmux_name) catch {};
     // Drop TMUX so attaching from inside another tmux works (nested client).
     var env = try ctx.env.clone(ctx.gpa);
     defer env.deinit();

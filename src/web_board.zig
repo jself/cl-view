@@ -13,6 +13,7 @@
 //!                                       gutter-stop launch launch-stop test-progress
 //!                                       test-results relocate park unpark
 //!   POST /api/flags/dismiss             dismiss one kind of flag on several tickets
+//!   POST /api/alert/<tmux>/dismiss      clear a session's alert (cl alert)
 //!   POST /api/project                   add a project
 //!   POST /api/project/<name>/<action>   set rm hide unhide after-merge
 const std = @import("std");
@@ -30,6 +31,7 @@ const operator = @import("operator.zig");
 const after_merge = @import("after_merge.zig");
 const park = @import("park.zig");
 const images = @import("images.zig");
+const alerts = @import("alerts.zig");
 
 const board_html = @embedFile("web/board.html");
 
@@ -275,6 +277,11 @@ fn route(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: 
             }) n += 1;
         }
         return ok(req, a, .{ .dismissed = n });
+    }
+    // A session's alert: Dismiss, or Open just before it opens the session
+    // (attaching clears it too, but a terminal the page already had doesn't attach again).
+    if (std.mem.eql(u8, what, "alert") and std.mem.eql(u8, action, "dismiss")) {
+        return ok(req, a, .{ .dismissed = try alerts.dismiss(ctx, a, name) });
     }
     // The Quick Ticket button: hand the human's words to the operator.
     if (std.mem.eql(u8, what, "operator") and std.mem.eql(u8, name, "quick-ticket")) {
@@ -532,6 +539,8 @@ fn getBoard(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, re
         .projects = try board.listProjects(db, a),
         .tickets = rows.items,
         .sessions = ss.rows,
+        // Hidden projects' too: the page leaves them out as it does their tickets.
+        .alerts = try alerts.list(ctx, db, a, true),
         .profiles = profiles.items,
         .now = ctx.nowSeconds(),
         .build = try buildId(a),

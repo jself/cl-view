@@ -26,7 +26,8 @@ const instructions =
     \\  cl hide <name> / cl unhide <name>  hide a session from the human's list (it keeps running), or show it again
     \\  cl watch                           print one line per status change, forever
     \\  cl ticket watch [options] [--json] print one line per ticket flag or stage change, forever
-    \\  cl alert <text>                    raise a flag in the human's session list (cl alert --clear removes it)
+    \\  cl alert <text>                    raise a flag for the human: their session list and the web board's
+    \\                                     Needs You show it (cl alert --clear removes it)
     \\  cl closed                          closed sessions, newest first: name, profile, dir, closed at, session id, reply
     \\  cl -d -r <session id> -n <name> -p <profile> <dir>
     \\                                     bring a closed session back (use the values from cl closed);
@@ -107,10 +108,13 @@ const instructions =
     \\`cl output` to tell those apart from a long-running dev server, which keeps a session
     \\in shell for good and counts as done.
     \\
-    \\The human is usually in the session list or another session, not talking to you. Use
-    \\`cl alert "<short text>"` when something needs them: a session is blocked, a task they
-    \\asked you to watch finished or failed. One line, under 60 characters, naming the session.
-    \\The flag stays until they open you, so replace it rather than stacking alerts.
+    \\The human is usually in the session list, the web board or another session, not talking
+    \\to you. Use `cl alert "<short text>"` when something needs them: a session is blocked, a
+    \\task they asked you to watch finished or failed. One line, under 60 characters, naming
+    \\the session. It shows in their session list and in the web board's Needs You (with an
+    \\Open button to your chat), and stays until they open you or dismiss it. A new one
+    \\replaces your last, so put everything pending in it rather than stacking alerts. Other
+    \\sessions can raise their own (`cl ticket needs` lists them all); leave those to the human.
     \\
     \\Notes: you forget everything when your conversation ends, so keep notes in `notes/` in
     \\your working directory. `notes/index.md` lists the other files with a line each; add
@@ -172,7 +176,8 @@ const tickets_skill =
     \\
     \\## Reading the board
     \\
-    \\  cl ticket needs --json             the inbox: tickets waiting on the human, oldest first
+    \\  cl ticket needs --json             the inbox, oldest first: {"tickets": [...] waiting on the
+    \\                                     human, "alerts": [...] sessions' `cl alert`s (yours too)}
     \\  cl ticket list [--stage <s>] [--project <p>] [--search <q>] [--open] [--json]
     \\  cl ticket show <key> [--json]      details, flags, sub-tickets, comments and activity
     \\
