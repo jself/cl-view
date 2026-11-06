@@ -153,6 +153,13 @@ pub const project_usage =
     \\  hide <name> / unhide <name> keep its tickets out of the board's views, Needs You,
     \\                              `cl ticket needs` and `cl ticket list`, or bring them back;
     \\                              only what's shown: its queued tickets still run
+    \\  pause <name> | --all [--now]
+    \\                              the dispatcher starts nothing new there: queued tickets
+    \\                              stay queued in their order, planning waits, and a park
+    \\                              whose check passes waits in Queued; what runs finishes.
+    \\                              --now also stops its Running tickets and planning sessions
+    \\                              (back to Queued or Planning; they resume their conversation)
+    \\  resume <name> | --all       start dispatching there again, top of the queue first
     \\  list [--json]
     \\  after-merge <name>          run the after-merge command now, on trunk as it is
     \\
@@ -173,7 +180,7 @@ fn out(text: []const u8) !void {
 }
 
 fn fail(comptime fmt: []const u8, a: anytype) noreturn {
-    var buf: [1024]u8 = undefined;
+    var buf: [8192]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, "cl: " ++ fmt ++ "\n", a) catch "cl: error\n";
     std.Io.File.stderr().writeStreamingAll(std.Io.Threaded.global_single_threaded.io(), msg) catch {};
     std.process.exit(1);
@@ -319,9 +326,10 @@ pub fn projectMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void
         const ps = board.listProjects(db, a) catch |e| boardFail(db, e, "project");
         if (args.has("--json")) return out(try std.fmt.allocPrint(a, "{f}\n", .{std.json.fmt(ps, .{})}));
         var aw: std.Io.Writer.Allocating = .init(a);
-        for (ps) |p| try aw.writer.print("{s}\t{s}\t{s}\tslots {d}\tplanners {d}\t{s}{s}{s}{s}{s}{s}{s}{s}\n", .{
+        for (ps) |p| try aw.writer.print("{s}\t{s}\t{s}\tslots {d}\tplanners {d}\t{s}{s}{s}{s}{s}{s}{s}{s}{s}\n", .{
             p.name, p.prefix, try ctx.shortenHomeIn(a, p.dir), p.slots, p.planners, @tagName(p.mode),
             if (p.hidden) "\thidden" else "",
+            if (p.paused) "\tpaused" else "",
             if (p.profile.len > 0) "\t" else "", p.profile,
             if (p.after_merge.len > 0) "\tafter merge: " else "", p.after_merge,
             if (p.after_merge_claude.len > 0) "\tclaude after merge: " else "", p.after_merge_claude,
@@ -375,6 +383,42 @@ pub fn projectMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void
         if (p.after_merge.len == 0) fail("{s} has no after-merge command (cl project set {s} --after-merge <command>)", .{ name, name });
         after_merge.startByHand(ctx, db, a, name, "-") catch |e| boardFail(db, e, "project");
         return out(try std.fmt.allocPrint(a, "{s}: after-merge run started; log: {s}\n", .{ name, try ctx.shortenHomeIn(a, try after_merge.logPath(ctx, a, cfg, name)) }));
+    }
+    if (std.mem.eql(u8, cmd, "pause") or std.mem.eql(u8, cmd, "resume")) {
+        const pause = std.mem.eql(u8, cmd, "pause");
+        args.only(if (pause) &.{ "--all", "--now" } else &.{"--all"}, project_usage);
+        const all = args.has("--all");
+        if (all == (args.pos.items.len == 1) or args.pos.items.len > 1) fail("usage: cl project {s} <name> | --all{s}", .{ cmd, if (pause) " [--now]" else "" });
+        var names: []const []const u8 = undefined;
+        if (all) {
+            board.setAllPaused(db, pause) catch |e| boardFail(db, e, "project");
+            var list: std.ArrayList([]const u8) = .empty;
+            for (board.listProjects(db, a) catch |e| boardFail(db, e, "project")) |p| try list.append(a, p.name);
+            names = list.items;
+        } else {
+            board.setProjectPaused(db, args.pos.items[0], pause) catch |e| boardFail(db, e, "project");
+            names = args.pos.items;
+        }
+        var aw: std.Io.Writer.Allocating = .init(a);
+        const which = if (all) "every project" else names[0];
+        if (!pause) {
+            try aw.writer.print("{s} resumed: the dispatcher starts its queued tickets again\n", .{which});
+            return out(aw.writer.buffered());
+        }
+        try aw.writer.print("{s} paused: the dispatcher starts nothing new there; queued tickets keep their place\n", .{which});
+        if (args.has("--now")) {
+            for (names) |name| {
+                const r = dispatch.interrupt(ctx, cfg, db, a, name) catch |e| fail("{s}: couldn't stop what runs: {s}", .{ name, @errorName(e) });
+                for (r.queued) |k| try aw.writer.print("{s} stopped and back in Queued; it resumes its conversation when {s} resumes\n", .{ k, name });
+                for (r.planning) |k| try aw.writer.print("{s}'s planning session stopped; planning resumes when {s} resumes\n", .{ k, name });
+                for (r.left) |k| try aw.writer.print("{s} left running: its session is shared or still starting (move it to Queued once it can stop)\n", .{k});
+            }
+        } else {
+            var running: usize = 0;
+            for (names) |name| running += if (board.listTickets(db, a, .{ .project = name, .stage = .running })) |ts| ts.len else |_| 0;
+            if (running > 0) try aw.writer.print("{d} running ticket{s} go{s} on to the end of {s} work (--now stops {s})\n", .{ running, if (running == 1) "" else "s", if (running == 1) "es" else "", if (running == 1) "its" else "their", if (running == 1) "it" else "them" });
+        }
+        return out(aw.writer.buffered());
     }
     if (std.mem.eql(u8, cmd, "hide") or std.mem.eql(u8, cmd, "unhide")) {
         args.only(&.{}, project_usage);

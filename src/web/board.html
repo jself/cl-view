@@ -149,7 +149,7 @@
   /* Session status colors, the same hues as `cl list`: --sc for the label and dot, --sbg tints a card's title band, stronger on the left and faint on the right. */
   .s-busy { --sc: #facc15; --sbg: var(--sc); } .s-waiting { --sc: #e879f9; --sbg: var(--sc); } .s-blocked { --sc: #f87171; --sbg: var(--sc); }
   .s-idle { --sc: #4ade80; --sbg: var(--sc); } .s-shell { --sc: #22d3ee; --sbg: var(--sc); } .s-starting { --sc: #60a5fa; --sbg: var(--sc); }
-  .s-gone, .s-killed { --sc: #8b8e94; --sbg: var(--sc); } .s-parked { --sc: #c4b5fd; --sbg: var(--sc); } .s-unknown, .s-none { --sc: #a0a3a8; }
+  .s-gone, .s-killed { --sc: #8b8e94; --sbg: var(--sc); } .s-parked { --sc: #c4b5fd; --sbg: var(--sc); } .s-paused { --sc: #fb923c; } .s-unknown, .s-none { --sc: #a0a3a8; }
   .status { display: inline-flex; align-items: center; gap: calc(7 * var(--u)); font-size: calc(12.5 * var(--u)); color: var(--sc, #d6d7da); }
   .status.s-none { color: #d6d7da; }
   .dot { width: calc(8 * var(--u)); height: calc(8 * var(--u)); border-radius: calc(4 * var(--u)); flex: none; display: inline-block; background: var(--sc, #5d6168); }
@@ -296,6 +296,13 @@
   #reloadBar { display: flex; align-items: center; gap: calc(10 * var(--u)); margin: calc(10 * var(--u)) calc(20 * var(--u)) 0; padding: calc(8 * var(--u)) calc(12 * var(--u));
                border: 1px solid var(--line, #3a3d44); border-radius: calc(10 * var(--u)); flex-wrap: wrap; }
   #reloadBar[hidden] { display: none; }
+  /* A paused project: the dispatcher starts nothing new there (cl project pause). */
+  #pauseBar { display: flex; align-items: center; gap: calc(8 * var(--u)) calc(10 * var(--u)); margin: calc(10 * var(--u)) calc(20 * var(--u)) 0; padding: calc(8 * var(--u)) calc(12 * var(--u));
+              border: 1px solid #7c3f12; background: #2a1708; border-radius: calc(10 * var(--u)); flex-wrap: wrap; }
+  #pauseBar[hidden] { display: none; }
+  #pauseBar .what { flex: 1 1 calc(260 * var(--u)); min-width: 0; }
+  #pauseBar .what strong { color: #fb923c; }
+  .f-paused { background: #2a1708; color: #fb923c; }
   .empty { color: var(--muted); padding: calc(24 * var(--u)) calc(4 * var(--u)); }
   /* Tablets, folding phones and phones: search gets its own full-width row,
      the dropdowns share the rest, and nothing in the bar can widen the page. */
@@ -347,6 +354,7 @@
   </div>
 </header>
 
+<div id="pauseBar" role="status" hidden></div>
 <div id="reloadBar" role="status" hidden><span>cl was updated. It reloads by itself once you stop typing, or now:</span><button type="button" class="btn primary" id="reloadBtn">Reload</button></div>
 
 <section id="needs" aria-label="Needs you">
@@ -392,6 +400,7 @@
 <dialog id="projDlg" aria-label="Project" style="width:min(calc(620 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="projBody"></div></dialog>
 <dialog id="projRmDlg" aria-label="Delete the project" style="width:min(calc(520 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="projRmBody"></div></dialog>
 <dialog id="dismissDlg" aria-label="Dismiss alerts" style="width:min(calc(480 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="dismissBody"></div></dialog>
+<dialog id="pauseDlg" aria-label="Pause" style="width:min(calc(520 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="pauseBody"></div></dialog>
 <dialog id="killDlg" aria-label="Kill the session" style="width:min(calc(480 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="killBody"></div></dialog>
 <div id="toast" role="status"></div>
 <div id="voiceBar" hidden role="status"><div class="txt"><div class="heard" id="voiceHeard"></div><div id="voiceText"></div></div><button type="button" id="voiceReplay" title="Say it again" aria-label="Say it again" hidden>&#8635;</button><button type="button" id="voiceClose" title="Stop and close" aria-label="Stop and close">&times;</button></div>
@@ -404,7 +413,7 @@
 const STAGES = ["backlog", "planning", "queued", "running", "review", "testing", "done"];
 const STAGE_NAME = { backlog: "Backlog", planning: "Planning", queued: "Queued", running: "Running", review: "Review", testing: "Testing", done: "Done" };
 const FLAG_NAME = { input: "Needs input", question: "Question", review: "Ready for review", testing: "Needs testing", ended: "Session ended", "start-failed": "Didn't start", conflict: "Conflicts", "after-merge": "After-merge failed", unparked: "Woke from park", "park-expired": "Park expired", idle: "Idle" };
-const STATUS_NAME = { busy: "Working", waiting: "Waiting on you", blocked: "Waiting on you", idle: "Idle", shell: "Idle · background task", starting: "Starting", gone: "Session ended", killed: "Killed · restart it", parked: "Parked", unknown: "Unknown" };
+const STATUS_NAME = { paused: "Paused", busy: "Working", waiting: "Waiting on you", blocked: "Waiting on you", idle: "Idle", shell: "Idle · background task", starting: "Starting", gone: "Session ended", killed: "Killed · restart it", parked: "Parked", unknown: "Unknown" };
 
 const store = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch { return null; } };
 const state = {
@@ -464,6 +473,7 @@ const hiddenNeeds = (row) => !row.ticket.park && row.ticket.flags.length > 0 && 
 // project filter shows its tickets anyway.
 const hiddenProject = (name) => state.data.projects.some((p) => p.name === name && p.hidden);
 const projectShown = (name) => state.hiddenProjects || !hiddenProject(name);
+const projectPaused = (name) => state.data.projects.some((p) => p.name === name && p.paused);
 const shownRows = () => state.data.tickets.filter((r) => projectShown(r.ticket.project));
 const asks = (t) => t.flags.filter((f) => f.kind !== "testing" || t.stage === "testing");
 function askText(t, f) {
@@ -519,7 +529,9 @@ const pills = (t) => cardFlags(t).length || t.finishing || t.custom_close || t.p
 // "(starting)" is the dispatcher's claim while it opens the session.
 // A Backlog or Queued ticket whose session is gone hasn't ended: it's waiting to start.
 // A killed one waits for you to restart it.
-const statusOf = (row) => row.status || (row.ticket.tmux.startsWith("(") ? "starting" : row.ticket.park ? "parked" : row.ticket.killed ? "killed" : row.ticket.tmux && !["backlog", "queued"].includes(row.ticket.stage) ? "gone" : "none");
+// A queued one in a paused project waits for it to resume, not for a slot.
+const statusOf = (row) => row.status || (row.ticket.tmux.startsWith("(") ? "starting" : row.ticket.park ? "parked" : row.ticket.killed ? "killed" : row.ticket.tmux && !["backlog", "queued"].includes(row.ticket.stage) ? "gone"
+  : row.ticket.stage === "queued" && projectPaused(row.ticket.project) ? "paused" : "none");
 const statusHtml = (row) => { const s = statusOf(row); const label = s === "none" ? (row.ticket.stage === "queued" ? "Waiting for a slot" : "Not started") : (STATUS_NAME[s] || s);
   return `<span class="status s-${esc(s)}"><span class="dot"></span>${esc(label)}</span>`; };
 // A live session's shell icon. In a card (a button) it's a span the click handler follows.
@@ -598,7 +610,7 @@ function render() {
   const live = shown.filter((r) => r.status && r.status !== "gone").length;
   document.getElementById("summary").textContent = `${shown.length} tickets · ${live} sessions live`;
   for (const b of document.querySelectorAll("[data-view]")) { const on = b.dataset.view === state.view; b.classList.toggle("on", on); b.setAttribute("aria-selected", on); }
-  renderNeeds(); renderFilters();
+  renderNeeds(); renderFilters(); renderPaused();
   const main = document.getElementById("main");
   // The filters are about tickets; the Projects view lists every project.
   document.getElementById("filters").hidden = state.view === "projects";
@@ -610,6 +622,42 @@ function render() {
   const rows = visible();
   document.body.classList.toggle("fit", state.view === "board" || state.view === "lanes");
   setHtml(main, state.view === "lanes" ? lanesHtml(rows) : state.view === "list" ? listHtml(rows) : boardHtml(rows));
+}
+
+// Paused projects, in every view (hidden ones too: a pause holds their tickets all the same).
+function renderPaused() {
+  const ps = state.data.projects.filter((p) => p.paused); const bar = document.getElementById("pauseBar");
+  bar.hidden = !ps.length; if (!ps.length) return;
+  const all = ps.length === state.data.projects.length && ps.length > 1;
+  const queued = (name) => state.data.tickets.filter((r) => r.ticket.project === name && r.ticket.stage === "queued").length;
+  const nq = ps.reduce((n, p) => n + queued(p.name), 0);
+  const who = all ? "Every project is" : ps.length === 1 ? `<strong>${esc(ps[0].name)}</strong> is` : ps.map((p) => `<strong>${esc(p.name)}</strong>`).join(", ") + " are";
+  setHtml(bar, `<span class="what"><strong>⏸</strong> ${who} paused: cl starts nothing new there${nq ? ` (${nq} queued ticket${nq === 1 ? " waits" : "s wait"} in order)` : ""}; what runs goes on.</span>`
+    + (all || ps.length > 1 ? `<button type="button" class="btn primary" data-resume-all="1">Resume all</button>` : "")
+    + (all ? "" : ps.map((p) => `<button type="button" class="btn${ps.length === 1 ? " primary" : ""}" data-proj-resume="${esc(p.name)}">Resume${ps.length > 1 ? " " + esc(p.name) : ""}</button>`).join("")));
+}
+// Pause: let what runs finish, or stop it now (it goes back to Queued and resumes later).
+// name: a project, or "" for every project.
+function confirmPause(name) {
+  const what = name ? esc(name) : "every project";
+  const running = state.data.tickets.filter((r) => (!name || r.ticket.project === name) && (r.ticket.stage === "running" || r.ticket.stage === "planning") && liveRow(r)).length;
+  document.getElementById("pauseBody").innerHTML = `
+    <div class="head"><h1 style="flex:1">Pause ${what}?</h1></div>
+    <p style="margin:0">cl starts nothing new there: queued tickets stay in Queued in their order, planning waits, and a parked ticket whose check passes waits in Queued. Resume starts them again, top of the queue first. Starting a ticket yourself still works.</p>
+    <p class="muted" style="margin:0">${running ? `${running} ticket${running === 1 ? " is" : "s are"} running or planning now. <strong>Pause</strong> lets ${running === 1 ? "it" : "them"} finish what ${running === 1 ? "it's" : "they're"} doing.` : "Nothing is running or planning there now."} <strong>Pause now</strong> stops Running tickets and planning sessions too: they go back to Queued (or stay in Planning) and pick up their conversation on Resume. Review and Testing tickets are left alone.</p>
+    <div class="actions"><button type="button" class="btn primary" data-pause-yes="${esc(name)}">Pause</button><button type="button" class="btn danger" data-pause-yes="${esc(name)}" data-now="1">Pause now</button><button type="button" class="btn" id="closePause">Cancel</button></div>`;
+  document.getElementById("pauseDlg").showModal();
+}
+async function pause(name, now, resume) {
+  const path = name ? `project/${encodeURIComponent(name)}/${resume ? "resume" : "pause"}` : `projects/${resume ? "resume" : "pause"}`;
+  const what = name || "Every project";
+  try {
+    const r = await api(path, now ? { now: true } : {});
+    document.getElementById("pauseDlg").close();
+    const stopped = r.stopped?.length ? `; stopped ${r.stopped.join(", ")}` : ""; const left = r.left?.length ? `; left running (shared session): ${r.left.join(", ")}` : "";
+    toast(resume ? `${what} resumed` : `${what} paused${stopped}${left}`);
+    await refresh();
+  } catch (e) { toast(e.message, true); }
 }
 
 // Sessions' alerts (cl alert): the server leaves out hidden sessions'; a
@@ -758,19 +806,24 @@ function projectCounts(name) {
 }
 function projectsHtml() {
   const ps = state.data.projects;
+  const allPaused = ps.length && ps.every((p) => p.paused);
   const head = `<div class="projects-head"><button type="button" class="btn primary" id="addProjBtn">Add project</button>
-    <span class="muted" style="font-size:calc(12.5 * var(--u))">A hidden project's tickets stay out of the other views and Needs you; its queued tickets still run.</span></div>`;
+    ${ps.length ? (allPaused ? `<button type="button" class="btn" data-resume-all="1" title="Start dispatching in every project again">Resume all</button>`
+      : `<button type="button" class="btn" data-pause-all="1" title="Start nothing new in any project">Pause all</button>`) : ""}
+    <span class="muted" style="font-size:calc(12.5 * var(--u))">A hidden project's tickets stay out of the other views and Needs you; its queued tickets still run. A paused project's queued tickets wait until you resume it.</span></div>`;
   if (!ps.length) return head + `<p class="empty">No projects yet.</p>`;
   return head + `<div class="list"><table><thead><tr><th>Project</th><th>Directory</th><th>Prefix</th><th>Mode</th><th>Slots</th><th>Profile</th><th>Open tickets</th><th></th></tr></thead><tbody>
     ${ps.map((p) => { const c = projectCounts(p.name); const n = esc(p.name);
       return `<tr class="row${p.hidden ? " dim" : ""}" data-proj-edit="${n}">
-        <td><strong>${n}</strong>${p.hidden ? ` <span class="pill">Hidden</span>` : ""}</td>
+        <td><strong>${n}</strong>${p.paused ? ` <span class="pill f-paused">Paused</span>` : ""}${p.hidden ? ` <span class="pill">Hidden</span>` : ""}</td>
         <td class="mono" style="font-size:calc(12 * var(--u));overflow-wrap:anywhere">${esc(p.dir)}</td>
         <td class="mono">${esc(p.prefix)}</td><td>${MODE_NAME[p.mode] || esc(p.mode)}</td>
         <td class="mono">${p.mode === "worktree" ? p.slots : `<span class="muted" title="Slots only limit worktree tickets">${p.slots}</span>`}</td>
         <td>${p.profile ? esc(p.profile) : `<span class="muted">default</span>`}</td>
         <td title="${esc(c.by || "none open")}${c.done ? ` · ${c.done} done` : ""}"><span class="mono">${c.open}</span>${c.needs ? ` <span class="pill f-input">${c.needs} need${c.needs > 1 ? "" : "s"} you</span>` : ""}</td>
         <td class="acts"><button type="button" class="btn" data-proj-edit="${n}">Edit</button>
+          ${p.paused ? `<button type="button" class="btn primary" data-proj-resume="${n}" title="Start its queued tickets again">Resume</button>`
+            : `<button type="button" class="btn" data-proj-pause="${n}" title="Start nothing new in it">Pause</button>`}
           <button type="button" class="btn" ${p.hidden ? `data-proj-unhide="${n}" title="Show its tickets again">Unhide` : `data-proj-hide="${n}" title="Keep its tickets out of the views and Needs you; they still run">Hide`}</button>
           <button type="button" class="btn danger" data-proj-rm="${n}">Delete</button></td></tr>`; }).join("")}
   </tbody></table></div>`;
@@ -1552,6 +1605,12 @@ document.addEventListener("click", async (e) => {
   if (ds.projHide) { e.stopPropagation(); return projectAction(ds.projHide, "hide", `${ds.projHide} hidden: its tickets are out of the views and Needs you`); }
   if (ds.projUnhide) { e.stopPropagation(); return projectAction(ds.projUnhide, "unhide", `${ds.projUnhide} is shown again`); }
   if (ds.projRmYes) return removeProject(ds.projRmYes);
+  if (ds.projPause) { e.stopPropagation(); return confirmPause(ds.projPause); }
+  if (ds.pauseAll) return confirmPause("");
+  if (ds.pauseYes !== undefined) return pause(ds.pauseYes, !!ds.now, false);
+  if (ds.projResume) { e.stopPropagation(); return pause(ds.projResume, false, true); }
+  if (ds.resumeAll) return pause("", false, true);
+  if (el.id === "closePause") return document.getElementById("pauseDlg").close();
   if (ds.projRm) { e.stopPropagation(); return confirmProjectRm(ds.projRm); }
   if (ds.projEdit) return openProject(ds.projEdit);
   if (el.id === "needsToggle") { state.needsOpen = !state.needsOpen; store("cl-needs", state.needsOpen ? "1" : "0"); renderNeeds(); return; }

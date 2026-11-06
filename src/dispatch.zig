@@ -2,7 +2,8 @@
 //! queue ticket is typed into its target session (its own, its parent's, or
 //! a new one in the project's directory) when that session is idle and has
 //! no other ticket in progress. The dispatcher (`cl t dispatch`, and a thread
-//! in `cl web`) starts queued tickets as slots and sessions free up.
+//! in `cl web`) starts queued tickets as slots and sessions free up, except
+//! in a paused project (`cl project pause`), where it starts nothing new.
 //!
 //! Sessions cl starts for tickets carry CL_TICKET and hooks (--settings) that
 //! report back through `cl ticket hook`.
@@ -838,10 +839,7 @@ pub fn tick(ctx: Ctx, cfg: config.Config, db: board.Db) !usize {
 
     // Planning tickets that never started, in board order, up to each
     // project's planners. They don't wait for the queue or worktree slots.
-    const planning = try board.listTickets(db, a, .{ .stage = .planning });
-    std.mem.sort(board.Ticket, planning, {}, byRank);
-    for (planning) |t| {
-        if (t.tmux.len > 0 or t.killed or t.park != null) continue;
+    for (try planningToStart(db, a)) |t| {
         const p = board.getProject(db, a, t.project) catch continue;
         if (try runningPlanners(db, a, view, p.name) >= p.planners) continue;
         startPlanning(ctx, cfg, db, a, t) catch |err| switch (err) {
@@ -880,17 +878,94 @@ pub fn tick(ctx: Ctx, cfg: config.Config, db: board.Db) !usize {
 /// What the dispatcher may start, in board order: queued tickets (planning
 /// ones start on their own, up to the project's planners). A killed one waits for you to
 /// restart it, and a parked one for its park to end, in whatever stage
-/// (moving it to Queued doesn't start it).
+/// (moving it to Queued doesn't start it). A paused project's queued
+/// tickets wait, in their place, for it to resume.
 fn waitingToStart(db: board.Db, a: std.mem.Allocator) ![]board.Ticket {
+    const paused = try pausedProjects(db, a);
     var waiting: std.ArrayList(board.Ticket) = .empty;
-    for (try board.listTickets(db, a, .{ .stage = .queued })) |t| if (t.tmux.len == 0 and !t.killed and t.park == null) try waiting.append(a, t);
+    for (try board.listTickets(db, a, .{ .stage = .queued })) |t| {
+        if (t.tmux.len == 0 and !t.killed and t.park == null and !paused.contains(t.project)) try waiting.append(a, t);
+    }
     std.mem.sort(board.Ticket, waiting.items, {}, byRank);
     return waiting.items;
+}
+
+/// Planning tickets the dispatcher may start, in board order (up to each
+/// project's planners): not started, killed or parked, and not in a paused
+/// project.
+fn planningToStart(db: board.Db, a: std.mem.Allocator) ![]board.Ticket {
+    const paused = try pausedProjects(db, a);
+    var out: std.ArrayList(board.Ticket) = .empty;
+    for (try board.listTickets(db, a, .{ .stage = .planning })) |t| {
+        if (t.tmux.len == 0 and !t.killed and t.park == null and !paused.contains(t.project)) try out.append(a, t);
+    }
+    std.mem.sort(board.Ticket, out.items, {}, byRank);
+    return out.items;
+}
+
+fn pausedProjects(db: board.Db, a: std.mem.Allocator) !std.StringHashMapUnmanaged(void) {
+    var paused: std.StringHashMapUnmanaged(void) = .empty;
+    for (try board.listProjects(db, a)) |p| if (p.paused) try paused.put(a, p.name, {});
+    return paused;
 }
 
 /// Board order: rank, then oldest first.
 fn byRank(_: void, x: board.Ticket, y: board.Ticket) bool {
     return x.rank < y.rank or (x.rank == y.rank and x.id < y.id);
+}
+
+pub const Interrupted = struct {
+    /// Running tickets stopped and put back in Queued: they resume their
+    /// conversation when the project resumes.
+    queued: []const []const u8,
+    /// Planning sessions ended: planning picks up again when it resumes.
+    planning: []const []const u8,
+    /// Running tickets left running: another ticket in progress shares
+    /// their session (a parent's), or theirs is still starting.
+    left: []const []const u8,
+};
+
+/// "Pause now" (`cl project pause --now`): besides holding new starts,
+/// stop what `project` is working on as moving it back to Queued does
+/// (CL-70): each Running ticket's session is killed, its conversation and
+/// change kept, and it waits in Queued, keeping its rank, to resume. Planning
+/// sessions end too; their tickets stay in Planning and are started again
+/// (resuming the conversation) on resume. Review and Testing tickets wait
+/// on you, not Claude, and are left alone.
+pub fn interrupt(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, project: []const u8) !Interrupted {
+    var queued: std.ArrayList([]const u8) = .empty;
+    var planning: std.ArrayList([]const u8) = .empty;
+    var left: std.ArrayList([]const u8) = .empty;
+    for (try board.listTickets(db, a, .{ .project = project })) |t| {
+        if (t.tmux.len == 0) continue;
+        switch (t.stage) {
+            .running => {
+                actions.move(ctx, cfg, db, a, t.key, .queued, false, .close) catch |err| switch (err) {
+                    error.SharedSession, error.Starting => {
+                        try left.append(a, t.key);
+                        continue;
+                    },
+                    else => return err,
+                };
+                try queued.append(a, t.key);
+            },
+            .planning => {
+                if (t.tmux[0] == '(') {
+                    try left.append(a, t.key);
+                    continue;
+                }
+                _ = actions.kill(ctx, cfg, db, a, t.key) catch |err| switch (err) {
+                    error.NoSession => continue,
+                    else => return err,
+                };
+                // Not killed for good: the dispatcher plans it again on resume.
+                try db.exec("UPDATE tickets SET killed = 0 WHERE id = ?1", .{t.id});
+                try planning.append(a, t.key);
+            },
+            else => {},
+        }
+    }
+    return .{ .queued = queued.items, .planning = planning.items, .left = left.items };
 }
 
 /// Run the dispatcher until killed, every few seconds.
@@ -1329,4 +1404,76 @@ test "a ticket switched to a worktree starts now when queued or beyond" {
     t.stage = .queued;
     t.killed = true;
     try std.testing.expectEqual(.stay, switchedStart(t, false, 0, 3));
+}
+
+test "a paused project starts nothing; resumed, the top of its queue goes first" {
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp" };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "qa", .dir = "/x/qa" });
+    try board.addProject(db, .{ .name = "web", .dir = "/x/web" });
+    const k1 = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "First in", .stage = .queued });
+    const k2 = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Moved to the top", .stage = .queued });
+    const kw = try board.createTicket(ctx, db, a, .{ .project = "web", .title = "Other project", .stage = .queued });
+    const kp = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Being planned", .stage = .planning, .plan = true });
+    const kr = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Running", .stage = .running });
+    try db.exec("UPDATE tickets SET tmux = 'cl_qa_1' WHERE key = ?1", .{kr});
+    try board.rankTicket(db, a, k2, null, k1);
+
+    try board.setProjectPaused(db, "qa", true);
+    try std.testing.expect((try board.getProject(db, a, "qa")).paused);
+    // Nothing of qa's starts, queued or planning; web goes on.
+    const w = try waitingToStart(db, a);
+    try std.testing.expectEqual(@as(usize, 1), w.len);
+    try std.testing.expectEqualStrings(kw, w[0].key);
+    try std.testing.expectEqual(@as(usize, 0), (try planningToStart(db, a)).len);
+    // Its queued tickets stay in Queued, in their order, and the running one
+    // keeps its session and stage.
+    const q = try board.listTickets(db, a, .{ .project = "qa", .stage = .queued });
+    try std.testing.expectEqual(@as(usize, 2), q.len);
+    const r = try board.getTicket(db, a, kr);
+    try std.testing.expectEqual(board.Stage.running, r.stage);
+    try std.testing.expectEqualStrings("cl_qa_1", r.tmux);
+
+    // Every project at once.
+    try board.setAllPaused(db, true);
+    try std.testing.expectEqual(@as(usize, 0), (try waitingToStart(db, a)).len);
+    try board.setAllPaused(db, false);
+    try std.testing.expect(!(try board.getProject(db, a, "web")).paused);
+
+    // Resumed: the top-ranked queued ticket is the first to start, and planning goes on.
+    const resumed = try waitingToStart(db, a);
+    try std.testing.expectEqual(@as(usize, 3), resumed.len);
+    try std.testing.expectEqualStrings(k2, resumed[0].key);
+    try std.testing.expectEqualStrings(k1, resumed[1].key);
+    try std.testing.expectEqualStrings(kp, (try planningToStart(db, a))[0].key);
+    try std.testing.expectError(error.NotFound, board.setProjectPaused(db, "nope", true));
+}
+
+test "a pause survives a restart, and an older board gets the column" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+    const path = try std.fmt.allocPrintSentinel(a, "{s}/board.db", .{dir}, 0);
+    {
+        const db = try board.Db.open(path);
+        defer db.close();
+        try board.migrate(db);
+        // A board from before pausing.
+        try db.execMulti("ALTER TABLE projects DROP COLUMN paused");
+        try board.migrate(db);
+        try board.addProject(db, .{ .name = "qa", .dir = "/x/qa" });
+        try board.setProjectPaused(db, "qa", true);
+    }
+    const db = try board.Db.open(path);
+    defer db.close();
+    try board.migrate(db);
+    try std.testing.expect((try board.getProject(db, a, "qa")).paused);
 }

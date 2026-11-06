@@ -69,6 +69,11 @@ fn projectHidden(projects: []const board.Project, name: []const u8) bool {
     return false;
 }
 
+fn projectPaused(projects: []const board.Project, name: []const u8) bool {
+    for (projects) |p| if (std.mem.eql(u8, p.name, name)) return p.paused;
+    return false;
+}
+
 /// Whether the board shows `t` (apart from which columns there are).
 pub fn shows(t: board.Ticket, projects: []const board.Project, o: Options) bool {
     if (!o.hidden_projects and projectHidden(projects, t.project)) return false;
@@ -114,6 +119,8 @@ pub const CardStatus = enum {
     unknown,
     killed,
     parked,
+    /// Queued in a paused project (`cl project pause`).
+    paused,
     waiting_slot,
     not_started,
     done,
@@ -128,6 +135,7 @@ pub const CardStatus = enum {
             .unknown => "unknown",
             .killed => "killed; restart it",
             .parked => "parked",
+            .paused => "paused",
             .waiting_slot => "waiting for a slot",
             .not_started => "not started",
             .done => "done",
@@ -141,6 +149,7 @@ pub const CardStatus = enum {
             .idle => .{ .index = 2 },
             .starting => .{ .index = 4 },
             .parked => .{ .index = 5 },
+            .paused => .{ .index = 6 },
             .gone, .killed => .{ .index = 8 },
             else => .default,
         };
@@ -155,8 +164,9 @@ pub const CardStatus = enum {
     }
 };
 
-/// `live`: the status of its tmux session, when there is one.
-pub fn cardStatus(t: board.Ticket, live: ?claude.Status) CardStatus {
+/// `live`: the status of its tmux session, when there is one. `paused`: its
+/// project is paused.
+pub fn cardStatus(t: board.Ticket, live: ?claude.Status, paused: bool) CardStatus {
     if (live) |st| return switch (st) {
         .busy => .working,
         .waiting, .blocked => .waiting,
@@ -170,7 +180,8 @@ pub fn cardStatus(t: board.Ticket, live: ?claude.Status) CardStatus {
     if (t.killed) return .killed;
     if (t.stage == .done) return .done;
     if (t.tmux.len > 0 and t.stage != .backlog and t.stage != .queued) return .gone;
-    return if (t.stage == .queued) .waiting_slot else .not_started;
+    if (t.stage != .queued) return .not_started;
+    return if (paused) .paused else .waiting_slot;
 }
 
 pub fn flagLabel(f: board.Flag) []const u8 {
@@ -725,7 +736,7 @@ pub const View = struct {
             else => return e,
         };
         self.full = t;
-        const st = cardStatus(t, self.live.get(t.tmux));
+        const st = cardStatus(t, self.live.get(t.tmux), projectPaused(self.projects, t.project));
         const subs = try board.listTickets(env.db, env.a, .{ .parent = t.key });
         self.full_lines = try detailLines(env.a, env.ctx.nowSeconds(), t, st, subs, try board.comments(env.db, env.a, t.id), try board.events(env.db, env.a, t.id));
         if (st.live() and t.tmux.len > 0) self.preview = try capturePane(env, t.tmux, 40);
@@ -1130,6 +1141,7 @@ pub const View = struct {
         if (self.opts.done) try notes.appendSlice(a, " · with Done");
         if (self.opts.subs) try notes.appendSlice(a, " · with sub-tickets");
         if (hidden_n > 0) try notes.appendSlice(a, if (self.opts.hidden_projects) " · with hidden projects" else try std.fmt.allocPrint(a, " · {d} hidden project{s} (H)", .{ hidden_n, if (hidden_n == 1) "" else "s" }));
+        for (self.projects) |p| if (p.paused) try notes.appendSlice(a, try std.fmt.allocPrint(a, " · {s} paused", .{p.name}));
         if (self.search.len > 0) try notes.appendSlice(a, try std.fmt.allocPrint(a, " · matching \"{s}\"", .{self.search.get()}));
         const header_end = win.print(&.{
             .{ .text = " BOARD  ", .style = bold },
@@ -1231,7 +1243,7 @@ pub const View = struct {
     }
 
     fn drawCard(self: *View, a: std.mem.Allocator, card: vaxis.Window, t: board.Ticket, sel: bool, now: i64) !void {
-        const st = cardStatus(t, self.live.get(t.tmux));
+        const st = cardStatus(t, self.live.get(t.tmux), projectPaused(self.projects, t.project));
         const w: usize = card.width;
         if (sel) card.fill(.{ .style = .{ .reverse = true } });
         const age = try ui.ageText(a, now - t.updated);
@@ -1541,22 +1553,24 @@ test splitAnswers {
 
 test cardStatus {
     var t = testTicket("QA-1", .running, 1);
-    try testing.expectEqual(CardStatus.not_started, cardStatus(t, null));
+    try testing.expectEqual(CardStatus.not_started, cardStatus(t, null, false));
     t.tmux = "cl_qa_1";
-    try testing.expectEqual(CardStatus.gone, cardStatus(t, null));
-    try testing.expectEqual(CardStatus.working, cardStatus(t, .busy));
-    try testing.expectEqual(CardStatus.waiting, cardStatus(t, .blocked));
+    try testing.expectEqual(CardStatus.gone, cardStatus(t, null, false));
+    try testing.expectEqual(CardStatus.working, cardStatus(t, .busy, false));
+    try testing.expectEqual(CardStatus.waiting, cardStatus(t, .blocked, false));
     t.tmux = "(starting)";
-    try testing.expectEqual(CardStatus.starting, cardStatus(t, null));
+    try testing.expectEqual(CardStatus.starting, cardStatus(t, null, false));
     t.tmux = "";
     t.killed = true;
-    try testing.expectEqual(CardStatus.killed, cardStatus(t, null));
+    try testing.expectEqual(CardStatus.killed, cardStatus(t, null, false));
     t.stage = .queued;
     t.killed = false;
-    try testing.expectEqual(CardStatus.waiting_slot, cardStatus(t, null));
+    try testing.expectEqual(CardStatus.waiting_slot, cardStatus(t, null, false));
+    // In a paused project it says so rather than waiting for a slot.
+    try testing.expectEqual(CardStatus.paused, cardStatus(t, null, true));
     t.stage = .done;
     t.tmux = "cl_qa_1";
-    try testing.expectEqual(CardStatus.done, cardStatus(t, null));
+    try testing.expectEqual(CardStatus.done, cardStatus(t, null, false));
 }
 
 test wrap {

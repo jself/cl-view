@@ -291,9 +291,23 @@ fn wake(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: boa
     if (took == null) return; // Unparked (or parked again) meanwhile.
     board.logEvent(ctx, db, t.id, "park condition met", p.reason) catch {};
     board.setFlagId(ctx, db, t.id, board.flag_unparked, "auto", std.fmt.allocPrint(a, "Parked condition met: {s}", .{p.reason}) catch p.reason) catch {};
+    // Its project is paused: it waits in Queued, note and all, and the
+    // dispatcher resumes it there once the project resumes.
+    if (board.projectPaused(db, t.project) catch false) {
+        holdForPause(ctx, db, a, t, std.fmt.allocPrint(a, "Parked condition met: {s}. Continue.", .{p.reason}) catch return) catch |e| {
+            board.setFlagId(ctx, db, t.id, "start-failed", "auto", @errorName(e)) catch {};
+        };
+        return;
+    }
     _ = resumeWith(ctx, cfg, db, a, t.key, std.fmt.allocPrint(a, "Parked condition met: {s}. Continue.", .{p.reason}) catch return) catch |e| {
         board.setFlagId(ctx, db, t.id, "start-failed", "auto", @errorName(e)) catch {};
     };
+}
+
+fn holdForPause(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, note: []const u8) !void {
+    _ = try board.addComment(ctx, db, a, t.key, "cl", note, false);
+    try board.requeue(ctx, db, t);
+    try board.logEvent(ctx, db, t.id, "held: project paused", "");
 }
 
 // ---- tests ----
@@ -375,4 +389,30 @@ test "park without a check: no checks, no deadline; a new session ends it" {
     try testing.expectEqual(@as(usize, 0), (try board.dueParks(db, a, t.park.?.at + 86400 * 30)).len);
     try board.setSession(ctx, db, t.id, "cl_qa_1", "", "", "");
     try testing.expect((try board.getTicket(db, a, k)).park == null);
+}
+
+test "a park whose check passes in a paused project waits in Queued with its note" {
+    const ctx = testCtx();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "qa", .dir = "/x/qa" });
+    const k = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Waits on a PR", .stage = .review });
+    _ = try park(ctx, db, a, k, .{ .reason = "PR #30", .until = "true" });
+    try board.setProjectPaused(db, "qa", true);
+    const t = try board.getTicket(db, a, k);
+    // Not resumed (that would start its session): back in Queued, not killed,
+    // with the note it resumes with once the project resumes.
+    wake(ctx, .{ .profiles = &.{}, .default = "", .operator = "" }, db, a, t, t.park.?);
+    const after = try board.getTicket(db, a, k);
+    try testing.expect(after.park == null);
+    try testing.expectEqual(board.Stage.queued, after.stage);
+    try testing.expect(!after.killed);
+    try testing.expectEqualStrings("", after.tmux);
+    const notes = try board.unsentNotes(db, a, after.id);
+    try testing.expectEqual(@as(usize, 1), notes.len);
+    try testing.expect(std.mem.indexOf(u8, notes[0].body, "PR #30") != null);
 }

@@ -302,6 +302,20 @@ fn route(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: 
         const started = operator.sendInBackground(ctx, cfg, text) catch return error.OperatorFailed;
         return ok(req, a, .{ .ok = true, .started = started });
     }
+    // Pause or resume every project: /api/projects/pause, /api/projects/resume.
+    if (std.mem.eql(u8, what, "projects") and (std.mem.eql(u8, name, "pause") or std.mem.eql(u8, name, "resume"))) {
+        const pause = std.mem.eql(u8, name, "pause");
+        try board.setAllPaused(db, pause);
+        var stopped: std.ArrayList([]const u8) = .empty;
+        var left: std.ArrayList([]const u8) = .empty;
+        if (pause and b.now == true) for (try board.listProjects(db, a)) |p| {
+            const r = try dispatch.interrupt(ctx, cfg, db, a, p.name);
+            try stopped.appendSlice(a, r.queued);
+            try stopped.appendSlice(a, r.planning);
+            try left.appendSlice(a, r.left);
+        };
+        return ok(req, a, .{ .ok = true, .stopped = stopped.items, .left = left.items });
+    }
     if (std.mem.eql(u8, what, "project")) {
         if (name.len == 0) {
             const dir = try realDir(ctx, a, b.dir orelse return error.BadInput);
@@ -336,6 +350,17 @@ fn route(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: 
             try after_merge.startByHand(ctx, db, a, name, nonEmpty(b.key) orelse "-");
         } else if (std.mem.eql(u8, action, "hide") or std.mem.eql(u8, action, "unhide")) {
             try board.setProjectHidden(db, name, std.mem.eql(u8, action, "hide"));
+        } else if (std.mem.eql(u8, action, "pause") or std.mem.eql(u8, action, "resume")) {
+            const pause = std.mem.eql(u8, action, "pause");
+            try board.setProjectPaused(db, name, pause);
+            // Pause now: what runs stops too, and resumes with the project.
+            if (pause and b.now == true) {
+                const r = try dispatch.interrupt(ctx, cfg, db, a, name);
+                var stopped: std.ArrayList([]const u8) = .empty;
+                try stopped.appendSlice(a, r.queued);
+                try stopped.appendSlice(a, r.planning);
+                return ok(req, a, .{ .ok = true, .stopped = stopped.items, .left = r.left });
+            }
         } else if (std.mem.eql(u8, action, "rm")) {
             board.removeProject(db, name) catch |e| switch (e) {
                 error.Exists => {

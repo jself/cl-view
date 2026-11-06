@@ -76,6 +76,10 @@ pub const Project = struct {
     /// Planning sessions that may run at once. They write no code, so they
     /// don't wait for the queue or a worktree slot, only for this.
     planners: i64 = default_planners,
+    /// The dispatcher starts nothing new in it (`cl project pause`): no queued
+    /// ticket, planning session or park check's resume. What already runs
+    /// goes on; what you start by hand starts.
+    paused: bool = false,
 };
 
 pub const Flag = struct {
@@ -215,6 +219,7 @@ const schema =
     \\  after_merge_pending TEXT NOT NULL DEFAULT '',
     \\  after_merge_claude TEXT NOT NULL DEFAULT '',
     \\  hidden INTEGER NOT NULL DEFAULT 0,
+    \\  paused INTEGER NOT NULL DEFAULT 0,
     \\  planners INTEGER NOT NULL DEFAULT
 ++ std.fmt.comptimePrint(" {d}\n", .{default_planners}) ++
     \\);
@@ -362,6 +367,7 @@ pub fn migrate(db: Db) !void {
         // Review guides used to be read from .claude/review-guide.md in the
         // ticket's directory, which tickets without a worktree shared.
         try addColumn(db, "tickets", "review_guide", "TEXT NOT NULL DEFAULT ''");
+        try addColumn(db, "projects", "paused", "INTEGER NOT NULL DEFAULT 0");
     }
     if (have >= version) return;
     // Version 1 had no sub-tickets, version 2 no planning skill.
@@ -544,6 +550,22 @@ pub fn setProjectHidden(db: Db, name: []const u8, hidden: bool) Error!void {
     if (db.changes() == 0) return error.NotFound;
 }
 
+/// Pause a project's dispatching, or resume it (see `Project.paused`).
+pub fn setProjectPaused(db: Db, name: []const u8, paused: bool) Error!void {
+    try db.exec("UPDATE projects SET paused = ?2 WHERE name = ?1", .{ name, @as(i64, @intFromBool(paused)) });
+    if (db.changes() == 0) return error.NotFound;
+}
+
+/// Pause or resume every project.
+pub fn setAllPaused(db: Db, paused: bool) Error!void {
+    try db.exec("UPDATE projects SET paused = ?1", .{@as(i64, @intFromBool(paused))});
+}
+
+/// The project named `name` is paused (false when there is none).
+pub fn projectPaused(db: Db, name: []const u8) Error!bool {
+    return ((try db.int("SELECT paused FROM projects WHERE name = ?1", .{name})) orelse 0) != 0;
+}
+
 /// Remove a project; refused while it has tickets.
 pub fn removeProject(db: Db, name: []const u8) Error!void {
     if (try db.int("SELECT 1 FROM projects WHERE name = ?1", .{name}) == null) return error.NotFound;
@@ -551,7 +573,7 @@ pub fn removeProject(db: Db, name: []const u8) Error!void {
     try db.exec("DELETE FROM projects WHERE name = ?1", .{name});
 }
 
-const project_cols = "name, dir, prefix, slots, mode, profile, after_merge, after_merge_claude, hidden, planners";
+const project_cols = "name, dir, prefix, slots, mode, profile, after_merge, after_merge_claude, hidden, planners, paused";
 
 fn readProject(st: sqlite.Stmt, a: std.mem.Allocator) !Project {
     return .{
@@ -565,6 +587,7 @@ fn readProject(st: sqlite.Stmt, a: std.mem.Allocator) !Project {
         .after_merge_claude = try st.dupe(a, 7),
         .hidden = st.int(8) != 0,
         .planners = st.int(9),
+        .paused = st.int(10) != 0,
     };
 }
 
@@ -1263,6 +1286,12 @@ pub fn releaseStart(db: Db, id: i64) Error!void {
 /// Move without the key lookup (the dispatcher has the ticket already).
 pub fn moveTicket(ctx: Ctx, db: Db, t: Ticket, stage: Stage) Error!void {
     if (t.stage != stage) try moveId(ctx, db, t.id, t.stage, stage);
+}
+
+/// Back to Queued (or still there), not killed: the dispatcher starts it.
+pub fn requeue(ctx: Ctx, db: Db, t: Ticket) Error!void {
+    try moveTicket(ctx, db, t, .queued);
+    try db.exec("UPDATE tickets SET killed = 0 WHERE id = ?1", .{t.id});
 }
 
 /// The ticket's jj change and its bookmark ("" and "" to forget them).

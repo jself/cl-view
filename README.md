@@ -448,6 +448,8 @@ cl project add boats ~/devel/boats --prefix BOAT
 cl project list | set <name> [options] | rm <name>
 cl project hide boats         # its tickets leave the board, Needs You, needs and list; queued ones still run
 cl project unhide boats
+cl project pause boats [--now] # start nothing new there (see Pausing); --all for every project
+cl project resume boats
 cl project set qa-tool --after-merge '<command>'   # run on each merge (see After merge)
 ```
 
@@ -569,6 +571,34 @@ Sessions cl starts for tickets get `CL_TICKET` and hooks (`--settings
 <board.dir>/claude-hooks.json`): a permission prompt sets `input`, and the
 end of a turn clears it. A ticket whose session goes away gets `ended`;
 `cl t start` starts it again.
+
+### Pausing
+
+`cl project pause <name>` (or `--all`, or **Pause** in the web board's
+Projects view) holds a project's dispatching, for when its work has to stop
+for a while (moving it to another account, say). The dispatcher starts
+nothing new there: queued tickets stay in Queued, keeping their order, and
+read "paused" instead of "waiting for a slot"; planning tickets wait to be
+planned; and a parked ticket whose check passes ends its park but waits in
+Queued (with the note it resumes with) instead of resuming. What runs goes
+on to the end of its work, and Review and Testing wait on you as before.
+`cl project resume <name>` (or `--all`) starts dispatching again, top of the
+queue first. The pause is kept on the project, so it survives a `cl web`
+restart; `cl project list` says `paused`, and the board shows a banner with
+**Resume**.
+
+A pause holds only what cl starts on its own. What you start yourself still
+starts (`cl t start`, the board's Start, `unpark`, a move to a worktree), and
+what goes into a session that is already running still goes (comments sent
+with `--send`, answers, merge and PR instructions, after-merge runs).
+
+`--now` (**Pause now** on the board) also stops what the project is working
+on, as moving a running ticket back to Queued does: each Running ticket's
+session is killed and it goes back to Queued, its conversation and change
+kept, to resume where it left off once the project resumes. Planning
+sessions end too; their tickets stay in Planning and are planned again,
+resuming the conversation. A ticket whose session another ticket in progress
+shares (a sub-ticket in its parent's) is left running and named.
 
 ### Parking a ticket
 

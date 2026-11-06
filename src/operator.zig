@@ -227,6 +227,10 @@ const tickets_skill =
     \\`--project <name>`, brings them back). Leave them out of summaries unless asked about
     \\that project, and never raise an alert about one. Their queued tickets still run.
     \\
+    \\Paused projects (`paused` in `cl project list`; `cl project pause` / `resume`): the human
+    \\stopped the dispatcher there; their queued tickets wait on purpose. Don't start them or
+    \\resume the project unless asked, and don't alert about them waiting.
+    \\
     \\## Changing tickets
     \\
     \\  cl ticket edit <key> [--title <t>] [-m <body>] [--plan | --no-plan] ...
