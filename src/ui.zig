@@ -12,6 +12,7 @@ const history = @import("history.zig");
 const actions = @import("actions.zig");
 const board = @import("board.zig");
 const park = @import("park.zig");
+const board_view = @import("board_view.zig");
 
 const Event = union(enum) {
     key_press: vaxis.Key,
@@ -25,11 +26,13 @@ const Mode = union(enum) {
     history,
     /// P: parked tickets (cl ticket park); Enter resumes one.
     parked,
+    /// b: the ticket board (board_view.zig).
+    board,
     confirm_kill,
     input: Input,
 };
 
-const Input = enum { filter, history_filter, rename, send, new_dir, new_name, new_profile, new_message };
+const Input = enum { filter, history_filter, rename, send, new_dir, new_name, new_profile, new_message, board };
 
 const PreviewLine = []sgr.Segment;
 
@@ -82,6 +85,11 @@ const App = struct {
     new_dir: []const u8 = "",
     new_name: []const u8 = "",
     new_profile: []const u8 = "",
+    /// The ticket board, and what its open prompt asks (in form_state).
+    bv: board_view.View = .{},
+    board_label: []const u8 = "",
+    /// ?: every key of the current view, on a screen of its own.
+    show_keys: bool = false,
 
     fn arena(self: *App) std.mem.Allocator {
         return self.arena_state.allocator();
@@ -89,6 +97,20 @@ const App = struct {
 
     fn form(self: *App) std.mem.Allocator {
         return self.form_state.allocator();
+    }
+
+    fn inBoard(self: *App) bool {
+        return switch (self.mode) {
+            .board => true,
+            .input => |kind| kind == .board,
+            else => false,
+        };
+    }
+
+    /// What the board needs from the last refresh; null without a board.
+    fn boardEnv(self: *App) ?board_view.Env {
+        const db = self.db orelse return null;
+        return .{ .ctx = self.ctx, .cfg = self.cfg, .db = db, .a = self.arena(), .sessions = self.sessions, .statuses = self.statuses };
     }
 
     /// Indices of sessions passing the filter, grouped by status (needs input first).
@@ -168,7 +190,9 @@ const App = struct {
         self.parked = if (self.db) |db| board.listTickets(db, self.arena(), .{ .parked = true }) catch &.{} else &.{};
         if (self.park_cursor >= self.parked.len) self.park_cursor = self.parked.len -| 1;
         if (keep) |k| self.selectByName(k);
-        try self.loadPreview();
+        if (self.inBoard()) {
+            if (self.boardEnv()) |env| self.bv.load(env) catch |err| self.bv.setMsg(true, "couldn't read the board: {s}", .{@errorName(err)});
+        } else try self.loadPreview();
         self.last_refresh_ms = std.Io.Timestamp.now(self.ctx.io, .real).toMilliseconds();
         self.dirty = true;
     }
@@ -226,10 +250,20 @@ const App = struct {
     fn handleKey(self: *App, key: vaxis.Key) !void {
         self.dirty = true;
         if (key.matches('l', .{ .ctrl = true })) return self.redraw();
+        if (self.show_keys) {
+            // Any key closes it.
+            self.show_keys = false;
+            return;
+        }
+        if (key.matches('?', .{}) and self.keys() != null) {
+            self.show_keys = true;
+            return;
+        }
         switch (self.mode) {
             .list => try self.handleListKey(key),
             .history => try self.handleHistoryKey(key),
             .parked => try self.handleParkedKey(key),
+            .board => try self.handleBoardKey(key),
             .confirm_kill => {
                 if (key.matches('y', .{}) or key.matches(vaxis.Key.enter, .{})) {
                     if (self.selected()) |s| {
@@ -245,6 +279,7 @@ const App = struct {
                 if (key.matches(vaxis.Key.escape, .{}) or key.matches('c', .{ .ctrl = true })) {
                     self.input.clearAndFree();
                     self.mode = .list;
+                    if (kind == .board) self.mode = .board;
                     if (kind == .filter) self.filter = "";
                     if (kind == .history_filter) {
                         self.hist_filter = "";
@@ -329,6 +364,8 @@ const App = struct {
             self.hist_filter = "";
             self.scroll = 0;
             self.mode = .history;
+        } else if (key.matches('b', .{})) {
+            try self.openBoard();
         } else if (key.matches('P', .{}) or key.matches('p', .{ .shift = true })) {
             self.park_cursor = 0;
             self.scroll = 0;
@@ -338,14 +375,20 @@ const App = struct {
         } else if (key.matches(vaxis.Key.tab, .{})) {
             self.expanded = !self.expanded;
         } else if (key.matches('o', .{})) {
-            const tmux_name = operator.ensure(self.ctx, self.cfg) catch |err| {
-                self.setMessage("operator failed: {s} (profile {s})", .{ @errorName(err), self.cfg.operator });
-                return;
-            };
-            // Opening the operator is how you acknowledge its alert.
-            tmux.setAlert(self.ctx, tmux_name, "") catch {};
-            try self.attach(tmux_name);
+            try self.openOperator();
         }
+    }
+
+    fn openOperator(self: *App) !void {
+        const tmux_name = operator.ensure(self.ctx, self.cfg) catch |err| {
+            const msg = "operator failed: {s} (profile {s})";
+            const args = .{ @errorName(err), self.cfg.operator };
+            if (self.inBoard()) self.bv.setMsg(true, msg, args) else self.setMessage(msg, args);
+            return;
+        };
+        // Opening the operator is how you acknowledge its alert.
+        tmux.setAlert(self.ctx, tmux_name, "") catch {};
+        try self.attach(try self.form().dupe(u8, tmux_name));
     }
 
     fn handleHistoryKey(self: *App, key: vaxis.Key) !void {
@@ -429,6 +472,43 @@ const App = struct {
         }
     }
 
+    fn openBoard(self: *App) !void {
+        if (self.db == null) {
+            self.setMessage("the ticket board can't be opened (board.dir)", .{});
+            return;
+        }
+        self.mode = .board;
+        try self.refresh();
+    }
+
+    fn handleBoardKey(self: *App, key: vaxis.Key) !void {
+        const env = self.boardEnv() orelse {
+            self.mode = .list;
+            return;
+        };
+        try self.boardOutcome(try self.bv.handleKey(env, key));
+    }
+
+    fn boardOutcome(self: *App, out: board_view.Outcome) !void {
+        switch (out) {
+            .none => {},
+            .reload => try self.refresh(),
+            .leave => {
+                self.mode = .list;
+                try self.refresh();
+            },
+            .quit => self.quit = true,
+            .operator => try self.openOperator(),
+            // Its name outlives the refresh attaching makes.
+            .attach => |s| try self.attach(try self.form().dupe(u8, s)),
+            .prompt => |p| {
+                self.board_label = try self.form().dupe(u8, p.label);
+                try self.input.insertSliceAtCursor(p.prefill);
+                self.mode = .{ .input = .board };
+            },
+        }
+    }
+
     fn buildParkedLines(self: *App, width: u16) ![]Line {
         var lines: std.ArrayList(Line) = .empty;
         const now = self.ctx.nowSeconds();
@@ -496,6 +576,16 @@ const App = struct {
             .filter => {
                 self.filter = text;
                 self.cursor = 0;
+            },
+            .board => {
+                self.mode = .board;
+                const env = self.boardEnv() orelse return;
+                // Answering waits until Claude has taken it (seconds): say so meanwhile.
+                if (self.bv.prompt == .answer) {
+                    self.bv.setMsg(false, "sending the answer…", .{});
+                    try self.draw();
+                }
+                try self.boardOutcome(try self.bv.submit(env, text));
             },
             .history_filter => {
                 self.hist_filter = try self.hist_state.allocator().dupe(u8, text);
@@ -608,11 +698,103 @@ const App = struct {
         return lines.toOwnedSlice(self.arena());
     }
 
+    /// The operator at the right end of the header line: its alert, or its
+    /// status when there is room after the header's text.
+    fn drawOperator(self: *App, win: vaxis.Window, header_end: u16) !void {
+        const op = self.op orelse return;
+        const st = self.status(op);
+        // An alert always shows (over the header if it must, cut to fit); the
+        // plain status only when there is room after it.
+        const room = win.width -| header_end -| 1;
+        const t = if (op.alert.len > 0)
+            try std.fmt.allocPrint(self.arena(), " ⚑ {s} (o) ", .{try truncate(self.arena(), op.alert, @max(@min(win.width / 2, room -| 7), 8))})
+        else
+            try std.fmt.allocPrint(self.arena(), "operator {s} ", .{st.label()});
+        const style: vaxis.Style = if (op.alert.len > 0) .{ .fg = .{ .index = 0 }, .bg = .{ .index = 3 }, .bold = true } else .{ .fg = statusColor(st) };
+        if (op.alert.len > 0 or cols(t) <= room)
+            _ = win.printSegment(.{ .text = t, .style = style }, .{ .col_offset = win.width -| @as(u16, @intCast(cols(t))), .wrap = .none });
+    }
+
+    /// The keys of the current view; null while it asks for something.
+    fn keys(self: *App) ?[]const []const u8 {
+        return switch (self.mode) {
+            .list => &list_keys,
+            .history => &.{ "enter resume", "/ filter", "j/k move", "gg/G top/bottom", "esc back" },
+            .parked => &.{ "enter unpark and resume", "x unpark, leave it stopped", "j/k move", "esc back" },
+            .board => if (self.bv.choice == null) self.bv.help() else null,
+            else => null,
+        };
+    }
+
+    const list_keys = [_][]const u8{
+        "enter attach",   "b board",          "n new session", "o operator", "tab details", "R resume closed", "P parked",
+        "h hide",         "H show hidden",    "d kill",        "r rename",   "s send",      "/ filter",        "j/k move",
+        "gg/G top/bottom", "ctrl-r refresh", "ctrl-l redraw", "q quit",     "ctrl-q (in a session) detach",
+    };
+
+    /// The bottom line's help: the keys that fit, then "? all keys" when
+    /// some don't.
+    fn helpLine(self: *App, width: u16) ![]const u8 {
+        return fitHelp(self.arena(), self.keys() orelse &.{}, width);
+    }
+
+    /// `?`: every key, in columns.
+    fn drawKeys(self: *App, win: vaxis.Window) !void {
+        const items = self.keys() orelse &.{};
+        _ = win.print(&.{
+            .{ .text = " KEYS  ", .style = .{ .bold = true } },
+            .{ .text = "any key closes this", .style = .{ .dim = true } },
+        }, .{ .wrap = .none });
+        var widest: usize = 0;
+        for (items) |it| widest = @max(widest, cols(it));
+        const col_w: usize = widest + 4;
+        const ncols: usize = @max(1, (win.width -| 2) / col_w);
+        const nrows = (items.len + ncols - 1) / ncols;
+        for (items, 0..) |it, i| {
+            const r = i % nrows;
+            const c = i / nrows;
+            // "key description": the key bold.
+            const sp = std.mem.indexOfScalar(u8, it, ' ') orelse it.len;
+            _ = win.print(&.{
+                .{ .text = it[0..sp], .style = .{ .bold = true } },
+                .{ .text = it[sp..] },
+            }, .{ .row_offset = @intCast(2 + r), .col_offset = @intCast(2 + c * col_w), .wrap = .none });
+        }
+    }
+
+    fn drawBoard(self: *App, win: vaxis.Window) !void {
+        const header_end = try self.bv.draw(self.arena(), win.child(.{ .height = win.height -| 1 }), self.ctx.nowSeconds());
+        try self.drawOperator(win, header_end);
+        const bottom = win.child(.{ .y_off = win.height -| 1, .height = 1 });
+        if (self.mode == .input) {
+            const res = bottom.printSegment(.{ .text = self.board_label, .style = .{ .bold = true } }, .{ .wrap = .none });
+            self.input.draw(bottom.child(.{ .x_off = res.col, .width = bottom.width -| res.col }));
+        } else if (try self.bv.choiceText(self.arena())) |t| {
+            _ = bottom.printSegment(.{ .text = try truncate(self.arena(), t, bottom.width), .style = .{ .fg = .{ .index = 3 }, .bold = true } }, .{ .wrap = .none });
+        } else if (self.bv.message().len > 0) {
+            const err = self.bv.msg_err;
+            _ = bottom.printSegment(.{ .text = try std.fmt.allocPrint(self.arena(), " {s}", .{self.bv.message()}), .style = if (err) .{ .fg = .{ .index = 1 }, .bold = true } else .{ .fg = .{ .index = 2 } } }, .{ .wrap = .none });
+        } else {
+            _ = bottom.printSegment(.{ .text = try self.helpLine(bottom.width), .style = .{ .dim = true } }, .{ .wrap = .none });
+        }
+        try self.vx.render(self.tty.writer());
+        try self.tty.writer().flush();
+        self.dirty = false;
+    }
+
     fn draw(self: *App) !void {
         const win = self.vx.window();
         win.clear();
         win.hideCursor();
         const bold: vaxis.Style = .{ .bold = true };
+        if (self.show_keys) {
+            try self.drawKeys(win);
+            try self.vx.render(self.tty.writer());
+            try self.tty.writer().flush();
+            self.dirty = false;
+            return;
+        }
+        if (self.inBoard()) return self.drawBoard(win);
 
         var buf: [1024]usize = undefined;
         const vis = self.visible(&buf);
@@ -656,19 +838,7 @@ const App = struct {
             .{ .text = try self.hiddenNote(), .style = .{ .dim = true, .italic = true } },
             .{ .text = try self.parkedNote(), .style = .{ .dim = true, .italic = true } },
         }, .{ .wrap = .none }).col;
-        if (self.op) |op| {
-            const st = self.status(op);
-            // An alert always shows (over the counts if it must, cut to fit); the
-            // plain status only when there is room after the counts.
-            const room = win.width -| header_end -| 1;
-            const t = if (op.alert.len > 0)
-                try std.fmt.allocPrint(self.arena(), " ⚑ {s} (o) ", .{try truncate(self.arena(), op.alert, @max(@min(win.width / 2, room -| 7), 8))})
-            else
-                try std.fmt.allocPrint(self.arena(), "operator {s} ", .{st.label()});
-            const style: vaxis.Style = if (op.alert.len > 0) .{ .fg = .{ .index = 0 }, .bg = .{ .index = 3 }, .bold = true } else .{ .fg = statusColor(st) };
-            if (op.alert.len > 0 or cols(t) <= room)
-                _ = win.printSegment(.{ .text = t, .style = style }, .{ .col_offset = win.width -| @as(u16, @intCast(cols(t))), .wrap = .none });
-        }
+        try self.drawOperator(win, header_end);
 
         // Split the rest between the list (top) and the preview (bottom).
         const lines = if (in_parked) try self.buildParkedLines(win.width) else if (in_history) try self.buildHistoryLines(hvis, win.width) else try self.buildLines(vis, win.width);
@@ -753,15 +923,16 @@ const App = struct {
         const bottom = win.child(.{ .y_off = win.height -| 1, .height = 1 });
         switch (self.mode) {
             .list => {
-                const help = if (self.message.len > 0) self.message else  " enter attach  tab details  n new  o operator  R resume closed  P parked  h hide  H show hidden  d kill  r rename  s send  / filter  q quit  (ctrl-q detaches)";
+                const help = if (self.message.len > 0) self.message else try self.helpLine(bottom.width);
                 _ = bottom.printSegment(.{ .text = help, .style = .{ .dim = true } }, .{ .wrap = .none });
             },
             .history => {
-                const help = if (self.message.len > 0) self.message else  " enter resume  / filter  j/k move  esc back";
+                const help = if (self.message.len > 0) self.message else try self.helpLine(bottom.width);
                 _ = bottom.printSegment(.{ .text = help, .style = .{ .dim = true } }, .{ .wrap = .none });
             },
+            .board => {},
             .parked => {
-                const help = if (self.message.len > 0) self.message else  " enter unpark and resume  x unpark, leave it stopped  j/k move  esc back";
+                const help = if (self.message.len > 0) self.message else try self.helpLine(bottom.width);
                 _ = bottom.printSegment(.{ .text = help, .style = .{ .dim = true } }, .{ .wrap = .none });
             },
             .confirm_kill => {
@@ -778,6 +949,7 @@ const App = struct {
                     .new_name => " new session - name: ",
                     .new_profile => " new session - profile: ",
                     .new_message => " new session - initial message (optional): ",
+                    .board => self.board_label,
                 };
                 const res = bottom.printSegment(.{ .text = label, .style = bold }, .{ .wrap = .none });
                 const field = bottom.child(.{ .x_off = res.col, .width = bottom.width -| res.col });
@@ -798,12 +970,12 @@ fn matches(filter: []const u8, fields: []const []const u8) bool {
 }
 
 /// Approximate display width: one column per codepoint.
-fn cols(text: []const u8) usize {
+pub fn cols(text: []const u8) usize {
     return std.unicode.utf8CountCodepoints(text) catch text.len;
 }
 
 /// Cut `text` to at most `max` columns, ending in "…" when shortened.
-fn truncate(arena: std.mem.Allocator, text: []const u8, max: usize) ![]const u8 {
+pub fn truncate(arena: std.mem.Allocator, text: []const u8, max: usize) ![]const u8 {
     if (max == 0) return "";
     if (cols(text) <= max) return text;
     var it = std.unicode.Utf8View.initUnchecked(text).iterator();
@@ -815,6 +987,37 @@ fn truncate(arena: std.mem.Allocator, text: []const u8, max: usize) ![]const u8 
         end += cp.len;
     }
     return std.fmt.allocPrint(arena, "{s}…", .{std.mem.trimEnd(u8, text[0..end], " ")});
+}
+
+/// A bottom line of `items` ("key what") that fits in `width` columns:
+/// all of them, or as many as fit (in order) and then "? all keys".
+pub fn fitHelp(a: std.mem.Allocator, items: []const []const u8, width: usize) ![]const u8 {
+    const more = "  ? all keys";
+    var total: usize = 0;
+    for (items) |it| total += 2 + cols(it);
+    var out: std.ArrayList(u8) = .empty;
+    const room = if (total < width) width else width -| cols(more);
+    var used: usize = 0;
+    for (items) |it| {
+        if (used + 2 + cols(it) > room) break;
+        try out.appendSlice(a, if (used == 0) " " else "  ");
+        try out.appendSlice(a, it);
+        used += 2 + cols(it);
+    }
+    if (total >= width) try out.appendSlice(a, if (out.items.len == 0) " ? all keys" else more);
+    return out.items;
+}
+
+test fitHelp {
+    var a = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer a.deinit();
+    const items: []const []const u8 = &.{ "enter attach", "b board", "q quit" };
+    try std.testing.expectEqualStrings(" enter attach  b board  q quit", try fitHelp(a.allocator(), items, 80));
+    try std.testing.expectEqualStrings(" enter attach  ? all keys", try fitHelp(a.allocator(), items, 26));
+    const cut = try fitHelp(a.allocator(), items, 30);
+    try std.testing.expect(cols(cut) <= 30);
+    try std.testing.expect(std.mem.endsWith(u8, cut, "? all keys"));
+    try std.testing.expectEqualStrings(" ? all keys", try fitHelp(a.allocator(), items, 12));
 }
 
 /// Unix seconds of the last thing that happened to the session.
@@ -838,7 +1041,7 @@ fn inText(arena: std.mem.Allocator, secs: i64) ![]const u8 {
     return std.fmt.allocPrint(arena, "in {s}", .{try ageText(arena, secs)});
 }
 
-fn ageText(arena: std.mem.Allocator, secs: i64) ![]const u8 {
+pub fn ageText(arena: std.mem.Allocator, secs: i64) ![]const u8 {
     const t = @max(secs, 0);
     if (t < 60) return "now";
     if (t < 3600) return std.fmt.allocPrint(arena, "{d}m", .{@divTrunc(t, 60)});
@@ -869,6 +1072,15 @@ fn statusColor(st: claude.Status) vaxis.Color {
 
 /// Run the chooser. `select` preselects a tmux session name.
 pub fn run(ctx: Ctx, cfg: config.Config, select: ?[]const u8) !void {
+    return runIn(ctx, cfg, select, false);
+}
+
+/// Run the chooser on the ticket board (`cl board`).
+pub fn runBoard(ctx: Ctx, cfg: config.Config) !void {
+    return runIn(ctx, cfg, null, true);
+}
+
+fn runIn(ctx: Ctx, cfg: config.Config, select: ?[]const u8, on_board: bool) !void {
     var tty_buf: [4096]u8 = undefined;
     var tty = try vaxis.Tty.init(ctx.io, &tty_buf);
     defer tty.deinit();
@@ -902,6 +1114,7 @@ pub fn run(ctx: Ctx, cfg: config.Config, select: ?[]const u8) !void {
     try app.refresh();
     if (select) |name| app.selectByName(name);
     try app.loadPreview();
+    if (on_board) try app.openBoard();
 
     while (!app.quit) {
         ctx.sleepMs(25);

@@ -102,6 +102,7 @@ cl web                    serve the chooser to a browser (foreground)
 cl web password           set the web password (stored as an argon2id hash)
 cl web start | stop       run the web server in the background / stop it
 cl web --port N ...       the same on port N, as a second server (or CL_PORT=N)
+cl board                  the ticket board in the terminal (b in the chooser)
 cl ticket | t <command>   the ticket board (see Board)
 cl project <command>      projects that tickets belong to
 
@@ -125,9 +126,11 @@ row with the directory, tmux session name, and Claude's own session name.
 The latest reply comes from the transcript Claude writes under
 `<config dir>/projects/<cwd>/<session id>.jsonl` (only the last 256 KB is read).
 
-Chooser keys: `j`/`k` move, `Enter` attach, `Tab` toggle details, `n` new session
+Chooser keys: `j`/`k` move, `Enter` attach, `b` the ticket board (see The terminal board), `Tab` toggle details, `n` new session
 (asks for directory, name, profile, optional first message), `o` operator, `R` resume a closed session, `P` parked tickets (Enter resumes one, `x` ends the park), `h` hide / unhide, `H` show hidden, `d` kill, `r` rename,
 `s` send a line, `/` filter (name, directory, profile), `gg`/`G`, `Ctrl-R` refresh, `Ctrl-L` redraw, `q` quit.
+The bottom line shows the keys that fit the terminal's width; `?` lists them all
+(in the board too).
 
 `h` hides the selected session without stopping it: Claude, its background
 tasks, and any extra tmux windows keep running, and the header counts what is
@@ -654,6 +657,47 @@ starts queued tickets from the top.
   session `cl t sub "title"`. `list --top` leaves them out, `list --parent
   QA-1` lists them, and `show` includes them. A ticket with sub-tickets can't
   be removed until they are.
+
+### The terminal board
+
+`b` in the chooser (or `cl board`) shows the board in the terminal: a column
+per stage, each card with its key, title, session status and flags, in the
+same order as the web board's columns. It shows what the web board shows:
+hidden projects' tickets, sub-tickets and Done only when switched on (`H`,
+`S`, `D`). It re-reads
+the board every second and keeps the cursor on its ticket as cards move. The
+operator's alert shows at the top right, as in the session list, and `o`
+opens the operator from the board too.
+
+Over the columns, Needs you lists what `cl ticket needs` does, oldest ask
+first, each with what it actually asks: the question and its numbered
+options, the command a permission prompt is about, the plan or review
+summary waiting for approval, the files that conflict, a failed after-merge
+command. `Tab` steps into it (and back; `esc` too), where the keys below act
+on the selected row, so `A 1` answers a question there and `a` approves; `N`
+folds it away and back.
+
+`h`/`l` and `j`/`k` (or the arrows) move between cards, `Enter` opens a
+ticket in full (flags with what Claude asks, description, plan, sub-tickets,
+comments and activity, and its session's pane below), and `Enter` again
+opens its session; `esc` goes back. `n` makes a new ticket in the column the
+cursor is on (Backlog from Done; one made in Planning plans first), asking
+for its project (the selected ticket's to start with), title and an optional
+description. On a card or an open ticket:
+
+- `t` opens its session (attaches; `Ctrl-Q` comes back).
+- `a` approves (plan → Queued, Review → Testing, Testing → Done).
+- `A` answers what Claude asks: an option number or your own words, one per
+  question separated by `|` (`cl ticket answer`).
+- `m` then a stage letter moves it (`b p q r v t d`); `<` and `>` move it one
+  stage back or on.
+- `c` adds a note (it goes with the ticket's next prompt), `s` sends a line
+  into its session (on a ticket in Review or Testing, that sends it back).
+- `/` searches keys, titles and descriptions.
+
+Going to Done asks what the web board asks: to spin off unfinished
+sub-tickets, then, for a ticket with a branch or change of its own, whether
+to merge it, open a PR, just close it, or tell Claude what to do.
 
 ## Notes
 

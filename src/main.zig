@@ -34,6 +34,7 @@ const usage =
     \\  cl web password | start | stop
     \\                            set the web password, or run the server in the background
     \\  cl window [install]       the web UI in its own desktop window (install: app launcher entry)
+    \\  cl board                  the ticket board in the terminal (b in the chooser)
     \\  cl ticket | t <command>   the ticket board (cl ticket for the commands)
     \\  cl project <command>      projects tickets belong to (cl project for the commands)
     \\
@@ -82,6 +83,7 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, cmd, "watch")) return cmdWatch(ctx, cfg);
         if (std.mem.eql(u8, cmd, "closed")) return cmdClosed(ctx, cfg);
         if (std.mem.eql(u8, cmd, "operator")) return cmdOperator(ctx, cfg);
+        if (std.mem.eql(u8, cmd, "board")) return cmdBoard(ctx, cfg, argv[1..]);
         if (std.mem.eql(u8, cmd, "alert")) return cmdAlert(ctx, argv[1..]);
         if (std.mem.eql(u8, cmd, "web")) return web.main(ctx, cfg, argv[1..]);
         if (std.mem.eql(u8, cmd, "window")) return window.main(ctx, cfg, argv[1..]);
@@ -334,6 +336,12 @@ fn autostartWeb(ctx: Ctx, cfg: config.Config) void {
     web.start(ctx, cfg, false) catch {};
 }
 
+fn cmdBoard(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void {
+    if (argv.len != 0) fail("usage: cl board", .{});
+    autostartWeb(ctx, cfg);
+    try ui.runBoard(ctx, cfg);
+}
+
 fn cmdOperator(ctx: Ctx, cfg: config.Config) !void {
     autostartWeb(ctx, cfg);
     const tmux_name = operator.ensure(ctx, cfg) catch |err| switch (err) {
@@ -361,4 +369,5 @@ test {
     std.testing.refAllDecls(@import("after_merge.zig"));
     std.testing.refAllDecls(@import("park.zig"));
     std.testing.refAllDecls(@import("ticket_watch.zig"));
+    std.testing.refAllDecls(@import("board_view.zig"));
 }
