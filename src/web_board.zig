@@ -137,7 +137,7 @@ pub fn handle(ctx: Ctx, cfg: config.Config, req: *std.http.Server.Request, path:
             error.NotParked => .{ .conflict, "it isn't parked" },
             error.Finished => .{ .conflict, "it's done; there's nothing to park" },
             error.BadDuration => .{ .bad_request, "every and max are durations like 90s, 30m, 1h, 1d, 1w (every at least 1m)" },
-            error.SessionFailed => .{ .internal_server_error, "the session didn't start" },
+            error.SessionFailed => .{ .internal_server_error, std.fmt.allocPrint(a, "the session didn't start: {s}", .{dispatch.failureReason(err)}) catch "the session didn't start" },
             error.OperatorFailed => .{ .internal_server_error, "couldn't reach the operator; open Chat to check on it" },
             error.OpenSubtickets => .{ .conflict, "it has sub-tickets that aren't done yet; finish them or spin them off" },
             error.NoTestPlan => .{ .not_found, "no test plan" },

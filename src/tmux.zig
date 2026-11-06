@@ -143,21 +143,40 @@ fn fullArgv(ctx: Ctx, argv: []const []const u8) ![]const []const u8 {
     return full;
 }
 
-/// Run tmux with argv and return stdout (trailing newline trimmed). Caller owns result.
+/// What tmux said on stderr when a call from this thread last failed
+/// ("command too long", "can't find pane: %3", ...), for saying why.
+threadlocal var last_error_buf: [512]u8 = undefined;
+threadlocal var last_error_len: usize = 0;
+
+/// Why this thread's last failed tmux call failed: its stderr, trimmed.
+pub fn lastError() []const u8 {
+    return std.mem.trim(u8, last_error_buf[0..last_error_len], " \n");
+}
+
+fn setError(msg: []const u8) void {
+    const n = @min(msg.len, last_error_buf.len);
+    @memcpy(last_error_buf[0..n], msg[0..n]);
+    last_error_len = n;
+}
+
+/// Run tmux with argv and return stdout (trailing newline trimmed). Caller
+/// owns result. On failure, `lastError` says why.
 pub fn run(ctx: Ctx, argv: []const []const u8) ![]u8 {
     const full = try fullArgv(ctx, argv);
     defer ctx.gpa.free(full);
-    const res = try std.process.run(ctx.gpa, ctx.io, .{ .argv = full });
+    const res = std.process.run(ctx.gpa, ctx.io, .{ .argv = full }) catch |err| {
+        setError(@errorName(err));
+        return err;
+    };
     defer ctx.gpa.free(res.stderr);
-    switch (res.term) {
-        .exited => |code| if (code != 0) {
-            ctx.gpa.free(res.stdout);
-            return error.TmuxFailed;
-        },
-        else => {
-            ctx.gpa.free(res.stdout);
-            return error.TmuxFailed;
-        },
+    const ok = switch (res.term) {
+        .exited => |code| code == 0,
+        else => false,
+    };
+    if (!ok) {
+        ctx.gpa.free(res.stdout);
+        setError(if (std.mem.trim(u8, res.stderr, " \n").len > 0) res.stderr else "tmux failed");
+        return error.TmuxFailed;
     }
     const out = std.mem.trimEnd(u8, res.stdout, "\n");
     return ctx.gpa.realloc(res.stdout, out.len) catch res.stdout[0..out.len];
@@ -170,22 +189,72 @@ pub fn runQuiet(ctx: Ctx, argv: []const []const u8) !void {
 
 /// Replace the program in a session's first pane with `command`, in `dir`.
 /// The session, its name and its other windows stay; the session's
-/// environment (profile, config dir) carries over, plus `env`.
-pub fn respawn(ctx: Ctx, tmux_name: []const u8, dir: []const u8, env: []const []const u8, command: []const []const u8) !void {
+/// environment (profile, config dir) carries over, plus `env`. `arg`, when
+/// given, is passed to `command` as its last argument (Claude's first
+/// prompt); over `long_text` it goes through a file, not tmux's command
+/// line: tmux refuses a command over about 16 KB, and a ticket with a long
+/// plan is bigger.
+pub fn respawn(ctx: Ctx, tmux_name: []const u8, dir: []const u8, env: []const []const u8, command: []const []const u8, arg: ?[]const u8) !void {
     const target = try std.fmt.allocPrint(ctx.gpa, "={s}", .{tmux_name});
     defer ctx.gpa.free(target);
     const panes = try run(ctx, &.{ "list-panes", "-s", "-t", target, "-F", "#{pane_id}" });
     defer ctx.gpa.free(panes);
     const pane = std.mem.sliceTo(panes, '\n');
-    if (pane.len == 0) return error.TmuxFailed;
+    if (pane.len == 0) {
+        setError("the session has no pane");
+        return error.TmuxFailed;
+    }
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(ctx.gpa);
     try argv.appendSlice(ctx.gpa, &.{ "respawn-pane", "-k", "-t", pane, "-c", dir });
     for (env) |e| try argv.appendSlice(ctx.gpa, &.{ "-e", e });
     try argv.append(ctx.gpa, "--");
+    var file: ?[]u8 = null;
+    defer if (file) |f| ctx.gpa.free(f);
+    if (arg) |text| if (text.len > long_text) {
+        file = try textFile(ctx, text);
+        // The shell reads the file, removes it, and runs the command with
+        // its text as the last argument.
+        try argv.appendSlice(ctx.gpa, &.{ "sh", "-c", arg_wrapper, "sh", file.? });
+    };
     try argv.appendSlice(ctx.gpa, command);
-    try runQuiet(ctx, argv.items);
+    if (arg) |text| if (file == null) try argv.append(ctx.gpa, text);
+    runQuiet(ctx, argv.items) catch |err| {
+        if (file) |f| std.Io.Dir.cwd().deleteFile(ctx.io, f) catch {};
+        return err;
+    };
     try runQuiet(ctx, &.{ "clear-history", "-t", pane });
+}
+
+/// `sh -c` script for `respawn`: $1 is the file, the rest the command.
+/// $(...) drops the text's trailing newlines, which a prompt doesn't need.
+const arg_wrapper =
+    \\f=$1; shift; a=$(cat -- "$f") || exit 1; rm -f -- "$f"; exec "$@" "$a"
+;
+
+/// Write `text` to a new file of its own under ~/.local/state/cl/text and
+/// return its path (caller frees it, and deletes the file once it's read).
+/// tmux reads text from there that's too long for its command line.
+fn textFile(ctx: Ctx, text: []const u8) ![]u8 {
+    const dir = try std.fmt.allocPrint(ctx.gpa, "{s}/.local/state/cl/text", .{ctx.home});
+    defer ctx.gpa.free(dir);
+    try std.Io.Dir.cwd().createDirPath(ctx.io, dir);
+    var raw: [8]u8 = undefined;
+    ctx.io.random(&raw);
+    const path = try std.fmt.allocPrint(ctx.gpa, "{s}/{x}.txt", .{ dir, raw });
+    errdefer ctx.gpa.free(path);
+    try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = path, .data = text });
+    return path;
+}
+
+/// Load `text` into tmux paste buffer `buf`: with `set-buffer`, or over
+/// `long_text` from a file (`set-buffer` fails on anything over about 16 KB).
+fn loadBuffer(ctx: Ctx, buf: []const u8, text: []const u8) !void {
+    if (text.len <= long_text) return runQuiet(ctx, &.{ "set-buffer", "-b", buf, "--", text });
+    const path = try textFile(ctx, text);
+    defer ctx.gpa.free(path);
+    defer std.Io.Dir.cwd().deleteFile(ctx.io, path) catch {};
+    try runQuiet(ctx, &.{ "load-buffer", "-b", buf, path });
 }
 
 pub fn hasSession(ctx: Ctx, tmux_name: []const u8) bool {
@@ -389,7 +458,10 @@ pub fn kill(ctx: Ctx, tmux_name: []const u8) !void {
 /// Raise the session's alert for the human, replacing the one it had: the
 /// chooser and the web board's Needs You show it until someone opens the
 /// session or dismisses it. `ticket` is the ticket it is about ("" for none).
-pub fn setAlert(ctx: Ctx, tmux_name: []const u8, text: []const u8, ticket: []const u8) !void {
+/// An alert is a short notice: text past `long_text` bytes is cut, so the
+/// command stays under tmux's limit.
+pub fn setAlert(ctx: Ctx, tmux_name: []const u8, text_in: []const u8, ticket: []const u8) !void {
+    const text = cutUtf8(text_in, long_text);
     var at_buf: [24]u8 = undefined;
     const at = try std.fmt.bufPrint(&at_buf, "{d}", .{ctx.nowSeconds()});
     try runQuiet(ctx, &.{
@@ -397,6 +469,15 @@ pub fn setAlert(ctx: Ctx, tmux_name: []const u8, text: []const u8, ticket: []con
         "set-option", "-t", tmux_name, "@cl_alert_at", at, ";",
         "set-option", "-t", tmux_name, "@cl_alert_ticket", ticket,
     });
+}
+
+/// The longest start of `text` that fits in `max` bytes without splitting a
+/// UTF-8 character.
+fn cutUtf8(text: []const u8, max: usize) []const u8 {
+    if (text.len <= max) return text;
+    var n = max;
+    while (n > 0 and text[n] & 0xC0 == 0x80) n -= 1;
+    return text[0..n];
 }
 
 /// Clear the session's alert (nothing happens if it has none).
@@ -468,6 +549,8 @@ pub fn capturePlain(ctx: Ctx, tmux_name: []const u8) ![]u8 {
 
 /// Type `text` literally, then press Enter (the pause lets bracketed paste settle).
 pub fn sendLine(ctx: Ctx, tmux_name: []const u8, text: []const u8) !void {
+    // Too long to type in one tmux command: pasted instead.
+    if (text.len > long_text) return pasteText(ctx, tmux_name, text);
     try runQuiet(ctx, &.{ "send-keys", "-l", "-t", tmux_name, "--", text });
     ctx.sleepMs(100);
     try runQuiet(ctx, &.{ "send-keys", "-t", tmux_name, "Enter" });
@@ -483,15 +566,32 @@ pub fn pasteFile(ctx: Ctx, tmux_name: []const u8, path: []const u8) !void {
     try runQuiet(ctx, &.{ "send-keys", "-t", tmux_name, "Enter" });
 }
 
+/// Text longer than this goes to tmux through a file, not its command line
+/// (which takes about 16 KB in all, the rest of the command included).
+const long_text = 10 * 1024;
+
+/// Type `text` into the session literally, without Enter: with send-keys
+/// when it is short, else pasted (bracketed) through a file, which tmux
+/// takes at any length. For text the human wrote, like an answer to Claude's question.
+pub fn typeText(ctx: Ctx, tmux_name: []const u8, text: []const u8) !void {
+    if (text.len > long_text) return paste(ctx, tmux_name, text);
+    try runQuiet(ctx, &.{ "send-keys", "-l", "-t", tmux_name, "--", text });
+}
+
 /// Paste `text` into the session as one bracketed paste, then press Enter.
 pub fn pasteText(ctx: Ctx, tmux_name: []const u8, text: []const u8) !void {
+    try paste(ctx, tmux_name, text);
+    ctx.sleepMs(300);
+    try runQuiet(ctx, &.{ "send-keys", "-t", tmux_name, "Enter" });
+}
+
+/// Paste `text` into the session as one bracketed paste, loaded from a file.
+fn paste(ctx: Ctx, tmux_name: []const u8, text: []const u8) !void {
     // A buffer per session, so two pastes into different sessions can't mix.
     var buf_name: [128]u8 = undefined;
     const buf = std.fmt.bufPrint(&buf_name, "cl-paste-{s}", .{tmux_name}) catch "cl-paste";
-    try runQuiet(ctx, &.{ "set-buffer", "-b", buf, "--", text });
+    try loadBuffer(ctx, buf, text);
     try runQuiet(ctx, &.{ "paste-buffer", "-p", "-d", "-b", buf, "-t", tmux_name });
-    ctx.sleepMs(300);
-    try runQuiet(ctx, &.{ "send-keys", "-t", tmux_name, "Enter" });
 }
 
 /// Attach the current terminal to a session; returns when the client detaches.
@@ -619,4 +719,96 @@ test "configure keeps CL_TMUX_SOCKET from the environment, and passes on tmux.so
     try configure(&ctx, .{ .profiles = &.{}, .default = "", .operator = "", .tmux = .{ .socket = "/run/cfg.sock" } });
     try std.testing.expectEqualStrings("/run/cfg.sock", ctx.tmux_socket.?);
     try std.testing.expectEqualStrings("/run/cfg.sock", env2.get(socket_env).?);
+}
+
+test "text over tmux's 16 KB command limit reaches the pane, and tmux's refusal says why" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    const probe = std.process.run(a, io, .{ .argv = &.{ "tmux", "-V" } }) catch return error.SkipZigTest;
+    a.free(probe.stdout);
+    a.free(probe.stderr);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = dir_buf[0..try tmp.dir.realPath(io, &dir_buf)];
+    // In /tmp for the same reason as above; stopped with an explicit -S.
+    var rnd: [8]u8 = undefined;
+    io.random(&rnd);
+    const sock = try std.fmt.allocPrint(a, "/tmp/cl-test-tmux-{x}", .{rnd});
+    defer a.free(sock);
+    defer std.Io.Dir.deleteFileAbsolute(io, sock) catch {};
+    defer if (std.process.run(a, io, .{ .argv = &.{ "tmux", "-S", sock, "kill-server" } })) |r| {
+        a.free(r.stdout);
+        a.free(r.stderr);
+    } else |_| {};
+
+    var arena_state = std.heap.ArenaAllocator.init(a);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var ctx = testCtx(sock, false);
+    ctx.perm = arena;
+    ctx.home = dir; // The text files go under it.
+
+    // A 40 KB prompt in lines, like a ticket with a long plan.
+    var text: std.ArrayList(u8) = .empty;
+    for (0..400) |i| try text.print(arena, "line {d:0>4} of the plan, padded out to about a hundred bytes {s}\n", .{ i, "." ** 30 });
+    try std.testing.expect(text.items.len > 32 * 1024);
+
+    const name = try newSession(ctx, .{ .name = "long-text", .dir = dir, .profile = "", .config_dir = null, .command = &.{ "sleep", "60" } });
+
+    // tmux refuses it on its command line, and says so.
+    try std.testing.expectError(error.TmuxFailed, run(ctx, &.{ "display-message", "-p", text.items }));
+    try std.testing.expect(std.mem.indexOf(u8, lastError(), "too long") != null);
+
+    // respawn hands it to the command as its last argument, whole.
+    try respawn(ctx, name, dir, &.{"CL_TICKET=QA-6"}, &.{ "sh", "-c", "printf %s \"$1\" > got.txt; printf %s \"$CL_TICKET\" > env.txt; sleep 60", "sh" }, text.items);
+    const want = std.mem.trimEnd(u8, text.items, "\n");
+    var got: []u8 = &.{};
+    for (0..100) |_| {
+        got = tmp.dir.readFileAlloc(io, "got.txt", arena, .unlimited) catch &.{};
+        if (got.len == want.len) break;
+        io.sleep(.fromMilliseconds(50), .awake) catch {};
+    }
+    try std.testing.expectEqualStrings(want, got);
+    try std.testing.expectEqualStrings("QA-6", try tmp.dir.readFileAlloc(io, "env.txt", arena, .unlimited));
+    // A short one goes straight on the command line: no file.
+    try respawn(ctx, name, dir, &.{}, &.{ "sh", "-c", "printf %s \"$1\" > short.txt; sleep 60", "sh" }, "a short prompt");
+    var short: []u8 = &.{};
+    for (0..100) |_| {
+        short = tmp.dir.readFileAlloc(io, "short.txt", arena, .unlimited) catch &.{};
+        if (short.len > 0) break;
+        io.sleep(.fromMilliseconds(50), .awake) catch {};
+    }
+    try std.testing.expectEqualStrings("a short prompt", short);
+    // The long one's file is gone once read, and the short one made none.
+    var text_dir = try tmp.dir.openDir(io, ".local/state/cl/text", .{ .iterate = true });
+    defer text_dir.close(io);
+    var it = text_dir.iterate();
+    try std.testing.expect(try it.next(io) == null);
+
+    // Typed into a pane (an answer from the board), it arrives whole.
+    try respawn(ctx, name, dir, &.{}, &.{ "sh", "-c", "stty -icanon; cat > typed.txt" }, null);
+    io.sleep(.fromMilliseconds(300), .awake) catch {};
+    try typeText(ctx, name, text.items);
+    var typed: []u8 = &.{};
+    for (0..100) |_| {
+        typed = tmp.dir.readFileAlloc(io, "typed.txt", arena, .unlimited) catch &.{};
+        if (typed.len >= text.items.len) break;
+        io.sleep(.fromMilliseconds(50), .awake) catch {};
+    }
+    try std.testing.expectEqualStrings(text.items, typed);
+
+    // An alert is cut to fit, on a character boundary.
+    try setAlert(ctx, name, "é" ** 30000, "QA-6");
+    const alert = try run(ctx, &.{ "show-options", "-v", "-t", name, "@cl_alert" });
+    defer a.free(alert);
+    try std.testing.expect(alert.len <= long_text and alert.len > long_text - 2);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(alert));
+
+    // A paste buffer loads it whole too (pasteText's first step).
+    try loadBuffer(ctx, "cl-test", text.items);
+    const shown = try run(ctx, &.{ "show-buffer", "-b", "cl-test" });
+    defer a.free(shown);
+    try std.testing.expectEqualStrings(want, shown);
 }

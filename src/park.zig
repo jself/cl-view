@@ -295,12 +295,12 @@ fn wake(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: boa
     // dispatcher resumes it there once the project resumes.
     if (board.projectPaused(db, t.project) catch false) {
         holdForPause(ctx, db, a, t, std.fmt.allocPrint(a, "Parked condition met: {s}. Continue.", .{p.reason}) catch return) catch |e| {
-            board.setFlagId(ctx, db, t.id, "start-failed", "auto", @errorName(e)) catch {};
+            board.setFlagId(ctx, db, t.id, "start-failed", "auto", dispatch.failureReason(e)) catch {};
         };
         return;
     }
     _ = resumeWith(ctx, cfg, db, a, t.key, std.fmt.allocPrint(a, "Parked condition met: {s}. Continue.", .{p.reason}) catch return) catch |e| {
-        board.setFlagId(ctx, db, t.id, "start-failed", "auto", @errorName(e)) catch {};
+        board.setFlagId(ctx, db, t.id, "start-failed", "auto", dispatch.failureReason(e)) catch {};
     };
 }
 

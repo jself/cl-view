@@ -272,7 +272,7 @@ fn relocate(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, ke
         error.Busy => fail("{s}: Claude is working in its session or waiting on you; move it once it is idle", .{t.key}),
         error.NoChange => fail("{s} is under way, but its work has no jj change of its own to move with it", .{t.key}),
         error.WorktreeFailed => fail("jj: {s}", .{worktree.lastError()}),
-        error.SessionFailed => fail("cannot start the session", .{}),
+        error.SessionFailed => fail("cannot start the session: {s}", .{dispatch.failureReason(e)}),
         else => boardFail(db, e, "ticket"),
     };
     const after = board.getTicket(db, a, t.key) catch |e| boardFail(db, e, "ticket");
@@ -696,7 +696,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
             error.AlreadyStarted => fail("{s} already has a session: {s}", .{ t.key, t.tmux }),
             error.TargetBusy => fail("{s}'s session is busy or has another ticket in progress; it waits in Queued (--now types it in anyway)", .{t.key}),
             error.WorktreeFailed => fail("cannot make the worktree: {s}", .{worktree.lastError()}),
-            error.SessionFailed => fail("cannot start the session", .{}),
+            error.SessionFailed => fail("cannot start the session: {s}", .{dispatch.failureReason(e)}),
             else => boardFail(db, e, "ticket"),
         };
         const after = board.getTicket(db, a, t.key) catch |e| boardFail(db, e, "ticket");
@@ -755,7 +755,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         const r = park.unpark(ctx, cfg, db, a, pos[0], !args.has("--no-resume")) catch |e| switch (e) {
             error.NotParked => fail("{s} isn't parked", .{pos[0]}),
             error.WorktreeFailed => fail("unparked, but its worktree couldn't be made: {s}", .{worktree.lastError()}),
-            error.SessionFailed => fail("unparked, but its session didn't start", .{}),
+            error.SessionFailed => fail("unparked, but its session didn't start: {s}", .{dispatch.failureReason(e)}),
             else => boardFail(db, e, "ticket"),
         };
         const t = board.getTicket(db, a, pos[0]) catch |e| boardFail(db, e, "ticket");

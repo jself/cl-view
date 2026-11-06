@@ -35,6 +35,32 @@ pub const Error = error{
     Busy,
 };
 
+/// Why the last start on this thread failed with SessionFailed (tmux's own
+/// words, or what cl was waiting for), for the start-failed flag and the CLI.
+threadlocal var why_buf: [512]u8 = undefined;
+threadlocal var why_len: usize = 0;
+
+/// Record why the session didn't start (from `err`, what tmux or launch
+/// failed with) and return SessionFailed.
+fn sessionFailed(err: anyerror, dir: []const u8) error{SessionFailed} {
+    const text = switch (err) {
+        error.TmuxFailed => std.fmt.bufPrint(&why_buf, "tmux: {s}", .{tmux.lastError()}),
+        error.NoSuchDir => std.fmt.bufPrint(&why_buf, "no such directory: {s}", .{dir}),
+        error.PromptTimeout => std.fmt.bufPrint(&why_buf, "Claude's prompt didn't show within 60 seconds", .{}),
+        else => std.fmt.bufPrint(&why_buf, "{s}", .{@errorName(err)}),
+    } catch &why_buf;
+    why_len = text.len;
+    return error.SessionFailed;
+}
+
+/// Why a start failed with `err`, in a few words: what tmux said, for a
+/// session that didn't start; jj's or git's error, for a worktree.
+pub fn failureReason(err: anyerror) []const u8 {
+    if (err == error.SessionFailed and why_len > 0) return why_buf[0..why_len];
+    if (err == error.WorktreeFailed and worktree.lastError().len > 0) return worktree.lastError();
+    return @errorName(err);
+}
+
 /// What the ticket's session is told first. The key is spelled out, so the
 /// instructions work in sessions cl didn't start (no CL_TICKET). `gutter_rev`:
 /// gutter is installed, so Claude writes a review guide for it and checks it
@@ -220,8 +246,7 @@ fn freshConversation(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allo
     var cmd: std.ArrayList([]const u8) = .empty;
     try cmd.append(a, "claude");
     try cmd.appendSlice(a, try claudeArgs(ctx, cfg, a, t, sid, resume_id != null));
-    try cmd.append(a, text);
-    tmux.respawn(ctx, s.tmux_name, s.dir, try ticketEnv(a, t), cmd.items) catch return error.SessionFailed;
+    tmux.respawn(ctx, s.tmux_name, s.dir, try ticketEnv(a, t), cmd.items, text) catch |e| return sessionFailed(e, s.dir);
     history.record(ctx, .{ .tmux = s.tmux_name, .name = s.name, .dir = s.dir, .profile = s.profile, .session_id = sid, .created = s.created }) catch {};
     // Finished tickets that ran here keep their conversation id, not the
     // session, so the board doesn't show this ticket's status on them.
@@ -244,7 +269,7 @@ fn newSession(ctx: Ctx, cfg: config.Config, a: std.mem.Allocator, t: board.Ticke
         .extra = extra,
         .env = try ticketEnv(a, t),
         .accept_trust = cfg.board.trust_projects,
-    }) catch error.SessionFailed;
+    }) catch |e| sessionFailed(e, dir);
 }
 
 /// The ticket's own conversation to pick back up, when Claude still has its
@@ -551,7 +576,7 @@ fn relocateMode(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator
             // gets a new one, and this one goes on in the worktree.
             if (live) if (view.statuses.get(t.tmux)) |info| if (std.mem.eql(u8, info.session_id, t.session_id)) {
                 const s = view.find(t.tmux).?;
-                tmux.respawn(ctx, s.tmux_name, s.dir, &.{}, &.{"claude"}) catch return error.SessionFailed;
+                tmux.respawn(ctx, s.tmux_name, s.dir, &.{}, &.{"claude"}, null) catch |e| return sessionFailed(e, s.dir);
             };
             note = try std.fmt.allocPrint(a, "This ticket moved from the project's main folder ({s}) to a worktree of its own, your current directory now: work, build and run things there from now on. Its jj change {s} came along and is checked out there; the main folder has moved on to other work.", .{ p.dir, short });
         },
@@ -681,12 +706,12 @@ fn startIn(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: 
         },
         .queue => if (open_here) {
             // Its own conversation is still open there: carry on in it.
-            try tmux.sendLine(ctx, target, text);
+            tmux.sendLine(ctx, target, text) catch |e| return sessionFailed(e, p.dir);
             try board.setSession(ctx, db, t.id, target, resume_id.?, "", "");
         } else if (live and resume_id == null and (in_parent or !free)) {
             // A sub-ticket goes on in its parent's conversation, and a forced
             // start into a busy session is typed (Claude queues it).
-            try tmux.sendLine(ctx, target, text);
+            tmux.sendLine(ctx, target, text) catch |e| return sessionFailed(e, p.dir);
             try board.setSession(ctx, db, t.id, target, "", "", "");
         } else if (live) {
             // The session is free: this ticket's conversation there, new or
@@ -857,7 +882,7 @@ pub fn tick(ctx: Ctx, cfg: config.Config, db: board.Db) !usize {
         startPlanning(ctx, cfg, db, a, t) catch |err| switch (err) {
             error.AlreadyStarted => continue,
             else => {
-                board.setFlagId(ctx, db, t.id, "start-failed", "auto", @errorName(err)) catch {};
+                board.setFlagId(ctx, db, t.id, "start-failed", "auto", failureReason(err)) catch {};
                 continue;
             },
         };
@@ -876,7 +901,7 @@ pub fn tick(ctx: Ctx, cfg: config.Config, db: board.Db) !usize {
         startIn(ctx, cfg, db, a, t, false, view, false) catch |err| switch (err) {
             error.TargetBusy, error.AlreadyStarted => continue,
             else => {
-                board.setFlagId(ctx, db, t.id, "start-failed", "auto", @errorName(err)) catch {};
+                board.setFlagId(ctx, db, t.id, "start-failed", "auto", failureReason(err)) catch {};
                 continue;
             },
         };
@@ -1567,4 +1592,12 @@ test "a finishing ticket whose session ends or stops short is flagged; trying ag
     var after = false;
     for ((try board.getTicket(db, a, k)).flags) |f| after = after or std.mem.eql(u8, f.kind, board.flag_after_merge);
     try std.testing.expect(after);
+}
+
+test "a start that fails says why" {
+    try std.testing.expectEqual(error.SessionFailed, sessionFailed(error.NoSuchDir, "/gone/qa"));
+    try std.testing.expectEqualStrings("no such directory: /gone/qa", failureReason(error.SessionFailed));
+    try std.testing.expectEqual(error.SessionFailed, sessionFailed(error.PromptTimeout, "/x"));
+    try std.testing.expectEqualStrings("Claude's prompt didn't show within 60 seconds", failureReason(error.SessionFailed));
+    try std.testing.expectEqualStrings("TargetBusy", failureReason(error.TargetBusy));
 }

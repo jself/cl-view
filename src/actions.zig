@@ -709,7 +709,7 @@ pub fn answer(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, 
 
     if (!question) {
         if (answers.len != 1 or !isNumber(answers[0])) return error.BadAnswer;
-        try tmux.runQuiet(ctx, &.{ "send-keys", "-l", "-t", s, answers[0] });
+        try tmux.typeText(ctx, s, answers[0]);
     } else {
         const Detail = struct { questions: ?[]const Question = null };
         const d = std.json.parseFromSliceLeaky(Detail, a, f.detail, .{ .ignore_unknown_fields = true }) catch Detail{};
@@ -735,13 +735,13 @@ pub fn answer(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, 
             answers = try a.dupe([]const u8, &.{joined});
         }
         for (try questionKeys(a, qs, answers)) |p| switch (p) {
-            .text => |x| try tmux.runQuiet(ctx, &.{ "send-keys", "-l", "-t", s, x }),
+            .text => |x| try tmux.typeText(ctx, s, x),
             .key => |x| try tmux.runQuiet(ctx, &.{ "send-keys", "-t", s, x }),
             .pick => |x| {
                 const pane = tmux.capturePlainLines(ctx, s, 60) catch "";
                 defer if (pane.len > 0) ctx.gpa.free(pane);
                 const preview = signals.previewMenu(pane);
-                try tmux.runQuiet(ctx, &.{ "send-keys", "-l", "-t", s, x });
+                try tmux.typeText(ctx, s, x);
                 if (preview) {
                     ctx.sleepMs(200);
                     try tmux.runQuiet(ctx, &.{ "send-keys", "-t", s, "Enter" });
