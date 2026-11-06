@@ -287,6 +287,11 @@ cl window install
   and the rest go to the terminal. The window's own keys use Ctrl+Shift:
   R reloads, + / - / 0 zoom the page (terminal included), I opens the web
   inspector. On the board, Ctrl+= / Ctrl+- resize it too (see `web.font_size`).
+- The clipboard is the desktop's. In a terminal, a copy in tmux (a mouse
+  selection) or by a program in it (Claude Code, via OSC 52) lands there;
+  so does Ctrl+Shift+C on a Shift+drag selection. Ctrl+Shift+V pastes. A
+  browser tab does the same, though it may refuse a copy that doesn't
+  follow a click or key.
 - Sign in once; the cookie and page storage are kept in
   `~/.local/share/cl/window`. Its log is `~/.local/state/cl/window.log`.
 - Links to other sites, "open in the browser" links (gutter) and links in a

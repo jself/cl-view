@@ -84,6 +84,40 @@
   term.loadAddon(new WebLinksAddon.WebLinksAddon((e, uri) => openLink(uri)));
   term.open(document.getElementById("term"));
 
+  // Copies made in the session reach the system clipboard: tmux (copy mode,
+  // a mouse selection) and programs inside it (Claude Code) send them as OSC
+  // 52, which xterm.js drops on its own. Requests to read the clipboard
+  // ("?") are ignored. `cl window` lets the page write without a click
+  // (javascript-can-access-clipboard); a browser may refuse when there was
+  // none recently, or the tab isn't focused.
+  term.parser.registerOscHandler(52, (data) => {
+    const b64 = data.slice(data.indexOf(";") + 1);
+    if (!b64 || b64 === "?") return true;
+    let text;
+    try {
+      text = new TextDecoder().decode(Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)));
+    } catch { return true; }
+    copyText(text);
+    return true;
+  });
+  // Ctrl+Shift+C copies xterm.js's own selection (a Shift+drag, which tmux's
+  // mouse mode leaves to the page), as in desktop terminals. Ctrl+Shift+V
+  // pastes already: xterm.js leaves it to the browser's paste.
+  term.attachCustomKeyEventHandler((e) => {
+    if (e.type !== "keydown" || !e.ctrlKey || !e.shiftKey || e.altKey || e.metaKey || e.code !== "KeyC" || !term.hasSelection()) return true;
+    e.preventDefault();
+    copyText(term.getSelection());
+    return false;
+  });
+  function copyText(text) {
+    // navigator.clipboard is only there in a secure context (https or
+    // localhost); over plain http (tailscale), a copy command fills it.
+    if (navigator.clipboard) { navigator.clipboard.writeText(text).catch(() => {}); return; }
+    const fill = (e) => { e.clipboardData.setData("text/plain", text); e.preventDefault(); };
+    document.addEventListener("copy", fill, { once: true, capture: true });
+    try { document.execCommand("copy"); } finally { document.removeEventListener("copy", fill, { capture: true }); }
+  }
+
   // A swipe on a phone only scrolls xterm.js's own scrollback, and there is
   // none: replay it as wheel events, which xterm.js hands to tmux (mouse on)
   // or turns into arrow keys for the chooser.
