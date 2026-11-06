@@ -65,6 +65,8 @@ pub fn prompt(a: std.mem.Allocator, t: board.Ticket, notes: []const board.Commen
         \\     (a heredoc, not a file): steps the board walks me through one at a time, with buttons
         \\     to run a command (`run:`, from this directory) and open a page (`open:`), and checks
         \\     ("- [ ] what I should see"). `cl ticket testplan --format` shows the format.
+        \\  If its work shouldn't be merged (or made a PR) as it is, say so first with
+        \\  `cl ticket custom-close "<what to do with it instead>"`; the board then offers only that.
         \\  Don't run it while you still need anything from me. When I send feedback, finish the same way.
         \\
     , .{

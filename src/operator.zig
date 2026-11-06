@@ -139,7 +139,12 @@ const tickets_skill =
     \\  cl ticket approve <key>            plan -> running, review -> testing, testing -> done
     \\  Going to done (move or approve) closes the session. A worktree ticket takes
     \\  --merge (Claude merges its branch first) or --pr (opens a PR first); ask the
-    \\  human which unless they said. --close, the default, just closes.
+    \\  human which unless they said. --close, the default, just closes. --tell "<text>"
+    \\  has Claude do whatever the text says first. A ticket whose Claude said not to
+    \\  merge it as is shows "custom close: ..." in `show`: --merge and --pr are refused
+    \\  for it, so do what that says (--tell) or ask the human. The ticket's Claude (or
+    \\  you, when the human says so) sets it with `cl ticket custom-close <key> "<what to
+    \\  do instead>"`; --clear undoes it.
     \\  cl ticket answer <key> <answer>... answer its question (an option number or words)
     \\
     \\Approving, answering, sending comments into a session, moving to done and `rm` act for
@@ -189,6 +194,20 @@ pub fn sendInBackground(ctx: Ctx, cfg: config.Config, text: []const u8) !bool {
     const t = try std.Thread.spawn(.{}, deliver, .{ ctx, tmux_name, owned, !was_running });
     t.detach();
     return !was_running;
+}
+
+/// `sendInBackground`, but returning once it is typed: for a process that
+/// exits right after (the CLI, the after-merge runner).
+pub fn send(ctx: Ctx, cfg: config.Config, text: []const u8) !void {
+    var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);
+    defer arena_state.deinit();
+    const was_running = (try tmux.operator(ctx, arena_state.allocator())) != null;
+    const tmux_name = try ensure(ctx, cfg);
+    if (!was_running) {
+        try claude.waitForPrompt(ctx, tmux_name, false);
+        ctx.sleepMs(300);
+    }
+    try claude.submit(ctx, tmux_name, text, true);
 }
 
 fn deliver(ctx: Ctx, tmux_name: []const u8, text: []const u8, fresh: bool) void {

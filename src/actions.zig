@@ -9,6 +9,8 @@ const worktree = @import("worktree.zig");
 const config = @import("config.zig");
 const signals = @import("signals.zig");
 const claude = @import("claude.zig");
+const after_merge = @import("after_merge.zig");
+const operator = @import("operator.zig");
 
 pub const Error = error{
     /// The ticket has no live session to act on.
@@ -29,6 +31,9 @@ pub const Error = error{
     Conflicts,
     /// jj couldn't merge it (`worktree.lastError()` says why).
     MergeFailed,
+    /// Merge or PR on a ticket Claude asked to close its own way
+    /// (`Ticket.custom_close`).
+    CustomClose,
 };
 
 fn liveSession(ctx: Ctx, t: board.Ticket) ?[]const u8 {
@@ -71,7 +76,7 @@ fn readyForDone(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, s
 }
 
 /// What going to Done does with a ticket's branch.
-pub const Finish = enum {
+pub const Finish = union(enum) {
     /// Nothing: move it to Done and close the session.
     close,
     /// Merge the branch into the main branch first: cl does it for a jj
@@ -79,9 +84,22 @@ pub const Finish = enum {
     merge,
     /// Claude pushes the branch and opens a PR first.
     pr,
+    /// Claude does what the human typed first, whatever that is (any ticket
+    /// with a session, branch or not).
+    tell: []const u8,
 
+    /// close, merge or pr by name; `tell` needs its text (see `told`).
     pub fn parse(s: []const u8) ?Finish {
-        return std.meta.stringToEnum(Finish, s);
+        if (std.mem.eql(u8, s, "close")) return .close;
+        if (std.mem.eql(u8, s, "merge")) return .merge;
+        if (std.mem.eql(u8, s, "pr")) return .pr;
+        return null;
+    }
+
+    /// `tell` with the human's words; null when there are none.
+    pub fn told(text: []const u8) ?Finish {
+        const t = std.mem.trim(u8, text, " \t\r\n");
+        return if (t.len == 0) null else .{ .tell = t };
     }
 };
 
@@ -102,6 +120,11 @@ pub fn move(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, stage
 fn startFinish(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, finish: Finish) !bool {
     if (finish == .close) return false;
     const t = try board.getTicket(db, a, key);
+    if (t.custom_close.len > 0 and (finish == .merge or finish == .pr)) return error.CustomClose;
+    if (finish == .tell) {
+        const s = liveSession(ctx, t) orelse return error.NoSession;
+        return try tell(ctx, db, a, t, s, "tell", try std.fmt.allocPrint(a, "This ticket is approved. Before it is done: {s}\nIf anything is unclear, ask me. Then run `cl ticket done {s} --close`.", .{ finish.tell, t.key }));
+    }
     const dir = (try board.getProject(db, a, t.project)).dir;
     if (finish == .merge and t.change.len > 0) return mergeBack(ctx, db, a, t, dir);
     if (finish == .merge and t.mode == .queue and t.branch.len == 0 and t.base.len > 0) {
@@ -110,9 +133,10 @@ fn startFinish(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, fi
     if (t.branch.len == 0) return false;
     const s = liveSession(ctx, t) orelse return error.NoSession;
     const main = worktree.mainBranch(ctx, a, dir);
+    const restart = try afterMergeHint(db, a, t.project, "Once it is merged:");
     const text = switch (finish) {
-        .close => unreachable,
-        .merge => try std.fmt.allocPrint(a, "This ticket is approved. Finish it by merging its branch {s} into {s}: commit anything left here first, then merge it in the project's checkout at {s} (it may have uncommitted work of its own; leave that alone). If it conflicts in a way you can't settle with confidence, or anything is unclear, ask me. Once it is merged, rebuild and restart whatever runs from that checkout (dev servers, an installed build; the project's CLAUDE.md may say how) so it serves the merged code, then run `cl ticket done {s} --close`.", .{ t.branch, main, dir, t.key }),
+        .close, .tell => unreachable,
+        .merge => try std.fmt.allocPrint(a, "This ticket is approved. Finish it by merging its branch {s} into {s}: commit anything left here first, then merge it in the project's checkout at {s} (it may have uncommitted work of its own; leave that alone). If it conflicts in a way you can't settle with confidence, or anything is unclear, ask me. {s} `cl ticket done {s} --close`.", .{ t.branch, main, dir, restart, t.key }),
         .pr => if (t.change.len > 0)
             try std.fmt.allocPrint(a, "This ticket is approved. Finish it with a pull request: push its jj bookmark {s} (`jj git push -b {s}`) and open a PR against {s} (gh pr create --head {s}) with a title and description of the change. If anything is unclear, ask me. Then run `cl ticket done {s} --close --pr-url <the PR's URL>`.", .{ t.branch, t.branch, main, t.branch, t.key })
         else
@@ -147,25 +171,80 @@ fn adoptStray(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, dir
 
 /// Merge the ticket's jj change back into trunk (see `worktree.mergeChange`).
 /// True when the ticket stays put, finishing, while Claude settles
-/// conflicts or restarts what runs from the checkout; false when it can go
-/// to Done now.
+/// conflicts or does the after-merge steps; false when it can go to Done now.
 fn mergeBack(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, dir: []const u8) !bool {
     const trunk = worktree.trunkBookmark(ctx, a, dir) orelse {
         try board.logEvent(ctx, db, t.id, "merge failed", "no trunk bookmark");
         return error.MergeFailed;
     };
-    const before = worktree.workingCommit(ctx, a, dir) catch "";
-    if (!try merge(ctx, db, a, t, dir, trunk)) {
-        const s = liveSession(ctx, t) orelse return error.Conflicts;
-        const list = conflictFlag(try board.getTicket(db, a, t.key)) orelse "";
-        return try tell(ctx, db, a, t, s, try std.fmt.allocPrint(a, "This ticket is approved, but its change conflicts with {s}: cl rebased it onto {s}, and jj recorded the conflicts in the change, in:\n{s}\nResolve them there: edit the conflict markers out, keeping what both sides meant (`jj resolve --list` shows what's left). If one can't be settled with confidence, ask me. Then rebuild and restart whatever runs from the project's checkout (the project's CLAUDE.md may say how), and run `cl ticket done {s} --close`; cl merges it then.", .{ trunk, trunk, list, t.key }));
+    switch (try merge(ctx, db, a, t, dir, trunk)) {
+        .empty => return false,
+        .merged => return claudeAfterMerge(ctx, db, a, t, trunk),
+        .conflicts => {
+            const s = liveSession(ctx, t) orelse return error.Conflicts;
+            const list = conflictFlag(try board.getTicket(db, a, t.key)) orelse "";
+            const p = try board.getProject(db, a, t.project);
+            const after: []const u8 = if (p.after_merge.len > 0) " (and runs the project's after-merge command; don't rebuild or restart anything yourself)" else if (claudeSteps(p) != null) " (and tells you what to do after the merge)" else "";
+            return try tell(ctx, db, a, t, s, "merge", try std.fmt.allocPrint(a, "This ticket is approved, but its change conflicts with {s}: cl rebased it onto {s}, and jj recorded the conflicts in the change, in:\n{s}\nResolve them there: edit the conflict markers out, keeping what both sides meant (`jj resolve --list` shows what's left). If one can't be settled with confidence, ask me. Then run `cl ticket done {s} --close`; cl merges it then{s}.", .{ trunk, trunk, list, t.key, after }));
+        },
     }
-    // The checkout's files changed (trunk had moved on, or it caught up with
-    // the merge): what runs from it needs restarting, by Claude while it is there.
-    if (before.len > 0 and worktree.filesDiffer(ctx, a, dir, before)) {
-        if (liveSession(ctx, t)) |s| return try tell(ctx, db, a, t, s, try std.fmt.allocPrint(a, "This ticket is approved and cl merged it into {s}, so the project's checkout at {s} has new code. Rebuild and restart whatever runs from that checkout (dev servers, an installed build; the project's CLAUDE.md may say how), then run `cl ticket done {s} --close`.", .{ trunk, dir, t.key }));
-    }
+}
+
+/// What Claude is asked to do after a merge: the project's own steps, or
+/// rebuilding and restarting what runs from its checkout. null when that is
+/// turned off ("none").
+pub fn claudeSteps(p: board.Project) ?[]const u8 {
+    if (std.mem.eql(u8, p.after_merge_claude, "none")) return null;
+    if (p.after_merge_claude.len > 0) return p.after_merge_claude;
+    return "Rebuild and restart whatever runs from the project's checkout (dev servers, an installed build; the project's CLAUDE.md may say how) so it serves the merged code.";
+}
+
+/// Claude does the after-merge steps when the project has no command: the
+/// ticket's Claude while its session is there (the ticket stays finishing
+/// until it runs done --close: true), else the operator (false).
+fn claudeAfterMerge(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, trunk: []const u8) !bool {
+    const p = try board.getProject(db, a, t.project);
+    if (p.after_merge.len > 0) return false;
+    const steps = claudeSteps(p) orelse return false;
+    if (liveSession(ctx, t)) |s| return try tell(ctx, db, a, t, s, "after-merge", try std.fmt.allocPrint(a, "This ticket is approved and cl merged it into {s}. Before it is done: {s} The project's checkout is at {s}. If anything fails or is unclear, ask me. Then run `cl ticket done {s} --close`.", .{ trunk, steps, p.dir, t.key }));
+    try askOperator(ctx, db, a, t, try std.fmt.allocPrint(a, "cl merged ticket {s} ({s}) into {s} of project {s}, whose checkout is at {s}. Its session is gone, so please do the after-merge steps for it: {s} If something fails that needs the human, flag the ticket for them: `cl ticket flag {s} after-merge \"<what went wrong>\"`.", .{ t.key, t.title, trunk, p.name, p.dir, steps, t.key }));
     return false;
+}
+
+/// Hand the operator a job for a ticket, noting it on the ticket; a failure
+/// to reach it flags the ticket instead, so nothing is dropped silently.
+pub fn askOperator(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, text: []const u8) !void {
+    const cfg = config.load(ctx) catch null;
+    if (cfg) |c| if (operator.send(ctx, c, text)) |_| {
+        try board.logEvent(ctx, db, t.id, "after-merge", "asked the operator");
+        return;
+    } else |_| {};
+    try board.logEvent(ctx, db, t.id, "after-merge", "couldn't reach the operator");
+    try board.setFlagId(ctx, db, t.id, board.flag_after_merge, "auto", try std.fmt.allocPrint(a, "cl couldn't reach the operator to do the after-merge steps\n{s}", .{text}));
+}
+
+/// The CLI's done --close just merged a change whose conflicts Claude
+/// settled: with no after-merge command, the ticket stays finishing while
+/// Claude does the steps, which it is told (the text, for it to print).
+/// null when it can go to Done.
+pub fn stepsAfterSettled(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket) !?[]const u8 {
+    const p = try board.getProject(db, a, t.project);
+    if (p.after_merge.len > 0) return null;
+    const steps = claudeSteps(p) orelse return null;
+    try board.setFinishing(ctx, db, t.id, "after-merge");
+    const text = try std.fmt.allocPrint(a, "cl merged it. Before it is done: {s} The project's checkout is at {s}. If anything fails or is unclear, ask me. Then run `cl ticket done {s} --close` again.", .{ steps, p.dir, t.key });
+    _ = try board.addComment(ctx, db, a, t.key, "you", text, false);
+    return text;
+}
+
+/// What the git merge instruction says to do once it is merged (`when`):
+/// nothing when the project's after-merge command does it, else Claude's
+/// steps; then finish.
+fn afterMergeHint(db: board.Db, a: std.mem.Allocator, project: []const u8, when: []const u8) ![]const u8 {
+    const p = try board.getProject(db, a, project);
+    if (p.after_merge.len > 0) return std.fmt.allocPrint(a, "Don't rebuild or restart anything for it: cl runs the project's after-merge command on the merged code when you finish. {s} run", .{when});
+    const steps = claudeSteps(p) orelse return std.fmt.allocPrint(a, "{s} run", .{when});
+    return std.fmt.allocPrint(a, "{s} {s} Then run", .{ when, steps });
 }
 
 /// The conflicted files, while merging the ticket's change conflicts.
@@ -174,19 +253,24 @@ fn conflictFlag(t: board.Ticket) ?[]const u8 {
     return null;
 }
 
-/// Type a finishing instruction into the ticket's session; it stays put.
-fn tell(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, s: []const u8, text: []const u8) !bool {
+/// Type a finishing instruction into the ticket's session; it stays put,
+/// finishing `how` ("merge" while conflicts are settled, "after-merge").
+fn tell(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, s: []const u8, how: []const u8, text: []const u8) !bool {
     // Finishing first, so the sent comment doesn't send it back to Running.
-    try board.setFinishing(ctx, db, t.id, "merge");
-    try tmux.sendLine(ctx, s, text);
+    try board.setFinishing(ctx, db, t.id, how);
+    // Pasted when it has several lines, so a newline doesn't send it early.
+    try claude.submit(ctx, s, text, true);
     _ = try board.addComment(ctx, db, a, t.key, "you", text, true);
     return true;
 }
 
-/// One try at merging the change: true when trunk has it. Conflicts set the
-/// ticket's conflict flag (the files); a clean merge clears it, forgets the
-/// bookmark and moves working copies left on trunk up (see `catchUp`).
-fn merge(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, dir: []const u8, trunk: []const u8) !bool {
+const Merged = enum { merged, empty, conflicts };
+
+/// One try at merging the change. Conflicts set the ticket's conflict flag
+/// (the files); a clean merge clears it, forgets the bookmark, moves working
+/// copies left on trunk up (see `catchUp`) and starts the project's
+/// after-merge command. `empty`: it had no edits, so it was dropped.
+fn merge(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, dir: []const u8, trunk: []const u8) !Merged {
     const m = worktree.mergeChange(ctx, a, dir, t.worktree, t.change, t.branch, trunk) catch {
         try board.logEvent(ctx, db, t.id, "merge failed", worktree.lastError());
         return error.MergeFailed;
@@ -194,24 +278,30 @@ fn merge(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, dir: []c
     if (!m.merged) {
         try board.setFlagId(ctx, db, t.id, board.flag_conflict, "auto", if (m.conflicts.len > 0) m.conflicts else "conflicts");
         try board.logEvent(ctx, db, t.id, "conflicts", trunk);
-        return false;
+        return .conflicts;
     }
     try board.clearFlagId(ctx, db, t.id, board.flag_conflict);
     try board.setChange(db, t.id, t.change, "");
     _ = worktree.catchUp(ctx, a, dir, trunk);
     if (t.worktree.len > 0) _ = worktree.catchUp(ctx, a, t.worktree, trunk);
     try board.logEvent(ctx, db, t.id, if (m.empty) "nothing to merge" else "merged", trunk);
+    if (!m.empty) _ = try after_merge.start(ctx, db, a, t.project, t.id, t.key);
     _ = try board.addComment(ctx, db, a, t.key, "claude", if (m.empty) try std.fmt.allocPrint(a, "Nothing to merge: its change had no edits, so it was dropped.", .{}) else try std.fmt.allocPrint(a, "Merged into {s}.", .{trunk}), false);
-    return true;
+    return if (m.empty) .empty else .merged;
 }
 
 /// A ticket finishing with conflicts in its change (Claude settled them):
-/// merge it now. error.Conflicts while some are left.
-pub fn mergeSettled(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket) !void {
-    if (!std.mem.eql(u8, t.finishing, "merge") or t.change.len == 0 or conflictFlag(t) == null) return;
+/// merge it now; true when that put new code on trunk. error.Conflicts while
+/// some are left.
+pub fn mergeSettled(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket) !bool {
+    if (!std.mem.eql(u8, t.finishing, "merge") or t.change.len == 0 or conflictFlag(t) == null) return false;
     const dir = (try board.getProject(db, a, t.project)).dir;
     const trunk = worktree.trunkBookmark(ctx, a, dir) orelse return error.MergeFailed;
-    if (!try merge(ctx, db, a, t, dir, trunk)) return error.Conflicts;
+    return switch (try merge(ctx, db, a, t, dir, trunk)) {
+        .conflicts => error.Conflicts,
+        .merged => true,
+        .empty => false,
+    };
 }
 
 /// Claude has merged or opened the PR (`cl ticket done --close`): the ticket
@@ -220,7 +310,10 @@ pub fn mergeSettled(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticke
 pub fn finished(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, summary: []const u8, pr: []const u8) !void {
     const t = try board.getTicket(db, a, key);
     if (t.finishing.len == 0) return error.NotFinishing;
-    try mergeSettled(ctx, db, a, t);
+    _ = try mergeSettled(ctx, db, a, t);
+    // A git branch Claude merged into the main branch: it is there now.
+    if (std.mem.eql(u8, t.finishing, "merge") and t.change.len == 0 and t.branch.len > 0)
+        _ = try after_merge.start(ctx, db, a, t.project, t.id, t.key);
     if (summary.len > 0) _ = try board.addComment(ctx, db, a, key, "claude", summary, false);
     if (pr.len > 0) _ = try board.addComment(ctx, db, a, key, "claude", try std.fmt.allocPrint(a, "Pull request: {s}", .{pr}), false);
     try board.logEvent(ctx, db, t.id, "finished", t.finishing);

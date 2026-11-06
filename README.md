@@ -260,6 +260,7 @@ Every ticket belongs to a project, which gives it a key prefix:
 cl project add qa-tool ~/devel/qa-tool --slots 2 --mode worktree   # QA-1, QA-2, ...
 cl project add boats ~/devel/boats --prefix BOAT
 cl project list | set <name> [options] | rm <name>
+cl project set qa-tool --after-merge '<command>'   # run on each merge (see After merge)
 ```
 
 Every project gets jj: adding one, or starting its first ticket, runs
@@ -426,8 +427,17 @@ testing), and the CLI takes a flag:
 ```
 cl t move QA-1 done --merge        merge it into the main branch (see below)
 cl t move QA-1 done --pr           Claude pushes it and opens a PR
+cl t move QA-1 done --tell "<text>"  Claude does what you say first (anything)
 cl t move QA-1 done [--close]      just close (the default; also approve and test)
 ```
+
+The board's dialog has the same choices: "Tell Claude what to do" takes your
+words, for anything the others don't cover, branch or not. When a ticket
+shouldn't be finished the usual way, its Claude can say so with
+`cl t custom-close QA-1 "<what to do instead>"` (`--clear` undoes it). The card
+then shows a Custom close pill, Merge and PR are turned off for it (in the
+dialog and the CLI), and the dialog fills Tell Claude in with Claude's
+words.
 
 With `--merge` or `--pr` the instruction is typed into the ticket's session
 and the ticket stays where it is with a Finishing pill; questions and
@@ -445,6 +455,65 @@ the ticket as a `conflict` flag listing the files; trunk stays put, and Claude
 is asked to settle them in the change and run `cl t done QA-1 --close`, which
 merges it then (and refuses while any are left). Git branches are merged by
 Claude as before.
+
+#### After merge
+
+A project can have a command cl runs once a ticket is merged, to rebuild,
+install or restart what runs from it:
+
+```
+cl project set cl-wrapper --after-merge 'zig build -Doptimize=ReleaseSafe && install -m755 zig-out/bin/cl* ~/.local/bin/'
+cl project set cl-wrapper --after-merge ''     # none
+cl project after-merge cl-wrapper              # run it now, on trunk as it is
+```
+
+It runs with `sh -c`, detached (a session of its own, so it outlives the
+`cl web` or tmux session that merged the ticket, even when it restarts
+them), in a clean checkout of the merged trunk commit at
+`~/.local/state/cl/after-merge/<project>`: a detached git worktree of the
+project's repo, reset to the commit with untracked files removed. Ignored files
+(build output, caches) stay between runs. The project's own checkout isn't
+used, because it may hold another ticket's unfinished work. The command gets
+`CL_TICKET` (the merged ticket), `CL_TICKETS` (all the tickets in this run),
+`CL_PROJECT`, `CL_COMMIT`, `CL_PROJECT_DIR` (the project's checkout) and
+`CL_CHECKOUT` (the clean one, also its working directory).
+
+Output goes to `~/.local/state/cl/after-merge-<project>.log`. The ticket's
+activity gets the start and the result. A non-zero exit puts an `after-merge`
+flag on the ticket with the log's tail; it shows in Needs you even though the
+ticket is Done, and its After merge tab can run the command again or dismiss
+the flag. One run per project goes at a time. Tickets merged during a run get one
+more run after it, on the newest trunk.
+
+When cl merges it: a jj change, right after cl moves trunk to it (a change with
+no edits runs nothing). A git branch, which Claude merges, when Claude runs
+`cl t done QA-1 --close` after the merge. With a command set, Claude
+isn't asked to rebuild or restart anything itself.
+
+Without a command, Claude does the after-merge steps instead. When cl has
+merged a jj change, it types the steps into the ticket's session, and the ticket
+stays Finishing until Claude runs `cl t done QA-1 --close`. If that session is
+gone, the operator gets them and the ticket goes to Done. A git branch's merge
+instruction includes them. A change whose conflicts Claude settled gets them
+from `cl t done --close`, which merges it, prints the steps, and finishes on the
+next `--close`. And when a command fails, the operator is asked to sort it out:
+it gets the log's tail and reruns the command (`cl project after-merge`) once
+the environment is fixed, or makes a ticket when the merged code is broken. A
+run by hand also covers the project's tickets with a failed run, so one that
+passes clears their flags. The steps are the project's own:
+
+```
+cl project set qa-tool --after-merge-claude 'Restart the dev server (npm run dev in tmux window 2).'
+cl project set qa-tool --after-merge-claude ''       # the default
+cl project set qa-tool --after-merge-claude none     # Claude does nothing after a merge
+```
+
+The default is to rebuild and restart whatever runs from the project's
+checkout, as its CLAUDE.md says.
+
+An open board notices when the server comes back from another build, and
+reloads by itself (keeping the open ticket, drafts and scroll), or shows a
+Reload banner while you are typing.
 
 ### The web board
 

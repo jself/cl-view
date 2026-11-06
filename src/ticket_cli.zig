@@ -11,6 +11,7 @@ const dispatch = @import("dispatch.zig");
 const worktree = @import("worktree.zig");
 const actions = @import("actions.zig");
 const review = @import("review.zig");
+const after_merge = @import("after_merge.zig");
 
 pub const ticket_usage =
     \\usage: cl ticket <command>    (cl t for short)
@@ -33,14 +34,15 @@ pub const ticket_usage =
     \\  show <key>                  details, flags, sub-tickets, comments and activity
     \\  edit <key> [--title <t>] [-m <body>] [--project <p>] [--worktree | --queue]
     \\      [--target <session>] [--plan | --no-plan] [--skill <name>] [--profile <name>]
-    \\  move <key> <stage> [--spin-off] [--merge | --pr | --close]
+    \\  move <key> <stage> [--spin-off] [--merge | --pr | --tell <text> | --close]
     \\                              backlog planning queued running review testing done
     \\                              (done also closes the ticket's session; it's refused while
     \\                              sub-tickets are unfinished, --spin-off makes them top-level;
     \\                              --merge / --pr: Claude first merges the ticket's branch or
     \\                              opens a PR, then it goes to done (a jj change cl merges
     \\                              itself; Claude settles conflicts); --close, the default, and
-    \\                              tickets without a branch of their own go straight there)
+    \\                              tickets without a branch of their own go straight there;
+    \\                              --tell: Claude first does what <text> says, branch or not)
     \\  rank <key> --before <key> | --after <key> | --top | --bottom
     \\                              reorder: next to another ticket, as dragging its card on
     \\                              the board does, or first or last in its stage across all
@@ -53,7 +55,7 @@ pub const ticket_usage =
     \\  kill <key>                  end its session, as cl kill does; it keeps its stage, raises
     \\                              no flag, and waits for start to restart it. A queue
     \\                              project's session is shared: other tickets on it let go too
-    \\  approve <key> [--spin-off] [--merge | --pr | --close]
+    \\  approve <key> [--spin-off] [--merge | --pr | --tell <text> | --close]
     \\                              plan → running (tells Claude), review → testing, testing → done
     \\  answer <key> <answer>...    answer the question (one per question: an option number or
     \\                              your own words) or permission prompt (a number) it waits on;
@@ -83,6 +85,9 @@ pub const ticket_usage =
     \\                              ticket in review or testing that starts another round
     \\  flag <key> <kind> [detail]  set a flag (input question review testing, or your own)
     \\  unflag <key> <kind>
+    \\  custom-close [<key>] <what to do instead> | --clear
+    \\                              Claude: this ticket shouldn't be finished the usual way
+    \\                              (merged or a PR); the board offers only this instead
     \\  done [<key>] [--summary <text>] [--test-plan <markdown> | -]
     \\                              Claude: finished, nothing more needed; moves to review.
     \\                              --test-plan (- reads stdin): what to try, kept in the ticket
@@ -102,11 +107,23 @@ pub const project_usage =
     \\usage: cl project <command>
     \\
     \\  add <name> <dir> [--prefix <KEY>] [--slots <n>] [--mode queue|worktree] [--profile <name>]
+    \\      [--after-merge <command>] [--after-merge-claude <steps> | none]
     \\  set <name> [--name <new>] [--dir <dir>] [--prefix <KEY>] [--slots <n>]
-    \\      [--mode queue|worktree] [--profile <name>]
+    \\      [--mode queue|worktree] [--profile <name>] [--after-merge <command>]
+    \\      [--after-merge-claude <steps> | none]
     \\  rm <name>
     \\  list [--json]
+    \\  after-merge <name>          run the after-merge command now, on trunk as it is
     \\
+    \\--after-merge: a shell command cl runs after it merges a ticket into trunk, in a
+    \\  clean checkout of the merged commit (not the project's own), detached. It
+    \\  gets CL_TICKET, CL_TICKETS, CL_PROJECT, CL_COMMIT, CL_PROJECT_DIR and
+    \\  CL_CHECKOUT; output goes to ~/.local/state/cl/after-merge-<name>.log, and a
+    \\  failure flags the ticket. "" removes it.
+    \\--after-merge-claude: what Claude is asked to do after a merge when there is no
+    \\  command (the ticket's Claude, or the operator once its session is gone), and
+    \\  what the operator is asked to sort out when the command fails. "" (the
+    \\  default): rebuild and restart what runs from the checkout. none: nothing.
     \\
 ++ std.fmt.comptimePrint("--slots: worktree tickets in progress at once (default {d})\n", .{board.default_slots});
 
@@ -177,7 +194,8 @@ fn boardFail(db: board.Db, err: anyerror, what: []const u8) noreturn {
         error.NotFound => fail("no such {s}", .{what}),
         error.Exists => fail("{s} already exists (or is still in use)", .{what}),
         error.BadInput => fail("invalid {s}", .{what}),
-        error.NoSession => fail("its session isn't running, so Claude can't merge or open a PR; use --close", .{}),
+        error.NoSession => fail("its session isn't running, so Claude can't finish it; use --close", .{}),
+        error.CustomClose => fail("Claude asked to close it its own way (see custom close in `cl ticket show`); use --tell, or --close, or clear it with `cl ticket custom-close <key> --clear`", .{}),
         error.OpenSubtickets => fail("it has sub-tickets that aren't done yet; finish them, or make them tickets of their own with `cl ticket move <key> done --spin-off`", .{}),
         error.Conflicts => fail("merging it back conflicts (see `cl ticket show`); resolve them in its change, then try again", .{}),
         error.MergeFailed => fail("jj couldn't merge it: {s}", .{worktree.lastError()}),
@@ -237,7 +255,7 @@ pub fn projectMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void
     defer arena_state.deinit();
     const a = arena_state.allocator();
     const cmd = argv[0];
-    const args = try Args.parse(a, argv[1..], &.{ "--prefix", "--slots", "--mode", "--profile", "--name", "--dir" }, project_usage);
+    const args = try Args.parse(a, argv[1..], &.{ "--prefix", "--slots", "--mode", "--profile", "--name", "--dir", "--after-merge", "--after-merge-claude" }, project_usage);
     const db = openBoard(ctx, cfg);
     defer db.close();
 
@@ -246,14 +264,16 @@ pub fn projectMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void
         const ps = board.listProjects(db, a) catch |e| boardFail(db, e, "project");
         if (args.has("--json")) return out(try std.fmt.allocPrint(a, "{f}\n", .{std.json.fmt(ps, .{})}));
         var aw: std.Io.Writer.Allocating = .init(a);
-        for (ps) |p| try aw.writer.print("{s}\t{s}\t{s}\tslots {d}\t{s}{s}{s}\n", .{
+        for (ps) |p| try aw.writer.print("{s}\t{s}\t{s}\tslots {d}\t{s}{s}{s}{s}{s}{s}{s}\n", .{
             p.name, p.prefix, try ctx.shortenHomeIn(a, p.dir), p.slots, @tagName(p.mode),
             if (p.profile.len > 0) "\t" else "", p.profile,
+            if (p.after_merge.len > 0) "\tafter merge: " else "", p.after_merge,
+            if (p.after_merge_claude.len > 0) "\tclaude after merge: " else "", p.after_merge_claude,
         });
         return out(aw.writer.buffered());
     }
     if (std.mem.eql(u8, cmd, "add")) {
-        args.only(&.{ "--prefix", "--slots", "--mode", "--profile" }, project_usage);
+        args.only(&.{ "--prefix", "--slots", "--mode", "--profile", "--after-merge", "--after-merge-claude" }, project_usage);
         if (args.pos.items.len != 2) fail("usage: cl project add <name> <dir> [options]", .{});
         const dir = try realDir(ctx, a, args.pos.items[1]);
         try checkProfile(cfg, args.get("--profile"));
@@ -264,13 +284,15 @@ pub fn projectMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void
             .slots = parseSlots(args),
             .mode = if (args.get("--mode")) |m| board.Mode.parse(m) orelse fail("--mode is queue or worktree", .{}) else null,
             .profile = args.get("--profile"),
+            .after_merge = args.get("--after-merge"),
+            .after_merge_claude = args.get("--after-merge-claude"),
         }) catch |e| boardFail(db, e, "project (name or prefix)");
         const p = board.getProject(db, a, args.pos.items[0]) catch |e| boardFail(db, e, "project");
         const jj = worktree.ensureJj(ctx, a, dir);
         return out(try std.fmt.allocPrint(a, "{s}: tickets are {s}-1, {s}-2, ...{s}\n", .{ p.name, p.prefix, p.prefix, if (jj) "\n(set up jj alongside git: jj git init --colocate)" else "" }));
     }
     if (std.mem.eql(u8, cmd, "set")) {
-        args.only(&.{ "--prefix", "--slots", "--mode", "--profile", "--name", "--dir" }, project_usage);
+        args.only(&.{ "--prefix", "--slots", "--mode", "--profile", "--name", "--dir", "--after-merge", "--after-merge-claude" }, project_usage);
         if (args.pos.items.len != 1) fail("usage: cl project set <name> [options]", .{});
         try checkProfile(cfg, args.get("--profile"));
         board.updateProject(db, args.pos.items[0], .{
@@ -280,8 +302,21 @@ pub fn projectMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void
             .slots = parseSlots(args),
             .mode = if (args.get("--mode")) |m| board.Mode.parse(m) orelse fail("--mode is queue or worktree", .{}) else null,
             .profile = args.get("--profile"),
+            .after_merge = args.get("--after-merge"),
+            .after_merge_claude = args.get("--after-merge-claude"),
         }) catch |e| boardFail(db, e, "project (name or prefix)");
         return;
+    }
+    if (std.mem.eql(u8, cmd, "after-merge")) {
+        args.only(&.{"--run"}, project_usage);
+        if (args.pos.items.len != 1) fail("usage: cl project after-merge <name>", .{});
+        const name = args.pos.items[0];
+        // --run: the detached runner cl starts (see after_merge.zig).
+        if (args.has("--run")) return after_merge.runLoop(ctx, cfg, db, name);
+        const p = board.getProject(db, a, name) catch |e| boardFail(db, e, "project");
+        if (p.after_merge.len == 0) fail("{s} has no after-merge command (cl project set {s} --after-merge <command>)", .{ name, name });
+        after_merge.startByHand(ctx, db, a, name, "-") catch |e| boardFail(db, e, "project");
+        return out(try std.fmt.allocPrint(a, "{s}: after-merge run started; log: {s}\n", .{ name, try ctx.shortenHomeIn(a, try after_merge.logPath(ctx, a, cfg, name)) }));
     }
     if (std.mem.eql(u8, cmd, "rm")) {
         args.only(&.{}, project_usage);
@@ -315,7 +350,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
     const a = arena_state.allocator();
     const cmd = argv[0];
     const args = try Args.parse(a, argv[1..], &.{
-        "--body", "--target", "--stage", "--profile", "--project", "--flag", "--search", "--title", "--as", "--summary", "--test-plan", "--step", "--parent", "--skill", "--pr-url", "--before", "--after",
+        "--body", "--target", "--stage", "--profile", "--project", "--flag", "--search", "--title", "--as", "--summary", "--test-plan", "--step", "--parent", "--skill", "--pr-url", "--before", "--after", "--tell",
     }, ticket_usage);
     const env_key = ctx.env.get("CL_TICKET");
     const db = openBoard(ctx, cfg);
@@ -399,8 +434,8 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         return relocate(ctx, cfg, db, a, pos[0], board.Mode.parse(pos[1]) orelse fail("worktree or queue", .{}));
     }
     if (std.mem.eql(u8, cmd, "move") or std.mem.eql(u8, cmd, "mv")) {
-        args.only(&.{ "--spin-off", "--merge", "--pr", "--close" }, ticket_usage);
-        if (pos.len != 2) fail("usage: cl ticket move <key> <stage> [--spin-off] [--merge | --pr | --close]", .{});
+        args.only(&.{ "--spin-off", "--merge", "--pr", "--tell", "--close" }, ticket_usage);
+        if (pos.len != 2) fail("usage: cl ticket move <key> <stage> [--spin-off] [--merge | --pr | --tell <text> | --close]", .{});
         const finish = finishArg(args);
         actions.move(ctx, db, a, pos[0], parseStage(pos[1]), args.has("--spin-off"), finish) catch |e| boardFail(db, e, "ticket");
         return finishNote(db, a, pos[0]);
@@ -435,6 +470,19 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         if (r.sent_back) return out(try std.fmt.allocPrint(a, "{s} is back in running (round {d})\n", .{ key, r.round }));
         return;
     }
+    if (std.mem.eql(u8, cmd, "custom-close")) {
+        args.only(&.{"--clear"}, ticket_usage);
+        const clear = args.has("--clear");
+        const with_key = pos.len == @as(usize, if (clear) 1 else 2);
+        const key = if (with_key) pos[0] else (env_key orelse fail("usage: cl ticket custom-close [<key>] <what to do instead> | --clear", .{}));
+        const rest = if (with_key) pos[1..] else pos;
+        if (clear != (rest.len == 0) or rest.len > 1) fail("usage: cl ticket custom-close [<key>] <what to do instead> | --clear", .{});
+        const t = board.getTicket(db, a, key) catch |e| boardFail(db, e, "ticket");
+        const text = if (clear) "" else std.mem.trim(u8, rest[0], " \t\r\n");
+        if (!clear and text.len == 0) fail("say what to do instead", .{});
+        board.setCustomClose(ctx, db, t.id, text) catch |e| boardFail(db, e, "ticket");
+        return out(try std.fmt.allocPrint(a, "{s}: {s}\n", .{ t.key, if (clear) "back to the usual finish" else "the board offers only this close instead of merge or PR" }));
+    }
     if (std.mem.eql(u8, cmd, "flag") or std.mem.eql(u8, cmd, "unflag")) {
         args.only(&.{}, ticket_usage);
         const setting = std.mem.eql(u8, cmd, "flag");
@@ -457,7 +505,12 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         if (args.has("--close") or t0.finishing.len > 0) {
             if (t0.finishing.len == 0) fail("{s} isn't finishing (--close is for after a merge or PR the board asked for); use done without it", .{t0.key});
             // Settled conflicts merge first, so a refusal comes before the message.
-            actions.mergeSettled(ctx, db, a, t0) catch |e| boardFail(db, e, "ticket");
+            const merged_now = actions.mergeSettled(ctx, db, a, t0) catch |e| boardFail(db, e, "ticket");
+            // Just merged, with no after-merge command: Claude does the steps first.
+            if (merged_now) if (actions.stepsAfterSettled(ctx, db, a, t0) catch |e| boardFail(db, e, "ticket")) |steps| {
+                if (args.get("--summary")) |sum| _ = board.addComment(ctx, db, a, key, "claude", sum, false) catch {};
+                return out(try std.fmt.allocPrint(a, "{s}: {s}\n", .{ t0.key, steps }));
+            };
             // Printed first: closing kills the session this may be running in.
             try out(try std.fmt.allocPrint(a, "{s}: done; its session closes now.\n", .{t0.key}));
             actions.finished(ctx, db, a, key, args.get("--summary") orelse "", args.get("--pr-url") orelse "") catch |e| boardFail(db, e, "ticket");
@@ -475,8 +528,14 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
             else => boardFail(db, e, "ticket"),
         };
         const t = board.getTicket(db, a, key) catch |e| boardFail(db, e, "ticket");
-        return out(try std.fmt.allocPrint(a, "{s}: {s}. The board shows it to the human; nothing more to do.\n", .{
-            t.key, if (t.stage == .planning) "plan ready for approval" else "moved to review",
+        // Said when Claude finishes, as that's when it knows: its work has a
+        // branch the human will be offered to merge.
+        const hint = if (t.stage != .planning and (t.branch.len > 0 or t.change.len > 0) and t.custom_close.len == 0)
+            try std.fmt.allocPrint(a, "\nIf its work shouldn't be merged (or made a PR) as it is, say so now: `cl ticket custom-close {s} \"<what to do with it instead>\"`.", .{t.key})
+        else
+            "";
+        return out(try std.fmt.allocPrint(a, "{s}: {s}. The board shows it to the human; nothing more to do.{s}\n", .{
+            t.key, if (t.stage == .planning) "plan ready for approval" else "moved to review", hint,
         }));
     }
     if (std.mem.eql(u8, cmd, "rm")) {
@@ -527,7 +586,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         return;
     }
     if (std.mem.eql(u8, cmd, "approve")) {
-        args.only(&.{ "--spin-off", "--merge", "--pr", "--close" }, ticket_usage);
+        args.only(&.{ "--spin-off", "--merge", "--pr", "--tell", "--close" }, ticket_usage);
         const key = keyArg(pos, 0, env_key, "cl ticket approve <key>");
         _ = actions.approve(ctx, db, a, key, args.has("--spin-off"), finishArg(args)) catch |e| switch (e) {
             error.BadInput => fail("only a ticket in planning, review or testing can be approved", .{}),
@@ -734,10 +793,11 @@ fn openUrl(ctx: Ctx, url: []const u8) void {
     out("  couldn't open a browser; visit it by hand\n") catch {};
 }
 
-/// --merge, --pr or --close (the default).
+/// --merge, --pr, --tell <text> or --close (the default).
 fn finishArg(args: Args) actions.Finish {
-    const n = @as(u8, @intFromBool(args.has("--merge"))) + @intFromBool(args.has("--pr")) + @intFromBool(args.has("--close"));
-    if (n > 1) fail("pick one of --merge, --pr and --close", .{});
+    const n = @as(u8, @intFromBool(args.has("--merge"))) + @intFromBool(args.has("--pr")) + @intFromBool(args.has("--tell")) + @intFromBool(args.has("--close"));
+    if (n > 1) fail("pick one of --merge, --pr, --tell and --close", .{});
+    if (args.get("--tell")) |text| return actions.Finish.told(text) orelse fail("--tell needs what Claude should do", .{});
     return if (args.has("--merge")) .merge else if (args.has("--pr")) .pr else .close;
 }
 
@@ -746,8 +806,15 @@ fn finishNote(db: board.Db, a: std.mem.Allocator, key: []const u8) !void {
     const t = board.getTicket(db, a, key) catch return;
     if (t.finishing.len == 0) return;
     try out(try std.fmt.allocPrint(a, "{s}: Claude is {s}; it moves to done when that's through.\n", .{
-        t.key, if (std.mem.eql(u8, t.finishing, "pr")) "opening a PR" else "merging its branch",
+        t.key, finishingWhat(t.finishing),
     }));
+}
+
+fn finishingWhat(how: []const u8) []const u8 {
+    if (std.mem.eql(u8, how, "pr")) return "opening a PR";
+    if (std.mem.eql(u8, how, "after-merge")) return "doing the after-merge steps";
+    if (std.mem.eql(u8, how, "tell")) return "doing what you told it";
+    return "merging its branch";
 }
 
 fn logLine(text: []const u8) void {
@@ -802,7 +869,8 @@ fn showText(ctx: Ctx, a: std.mem.Allocator, t: board.Ticket, subs: []const board
     if (t.parent.len > 0) try w.print("sub-ticket of: {s}\n", .{t.parent});
     if (t.tmux.len > 0) try w.print("session: {s}\n", .{t.tmux});
     if (t.killed) try w.print("session: killed; `cl ticket start {s}` restarts it\n", .{t.key});
-    if (t.finishing.len > 0) try w.print("finishing: {s} (Claude is {s}; it goes to done after)\n", .{ t.finishing, if (std.mem.eql(u8, t.finishing, "pr")) "opening a PR" else "merging its branch" });
+    if (t.custom_close.len > 0) try w.print("custom close: {s}\n", .{t.custom_close});
+    if (t.finishing.len > 0) try w.print("finishing: {s} (Claude is {s}; it goes to done after)\n", .{ t.finishing, finishingWhat(t.finishing) });
     if (t.worktree.len > 0) try w.print("worktree: {s}   branch: {s}\n", .{ try ctx.shortenHomeIn(a, t.worktree), t.branch });
     if (t.change.len > 0) try w.print("change: {s}{s}{s}\n", .{ t.change[0..@min(t.change.len, 12)], if (t.branch.len > 0) "   bookmark: " else "", t.branch });
     for (t.flags) |f| try w.print("flag: {s} ({s}, {s}){s}{s}\n", .{ f.kind, f.source, try stamp(a, f.at), if (f.detail.len > 0) ": " else "", f.detail });

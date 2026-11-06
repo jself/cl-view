@@ -215,6 +215,9 @@
   #toast { position: fixed; left: 50%; bottom: calc(20 * var(--u)); transform: translateX(-50%); background: #2c2e33; color: #fff; padding: calc(10 * var(--u)) calc(16 * var(--u));
            border-radius: calc(10 * var(--u)); display: none; max-width: calc(100vw - calc(32 * var(--u))); z-index: 10; }
   #toast.err { background: #7f1d1d; }
+  #reloadBar { display: flex; align-items: center; gap: calc(10 * var(--u)); margin: calc(10 * var(--u)) calc(20 * var(--u)) 0; padding: calc(8 * var(--u)) calc(12 * var(--u));
+               border: 1px solid var(--line, #3a3d44); border-radius: calc(10 * var(--u)); flex-wrap: wrap; }
+  #reloadBar[hidden] { display: none; }
   .empty { color: var(--muted); padding: calc(24 * var(--u)) calc(4 * var(--u)); }
   /* Tablets, folding phones and phones: search gets its own full-width row,
      the dropdowns share the rest, and nothing in the bar can widen the page. */
@@ -245,6 +248,8 @@
   <button type="button" class="btn" id="quickBtn" title="Tell the operator what to add; it makes the ticket">Quick ticket</button>
   <button type="button" class="btn primary" id="newBtn">New ticket</button>
 </header>
+
+<div id="reloadBar" role="status" hidden><span>cl was updated. It reloads by itself once you stop typing, or now:</span><button type="button" class="btn primary" id="reloadBtn">Reload</button></div>
 
 <section id="needs" aria-label="Needs you">
   <div class="nhd"><button type="button" id="needsToggle" aria-expanded="true"><span>Needs you</span><span class="count" id="needsCount">0</span>
@@ -281,7 +286,7 @@
 "use strict";
 const STAGES = ["backlog", "planning", "queued", "running", "review", "testing", "done"];
 const STAGE_NAME = { backlog: "Backlog", planning: "Planning", queued: "Queued", running: "Running", review: "Review", testing: "Testing", done: "Done" };
-const FLAG_NAME = { input: "Needs input", question: "Question", review: "Ready for review", testing: "Needs testing", ended: "Session ended", "start-failed": "Didn't start", conflict: "Conflicts" };
+const FLAG_NAME = { input: "Needs input", question: "Question", review: "Ready for review", testing: "Needs testing", ended: "Session ended", "start-failed": "Didn't start", conflict: "Conflicts", "after-merge": "After-merge failed" };
 const STATUS_NAME = { busy: "Working", waiting: "Waiting on you", blocked: "Waiting on you", idle: "Idle", shell: "Idle · background task", starting: "Starting", gone: "Session ended", killed: "Killed · restart it", unknown: "Unknown" };
 
 const store = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch { return null; } };
@@ -323,9 +328,11 @@ async function sendAnswer(key, answers, btn) {
 
 const flagDetail = (f) => { try { return JSON.parse(f.detail); } catch { return null; } };
 // The human is holding it up: it has a flag they haven't hidden, and Claude isn't working on it.
-const needsMe = (row) => row.ticket.flags.some((f) => !f.hidden) && row.ticket.stage !== "done" && !row.working;
+// A Done ticket only for a failed after-merge run (it comes after the merge).
+const asksStill = (t, f) => t.stage !== "done" || f.kind === "after-merge";
+const needsMe = (row) => row.ticket.flags.some((f) => !f.hidden && asksStill(row.ticket, f)) && !row.working;
 // Hidden from Needs you: every flag it has is hidden (a new one brings it back).
-const hiddenNeeds = (row) => row.ticket.flags.length > 0 && row.ticket.flags.every((f) => f.hidden) && row.ticket.stage !== "done" && !row.working;
+const hiddenNeeds = (row) => row.ticket.flags.length > 0 && row.ticket.flags.every((f) => f.hidden) && row.ticket.flags.some((f) => asksStill(row.ticket, f)) && !row.working;
 const asks = (t) => t.flags.filter((f) => f.kind !== "testing" || t.stage === "testing");
 function askText(t, f) {
   const d = flagDetail(f);
@@ -344,13 +351,16 @@ function askLine(t, f, quick) {
   if (f.kind === "input") return d?.tool ? `Wants permission: ${d.tool}` : "Waiting on a prompt";
   if (f.kind === "review") return f.detail === "plan" ? "Plan ready for approval" : "Ready for review";
   if (f.kind === "conflict") { const n = f.detail.split("\n").filter((l) => l.trim()).length; return `Merge conflicts in ${n} file${n === 1 ? "" : "s"}`; }
+  if (f.kind === "after-merge") return "After-merge command failed: " + f.detail.split("\n")[0];
   return askText(t, f);
 }
 const flagLabel = (f) => f.kind === "review" && f.detail === "plan" ? "Plan ready" : (FLAG_NAME[f.kind] || f.kind);
-const flagClass = (k) => ["input", "question", "review", "testing", "conflict"].includes(k) ? "f-" + k : "";
+const flagClass = (k) => k === "after-merge" ? "f-conflict" : ["input", "question", "review", "testing", "conflict"].includes(k) ? "f-" + k : "";
 // Finishing: Claude is merging the branch or opening a PR before it goes to Done.
-const finishPill = (t) => t.finishing ? `<span class="pill f-finishing" title="${t.finishing === "pr" ? "Claude is opening a PR" : "Claude is merging its branch"}; it goes to Done after">Finishing</span>` : "";
-const pills = (t) => t.flags.length || t.finishing ? `<span class="pills">${finishPill(t)}${t.flags.map((f) => `<span class="pill ${flagClass(f.kind)}">${esc(flagLabel(f))}</span>`).join("")}</span>` : "";
+const finishPill = (t) => t.finishing ? `<span class="pill f-finishing" title="${t.finishing === "pr" ? "Claude is opening a PR" : t.finishing === "after-merge" ? "It's merged; Claude is doing the after-merge steps (rebuilding, restarting)" : t.finishing === "tell" ? "Claude is doing what you told it" : "Claude is merging its branch"}; it goes to Done after">Finishing</span>` : "";
+// Claude asked to close it its own way (cl ticket custom-close).
+const customPill = (t) => t.custom_close ? `<span class="pill f-review" title="Claude: ${esc(t.custom_close)}">Custom close</span>` : "";
+const pills = (t) => t.flags.length || t.finishing || t.custom_close ? `<span class="pills">${customPill(t)}${finishPill(t)}${t.flags.map((f) => `<span class="pill ${flagClass(f.kind)}">${esc(flagLabel(f))}</span>`).join("")}</span>` : "";
 // "(starting)" is the dispatcher's claim while it opens the session.
 // A Backlog or Queued ticket whose session is gone hasn't ended: it's waiting to start.
 // A killed one waits for you to restart it.
@@ -389,9 +399,26 @@ function setHtml(el, html) {
 }
 async function refresh() {
   try { state.data = await api("board"); } catch (e) { if (e.message !== "log in") toast(e.message, true); return; }
+  checkBuild(state.data.build);
   if (!drag) render();
   if (state.open) loadDetail(state.open, true);
 }
+// cl was rebuilt and restarted (an after-merge command, say): the page is
+// from the old build. Reload, which keeps your place (see "where you were"),
+// unless that would lose something being typed; then offer it until it won't.
+function checkBuild(build) {
+  if (!build) return;
+  if (!state.build) { state.build = build; return; }
+  if (build === state.build) return;
+  document.getElementById("reloadBar").hidden = false;
+  if (!typing()) location.reload();
+}
+function typing() {
+  const el = document.activeElement;
+  const editing = el && (el.isContentEditable || (["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName) && !(el.closest(".xterm"))));
+  return drag || editing || Date.now() - (state.typedAt || 0) < 30_000;
+}
+document.addEventListener("input", () => { state.typedAt = Date.now(); }, true);
 function visible() {
   const q = state.search.toLowerCase();
   return state.data.tickets.filter((row) => {
@@ -440,7 +467,7 @@ function renderNeeds() {
   const counts = {}; for (const r of rows) for (const f of r.ticket.flags) counts[f.kind] = (counts[f.kind] || 0) + 1;
   document.getElementById("needsSum").textContent = Object.entries(counts).map(([k, n]) => `${n} ${(FLAG_NAME[k] || k).toLowerCase()}`).join(" · ");
   setHtml(document.getElementById("needsStrip"), shown.map((r) => {
-    const t = r.ticket; const isHidden = hiddenNeeds(r); const f = isHidden ? t.flags[0] : t.flags.find((x) => !x.hidden); const d = flagDetail(f);
+    const t = r.ticket; const isHidden = hiddenNeeds(r); const f = isHidden ? t.flags[0] : t.flags.find((x) => !x.hidden && asksStill(t, x)); const d = flagDetail(f);
     let quick = "";
     if (f.kind === "question" && d?.questions?.length === 1 && !d.questions[0].multiSelect)
       quick = (d.questions[0].options || []).slice(0, 3).map((o, i) => `<button type="button" class="btn" data-answer="${esc(t.key)}" data-n="${i + 1}">${esc(o.label)}</button>`).join("");
@@ -449,6 +476,7 @@ function renderNeeds() {
     const main = f.kind === "review" && f.detail === "plan" ? `<button type="button" class="btn primary" data-approve="${esc(t.key)}">Approve plan</button>`
       : f.kind === "review" ? `<button type="button" class="btn primary" data-open="${esc(t.key)}" data-tab="review">Review</button>`
       : f.kind === "testing" ? `<button type="button" class="btn primary" data-open="${esc(t.key)}" data-tab="test">Test it</button>`
+      : f.kind === "after-merge" ? `<button type="button" class="btn primary" data-open="${esc(t.key)}" data-tab="after-merge">See the log</button>`
       : `<button type="button" class="btn primary" data-open="${esc(t.key)}" data-tab="needs">Open</button>`;
     const shell = t.tmux && r.status && r.status !== "gone" ? `<a class="btn" href="${shellHref(t)}">Shell</a>` : "";
     // Hiding keeps the flags (the card still shows them); a new flag brings it back.
@@ -622,6 +650,7 @@ function drawTail() {
 function tabsFor(d) {
   const t = d.ticket; const tabs = [];
   if (t.flags.some((f) => f.kind === "question" || f.kind === "input")) tabs.push(["needs", "Needs you"]);
+  if (t.flags.some((f) => f.kind === "after-merge")) tabs.push(["after-merge", "After merge"]);
   if (t.stage === "review" || d.guide || d.review) tabs.push(["review", "Review"]);
   if (d.test_plan) tabs.push(["test", "Test"]);
   tabs.push(["comments", `Comments${d.comments.length ? " " + d.comments.length : ""}`]);
@@ -685,8 +714,18 @@ function tabHtml(d) {
     case "activity": return `<ol class="muted" style="margin:0;padding-left:calc(20 * var(--u));display:flex;flex-direction:column;gap:calc(4 * var(--u))">${d.events.map((e) =>
       `<li>${esc(e.kind)}${e.detail ? " · " + esc(e.detail) : ""} <span class="mono" style="font-size:calc(11.5 * var(--u))">${new Date(e.at * 1000).toLocaleString()}</span></li>`).join("")}</ol>`;
     case "details": return detailsTab(d);
+    case "after-merge": return afterMergeTab(d);
   }
   return "";
+}
+// The project's after-merge command failed on the merged code: its log's tail.
+function afterMergeTab(d) {
+  const f = d.ticket.flags.find((x) => x.kind === "after-merge"); if (!f) return "";
+  const [head, ...rest] = f.detail.split("\n");
+  return `<div class="q"><span class="muted" style="font-size:calc(12 * var(--u))">${esc(d.ticket.project)}'s after-merge command failed: ${esc(head)}</span>
+      ${rest.length ? `<pre class="term">${esc(rest.join("\n"))}</pre>` : ""}
+      <div class="actions"><button type="button" class="btn primary" data-after-merge="${esc(d.ticket.project)}">Run it again</button>
+      <button type="button" class="btn" data-unflag="after-merge" title="Take the flag off; the log stays">Dismiss</button></div></div>`;
 }
 function needsTab(d) {
   const t = d.ticket; const f = t.flags.find((x) => x.kind === "question") || t.flags.find((x) => x.kind === "input"); const det = flagDetail(f) || {};
@@ -983,21 +1022,32 @@ function confirmDone(key) {
 // Resolves to "close", "merge", "pr", or null when cancelled.
 async function chooseFinish(key) {
   const t = state.data.tickets.find((r) => r.ticket.key === key)?.ticket || (state.detail?.ticket.key === key ? state.detail.ticket : null);
-  if (!t?.branch && !t?.change) return "close";
+  if (!t?.branch && !t?.change && !t?.custom_close) return "close";
+  const custom = t.custom_close || "";
   let main = state.detail?.ticket.key === key ? state.detail.main_branch : "";
   if (!main) main = (await api(`ticket/${encodeURIComponent(key)}`).catch(() => ({}))).main_branch || "master";
   const dlg = document.getElementById("finishDlg");
   document.getElementById("finishBody").innerHTML = `<h2 style="margin:0;font-size:calc(17 * var(--u))">Finish ${esc(key)}</h2>
-    <p class="muted" style="margin:0">Its work is on <span class="mono">${esc(t.branch || "its jj change " + t.change.slice(0, 12))}</span>. What should happen to it?</p>
+    ${t.branch || t.change ? `<p class="muted" style="margin:0">Its work is on <span class="mono">${esc(t.branch || "its jj change " + t.change.slice(0, 12))}</span>. What should happen to it?</p>` : ""}
+    ${custom ? `<div class="q"><span class="pill f-review" style="align-self:flex-start">Custom close</span><div>Claude says not to finish this one the usual way: ${esc(custom)}</div></div>` : ""}
     <div style="display:flex;flex-direction:column;gap:calc(8 * var(--u))">
-      <button type="button" class="btn primary" data-finish="merge">Merge into ${esc(main)}</button>
-      <button type="button" class="btn" data-finish="pr">Open a PR</button>
+      ${t.branch || t.change ? `<button type="button" class="btn ${custom ? "" : "primary"}" data-finish="merge" ${custom ? `disabled title="Claude asked for a custom close"` : ""}>Merge into ${esc(main)}</button>
+      <button type="button" class="btn" data-finish="pr" ${custom ? `disabled title="Claude asked for a custom close"` : ""}>Open a PR</button>` : ""}
       <button type="button" class="btn" data-finish="close">Just close</button>
+      <div style="display:flex;gap:calc(8 * var(--u))"><input type="text" id="finishTell" style="flex:1;min-width:0" aria-label="What Claude should do first" placeholder="Tell Claude what to do: …" value="${esc(custom)}">
+        <button type="button" class="btn ${custom ? "primary" : ""}" data-finish="tell">Tell Claude</button></div>
       <button type="button" class="btn" data-finish="">Cancel</button></div>
-    <p class="muted" style="margin:0;font-size:calc(12.5 * var(--u))">${t.change ? "Merge: cl rebases its jj change onto " + esc(main) + " and moves " + esc(main) + " to it; Claude settles any conflicts and restarts what runs from the checkout. PR: Claude pushes it and opens the PR." : "Merge and PR ask Claude to do it in the ticket's session."} It stays where it is, marked Finishing, until Claude is through; then it goes to Done and the session closes.</p>`;
-  dlg.returnValue = ""; dlg.showModal();
+    <p class="muted" style="margin:0;font-size:calc(12.5 * var(--u))">${t.change ? "Merge: cl rebases its jj change onto " + esc(main) + " and moves " + esc(main) + " to it; Claude settles any conflicts and restarts what runs from the checkout. PR: Claude pushes it and opens the PR." : "Merge and PR ask Claude to do it in the ticket's session."} Tell Claude: it gets your words in its session instead, for anything else. It stays where it is, marked Finishing, until Claude is through; then it goes to Done and the session closes.</p>`;
+  dlg.returnValue = ""; dlg.dataset.tell = ""; dlg.showModal();
   return new Promise((res) => { dlg.onclose = () => res(dlg.returnValue || null); });
 }
+// "Tell Claude": its words go with it; Enter in the box sends them too.
+function finishTell() {
+  const box = document.getElementById("finishTell"); const text = box.value.trim();
+  if (!text) { box.focus(); toast("Type what Claude should do first", true); return; }
+  const dlg = document.getElementById("finishDlg"); dlg.dataset.tell = text; dlg.close("tell");
+}
+document.addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target.id === "finishTell") { e.preventDefault(); finishTell(); } });
 // ---- killing a session ----
 // Says what goes: the session (shared, for a queue ticket, with any other
 // ticket on it) and Claude in it. Resolves to true to go ahead.
@@ -1020,9 +1070,9 @@ function confirmKill(d) {
 async function doneExtras(key) {
   const extra = await confirmDone(key); if (!extra) return null;
   const finish = await chooseFinish(key); if (!finish) return null;
-  return { ...extra, finish };
+  return { ...extra, finish, ...(finish === "tell" ? { tell: document.getElementById("finishDlg").dataset.tell } : {}) };
 }
-const finishMsg = (key, x) => x.finish === "pr" ? `${key}: Claude is opening a PR` : x.finish === "merge" ? `${key}: Claude is merging it` : "";
+const finishMsg = (key, x) => x.finish === "pr" ? `${key}: Claude is opening a PR` : x.finish === "merge" ? `${key}: Claude is merging it` : x.finish === "tell" ? `${key}: Claude got your instructions` : "";
 async function moveTo(key, stage, place = {}) {
   const row = state.data.tickets.find((r) => r.ticket.key === key);
   if (!row || row.ticket.stage === stage) return render();
@@ -1070,8 +1120,10 @@ document.addEventListener("click", async (e) => {
   if (ds.newWhen || ds.newProject) return openNew(null, { when: ds.newWhen, project: ds.newProject });
   if (el.id === "closeNew") return document.getElementById("newDlg").close();
   if (el.id === "quickBtn") return openQuick();
+  if (el.id === "reloadBtn") return location.reload();
   if (el.id === "closeQuick") return document.getElementById("quickDlg").close();
   if (el.id === "closeDlg") { document.getElementById("ticketDlg").close(); return; }
+  if (ds.finish === "tell") return finishTell();
   if (ds.finish !== undefined) { document.getElementById("finishDlg").close(ds.finish); return; }
   if (el.id === "spinOff" || el.id === "spinCancel") { document.getElementById("subsDlg").close(el.id === "spinOff" ? "spin" : ""); return; }
   if (ds.kill !== undefined) { document.getElementById("killDlg").close(ds.kill); return; }
@@ -1101,6 +1153,11 @@ document.addEventListener("click", async (e) => {
   }
   if (ds.pick !== undefined) { state.picks[ds.pick] = ds.n; state.other[ds.pick] = ""; renderDetail(); return; }
   if (ds.perm) return sendAnswer(key, [ds.perm], el);
+  if (ds.afterMerge) {
+    try { await api(`project/${encodeURIComponent(ds.afterMerge)}/after-merge`, { key }); toast("Running it again; the result comes back here"); } catch (e) { toast(e.message, true); }
+    return;
+  }
+  if (ds.unflag) return act(key, "unflag", { kind: ds.unflag }, "Dismissed");
   if (ds.check !== undefined) { const c = state.checks["c" + ds.check] || {}; c.pass = ds.pass === "1"; state.checks["c" + ds.check] = c; saveProgress(); renderDetail(); return; }
   if (ds.stepGo !== undefined) { state.checks.step = Math.max(0, +ds.stepGo); saveProgress(); renderDetail(); document.getElementById("ticketDlg").scrollTop = 0; return; }
   if (ds.launch) return act(key, "launch", { step: +ds.launch }, "Started");

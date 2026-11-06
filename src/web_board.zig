@@ -11,7 +11,7 @@
 //!                                       gutter-stop launch launch-stop test-progress
 //!                                       test-results relocate
 //!   POST /api/project                   add a project
-//!   POST /api/project/<name>/<action>   set rm
+//!   POST /api/project/<name>/<action>   set rm after-merge
 const std = @import("std");
 const Ctx = @import("ctx.zig");
 const config = @import("config.zig");
@@ -24,8 +24,15 @@ const review = @import("review.zig");
 const worktree = @import("worktree.zig");
 const web = @import("web.zig");
 const operator = @import("operator.zig");
+const after_merge = @import("after_merge.zig");
 
 const board_html = @embedFile("web/board.html");
+
+/// Which board page this server serves: an open board whose page came from
+/// another build (cl was rebuilt and restarted under it) offers a reload.
+fn buildId(a: std.mem.Allocator) ![]const u8 {
+    return std.fmt.allocPrint(a, "{x:0>16}", .{std.hash.Wyhash.hash(0, board_html)});
+}
 
 const json_headers = [_]std.http.Header{
     .{ .name = "content-type", .value = "application/json" },
@@ -88,6 +95,7 @@ pub fn handle(ctx: Ctx, cfg: config.Config, req: *std.http.Server.Request, path:
             error.Exists => .{ .conflict, "already exists, or still in use" },
             error.BadInput => .{ .bad_request, "invalid input" },
             error.NoSession => .{ .conflict, "the ticket has no live session" },
+            error.CustomClose => .{ .conflict, "Claude asked to close it its own way; tell Claude, or just close it" },
             error.NothingAsked => .{ .conflict, "nothing is waiting for an answer" },
             error.BadAnswer => .{ .bad_request, "one answer per question: an option number or your own words (several numbers for a multi-select one)" },
             error.GutterFailed => .{ .internal_server_error, "gutter didn't start" },
@@ -147,6 +155,10 @@ const Body = struct {
     dir: ?[]const u8 = null,
     prefix: ?[]const u8 = null,
     slots: ?i64 = null,
+    after_merge: ?[]const u8 = null,
+    after_merge_claude: ?[]const u8 = null,
+    /// finish "tell": what Claude should do first.
+    tell: ?[]const u8 = null,
     spin_off: ?bool = null,
     /// Going to Done: "merge", "pr" or "close" (the default).
     finish: ?[]const u8 = null,
@@ -156,7 +168,9 @@ const Body = struct {
 };
 
 fn finishOf(b: Body) !actions.Finish {
-    return actions.Finish.parse(b.finish orelse "close") orelse error.BadInput;
+    const f = b.finish orelse "close";
+    if (std.mem.eql(u8, f, "tell")) return actions.Finish.told(b.tell orelse "") orelse error.BadInput;
+    return actions.Finish.parse(f) orelse error.BadInput;
 }
 
 fn readBody(req: *std.http.Server.Request, a: std.mem.Allocator) !Body {
@@ -219,6 +233,8 @@ fn route(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: 
                 .slots = b.slots,
                 .mode = if (b.mode) |m| board.Mode.parse(m) orelse return error.BadInput else null,
                 .profile = b.profile,
+                .after_merge = b.after_merge,
+                .after_merge_claude = b.after_merge_claude,
             });
             _ = worktree.ensureJj(ctx, a, dir);
             return ok(req, a, .{ .ok = true });
@@ -231,7 +247,12 @@ fn route(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: 
                 .slots = b.slots,
                 .mode = if (b.mode) |m| board.Mode.parse(m) orelse return error.BadInput else null,
                 .profile = b.profile,
+                .after_merge = b.after_merge,
+                .after_merge_claude = b.after_merge_claude,
             });
+        } else if (std.mem.eql(u8, action, "after-merge")) {
+            if ((try board.getProject(db, a, name)).after_merge.len == 0) return error.BadInput;
+            try after_merge.startByHand(ctx, db, a, name, nonEmpty(b.key) orelse "-");
         } else if (std.mem.eql(u8, action, "rm")) {
             try board.removeProject(db, name);
         } else return error.NotFound;
@@ -378,6 +399,7 @@ fn getBoard(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, re
         .sessions = ss.rows,
         .profiles = profiles.items,
         .now = ctx.nowSeconds(),
+        .build = try buildId(a),
     });
 }
 

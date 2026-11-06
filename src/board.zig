@@ -47,6 +47,7 @@ pub const flag_question = "question"; // Claude asked something
 pub const flag_review = "review"; // Claude said done; review it
 pub const flag_testing = "testing"; // try it out
 pub const flag_conflict = "conflict"; // merging it back conflicts
+pub const flag_after_merge = "after-merge"; // the project's after-merge command failed
 
 pub const Project = struct {
     name: []const u8,
@@ -58,6 +59,13 @@ pub const Project = struct {
     mode: Mode,
     /// cl profile for new sessions; "" means the default.
     profile: []const u8,
+    /// Shell command run on the merged trunk after cl merges a ticket into
+    /// it (see after_merge.zig); "" for none.
+    after_merge: []const u8 = "",
+    /// What Claude is asked to do after a merge when there is no command, or
+    /// when it fails: "" for the default (rebuild and restart what runs from
+    /// the checkout), "none" for nothing.
+    after_merge_claude: []const u8 = "",
 };
 
 pub const Flag = struct {
@@ -122,6 +130,9 @@ pub const Ticket = struct {
     /// comments, the step they're on), "" for not started. A new plan or
     /// submitted results start it over.
     test_progress: []const u8 = "",
+    /// Claude said not to finish it the usual way (merge, PR): what to do
+    /// instead. The board offers only that ("Custom close"); "" for none.
+    custom_close: []const u8 = "",
     /// 1, then +1 each time it is sent back after Claude said done.
     round: i64,
     created: i64,
@@ -157,7 +168,11 @@ const schema =
 ++ std.fmt.comptimePrint(" {d},\n", .{default_slots}) ++
     \\  mode TEXT NOT NULL DEFAULT 'queue',
     \\  profile TEXT NOT NULL DEFAULT '',
-    \\  next_num INTEGER NOT NULL DEFAULT 1
+    \\  next_num INTEGER NOT NULL DEFAULT 1,
+    \\  after_merge TEXT NOT NULL DEFAULT '',
+    \\  after_merge_pid INTEGER NOT NULL DEFAULT 0,
+    \\  after_merge_pending TEXT NOT NULL DEFAULT '',
+    \\  after_merge_claude TEXT NOT NULL DEFAULT ''
     \\);
     \\CREATE TABLE IF NOT EXISTS tickets (
     \\  id INTEGER PRIMARY KEY,
@@ -185,6 +200,7 @@ const schema =
     \\  killed INTEGER NOT NULL DEFAULT 0,
     \\  test_plan TEXT NOT NULL DEFAULT '',
     \\  test_progress TEXT NOT NULL DEFAULT '',
+    \\  custom_close TEXT NOT NULL DEFAULT '',
     \\  created INTEGER NOT NULL,
     \\  updated INTEGER NOT NULL
     \\);
@@ -258,7 +274,7 @@ pub fn open(ctx: Ctx, cfg: config.Config) !Db {
     return db;
 }
 
-const version = 9;
+const version = 10;
 
 pub fn migrate(db: Db) !void {
     const have = (try db.int("PRAGMA user_version", .{})) orelse 0;
@@ -269,6 +285,12 @@ pub fn migrate(db: Db) !void {
     if (have >= 1) {
         try addColumn(db, "tickets", "test_plan", "TEXT NOT NULL DEFAULT ''");
         try addColumn(db, "tickets", "test_progress", "TEXT NOT NULL DEFAULT ''");
+        // Version 10: the after-merge command and its run queue.
+        try addColumn(db, "projects", "after_merge", "TEXT NOT NULL DEFAULT ''");
+        try addColumn(db, "projects", "after_merge_pid", "INTEGER NOT NULL DEFAULT 0");
+        try addColumn(db, "projects", "after_merge_pending", "TEXT NOT NULL DEFAULT ''");
+        try addColumn(db, "projects", "after_merge_claude", "TEXT NOT NULL DEFAULT ''");
+        try addColumn(db, "tickets", "custom_close", "TEXT NOT NULL DEFAULT ''");
     }
     if (have >= version) return;
     // Version 1 had no sub-tickets, version 2 no planning skill.
@@ -298,11 +320,12 @@ test "migrate: a board another branch moved to a later version still gets the te
     const db = try Db.open(":memory:");
     defer db.close();
     try migrate(db);
-    try db.execMulti("ALTER TABLE tickets DROP COLUMN test_plan; ALTER TABLE tickets DROP COLUMN test_progress; PRAGMA user_version = 9");
+    try db.execMulti(std.fmt.comptimePrint("ALTER TABLE tickets DROP COLUMN test_plan; ALTER TABLE tickets DROP COLUMN test_progress; ALTER TABLE projects DROP COLUMN after_merge; PRAGMA user_version = {d}", .{version}));
     try migrate(db);
     try std.testing.expect((try db.int("SELECT 1 FROM pragma_table_info('tickets') WHERE name = 'test_progress'", .{})) != null);
     try std.testing.expect((try db.int("SELECT 1 FROM pragma_table_info('tickets') WHERE name = 'test_plan'", .{})) != null);
-    try std.testing.expectEqual(@as(?i64, 9), try db.int("PRAGMA user_version", .{}));
+    try std.testing.expect((try db.int("SELECT 1 FROM pragma_table_info('projects') WHERE name = 'after_merge'", .{})) != null);
+    try std.testing.expectEqual(@as(?i64, version), try db.int("PRAGMA user_version", .{}));
 }
 
 fn now(ctx: Ctx) i64 {
@@ -318,6 +341,8 @@ pub const ProjectInput = struct {
     slots: ?i64 = null,
     mode: ?Mode = null,
     profile: ?[]const u8 = null,
+    after_merge: ?[]const u8 = null,
+    after_merge_claude: ?[]const u8 = null,
 };
 
 /// A key prefix from a project name: a short first word as is (`qa-tool` →
@@ -379,8 +404,8 @@ pub fn addProject(db: Db, in: ProjectInput) Error!void {
     const prefix = in.prefix orelse defaultPrefix(&buf, in.name);
     if (!validPrefix(prefix)) return error.BadInput;
     if (try db.int("SELECT 1 FROM projects WHERE name = ?1 OR prefix = ?2", .{ in.name, prefix }) != null) return error.Exists;
-    try db.exec("INSERT INTO projects (name, dir, prefix, slots, mode, profile) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", .{
-        in.name, in.dir, prefix, in.slots orelse default_slots, @tagName(in.mode orelse .queue), in.profile orelse "",
+    try db.exec("INSERT INTO projects (name, dir, prefix, slots, mode, profile, after_merge, after_merge_claude) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)", .{
+        in.name, in.dir, prefix, in.slots orelse default_slots, @tagName(in.mode orelse .queue), in.profile orelse "", in.after_merge orelse "", in.after_merge_claude orelse "",
     });
 }
 
@@ -396,6 +421,8 @@ pub fn updateProject(db: Db, name: []const u8, in: ProjectInput) Error!void {
     if (in.slots) |s| try db.exec("UPDATE projects SET slots = ?2 WHERE name = ?1", .{ name, s });
     if (in.mode) |m| try db.exec("UPDATE projects SET mode = ?2 WHERE name = ?1", .{ name, @tagName(m) });
     if (in.profile) |p| try db.exec("UPDATE projects SET profile = ?2 WHERE name = ?1", .{ name, p });
+    if (in.after_merge) |c| try db.exec("UPDATE projects SET after_merge = ?2 WHERE name = ?1", .{ name, c });
+    if (in.after_merge_claude) |c| try db.exec("UPDATE projects SET after_merge_claude = ?2 WHERE name = ?1", .{ name, c });
     // Renaming last, so the lookups above still match.
     if (in.name.len > 0 and !std.mem.eql(u8, in.name, name)) {
         if (try db.int("SELECT 1 FROM projects WHERE name = ?1", .{in.name}) != null) return error.Exists;
@@ -410,7 +437,7 @@ pub fn removeProject(db: Db, name: []const u8) Error!void {
     try db.exec("DELETE FROM projects WHERE name = ?1", .{name});
 }
 
-const project_cols = "name, dir, prefix, slots, mode, profile";
+const project_cols = "name, dir, prefix, slots, mode, profile, after_merge, after_merge_claude";
 
 fn readProject(st: sqlite.Stmt, a: std.mem.Allocator) !Project {
     return .{
@@ -420,6 +447,8 @@ fn readProject(st: sqlite.Stmt, a: std.mem.Allocator) !Project {
         .slots = st.int(3),
         .mode = Mode.parse(st.text(4)) orelse .queue,
         .profile = try st.dupe(a, 5),
+        .after_merge = try st.dupe(a, 6),
+        .after_merge_claude = try st.dupe(a, 7),
     };
 }
 
@@ -436,6 +465,83 @@ pub fn getProject(db: Db, a: std.mem.Allocator, name: []const u8) Error!Project 
     defer st.finalize();
     if (!try st.step()) return error.NotFound;
     return readProject(st, a);
+}
+
+// ---- after-merge runs ----
+// One runner per project at a time (after_merge_pid); tickets merged while
+// it runs wait in after_merge_pending (keys, one per line) and get one more
+// run after it, on the newest trunk.
+
+/// Add a merged ticket to the project's next after-merge run.
+pub fn queueAfterMerge(db: Db, project: []const u8, key: []const u8) Error!void {
+    try db.exec("UPDATE projects SET after_merge_pending = after_merge_pending || ?2 || char(10) WHERE name = ?1", .{ project, key });
+    if (db.changes() == 0) return error.NotFound;
+}
+
+/// Become the project's runner unless `alive` says another one (a pid) is
+/// still running. False when one is.
+pub fn claimAfterMerge(db: Db, project: []const u8, pid: i64, alive: *const fn (i64) bool) Error!bool {
+    try db.execMulti("BEGIN IMMEDIATE");
+    errdefer db.execMulti("ROLLBACK") catch {};
+    const cur = (try db.int("SELECT after_merge_pid FROM projects WHERE name = ?1", .{project})) orelse return error.NotFound;
+    if (cur != 0 and cur != pid and alive(cur)) {
+        try db.execMulti("COMMIT");
+        return false;
+    }
+    try db.exec("UPDATE projects SET after_merge_pid = ?2 WHERE name = ?1", .{ project, pid });
+    try db.execMulti("COMMIT");
+    return true;
+}
+
+/// The runner takes what is waiting (ticket keys, one per line). With
+/// nothing waiting it lets go of the project in the same step, so a ticket
+/// queued just after starts a runner of its own; null then.
+pub fn takeAfterMerge(db: Db, a: std.mem.Allocator, project: []const u8) Error!?[]const u8 {
+    try db.execMulti("BEGIN IMMEDIATE");
+    errdefer db.execMulti("ROLLBACK") catch {};
+    var st = try db.query("SELECT after_merge_pending FROM projects WHERE name = ?1", .{project});
+    const pending = blk: {
+        defer st.finalize();
+        if (!try st.step()) return error.NotFound;
+        break :blk try st.dupe(a, 0);
+    };
+    if (std.mem.trim(u8, pending, " \n").len == 0) {
+        try db.exec("UPDATE projects SET after_merge_pid = 0, after_merge_pending = '' WHERE name = ?1", .{project});
+        try db.execMulti("COMMIT");
+        return null;
+    }
+    try db.exec("UPDATE projects SET after_merge_pending = '' WHERE name = ?1", .{project});
+    try db.execMulti("COMMIT");
+    return pending;
+}
+
+fn testAlive(pid: i64) bool {
+    return pid == 77;
+}
+
+test "after-merge runs: one runner, merges during it run once more after" {
+    const db = try Db.open(":memory:");
+    defer db.close();
+    try migrate(db);
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    try addProject(db, .{ .name = "p", .dir = "/tmp", .after_merge = "make" });
+    try std.testing.expectEqualStrings("make", (try getProject(db, a, "p")).after_merge);
+    try queueAfterMerge(db, "p", "P-1");
+    try std.testing.expect(try claimAfterMerge(db, "p", 77, testAlive));
+    try std.testing.expectEqualStrings("P-1\n", (try takeAfterMerge(db, a, "p")).?);
+    // Two merges land while it runs; another runner can't take over.
+    try queueAfterMerge(db, "p", "P-2");
+    try queueAfterMerge(db, "p", "P-3");
+    try std.testing.expect(!try claimAfterMerge(db, "p", 78, testAlive));
+    try std.testing.expectEqualStrings("P-2\nP-3\n", (try takeAfterMerge(db, a, "p")).?);
+    try std.testing.expectEqual(@as(?[]const u8, null), try takeAfterMerge(db, a, "p"));
+    // Let go: the next runner claims it.
+    try std.testing.expect(try claimAfterMerge(db, "p", 78, testAlive));
+    // A runner that died (not alive) doesn't hold it either.
+    try db.exec("UPDATE projects SET after_merge_pid = 99", .{});
+    try std.testing.expect(try claimAfterMerge(db, "p", 78, testAlive));
 }
 
 // ---- tickets ----
@@ -484,7 +590,7 @@ pub fn createTicket(ctx: Ctx, db: Db, a: std.mem.Allocator, in: TicketInput) Err
 }
 
 const ticket_cols = "t.id, t.key, t.project, t.title, t.body, t.stage, t.mode, t.plan, t.target, t.worktree, t.branch, t.profile, t.tmux, t.session_id, t.summary, t.round, t.created, t.updated, " ++
-    "coalesce((SELECT p.key FROM tickets p WHERE p.id = t.parent), ''), (SELECT count(*) FROM tickets c WHERE c.parent = t.id), t.skill, t.base, t.finishing, t.change_id, t.rank, t.killed, t.test_plan, t.test_progress";
+    "coalesce((SELECT p.key FROM tickets p WHERE p.id = t.parent), ''), (SELECT count(*) FROM tickets c WHERE c.parent = t.id), t.skill, t.base, t.finishing, t.change_id, t.rank, t.killed, t.test_plan, t.test_progress, t.custom_close";
 
 fn readTicket(st: sqlite.Stmt, a: std.mem.Allocator) !Ticket {
     return .{
@@ -516,6 +622,7 @@ fn readTicket(st: sqlite.Stmt, a: std.mem.Allocator) !Ticket {
         .killed = st.int(25) != 0,
         .test_plan = try st.dupe(a, 26),
         .test_progress = try st.dupe(a, 27),
+        .custom_close = try st.dupe(a, 28),
     };
 }
 
@@ -692,6 +799,13 @@ pub fn setTestPlan(ctx: Ctx, db: Db, id: i64, md: []const u8) Error!void {
 }
 
 /// Save how far testing got (left out of `updated`: it changes as you type).
+/// Claude's custom close (see Ticket.custom_close); "" clears it.
+pub fn setCustomClose(ctx: Ctx, db: Db, id: i64, text: []const u8) Error!void {
+    try db.exec("UPDATE tickets SET custom_close = ?2 WHERE id = ?1", .{ id, text });
+    try logEvent(ctx, db, id, if (text.len > 0) "custom close" else "custom close cleared", text);
+    try touch(ctx, db, id);
+}
+
 pub fn setTestProgress(db: Db, id: i64, json: []const u8) Error!void {
     try db.exec("UPDATE tickets SET test_progress = ?2 WHERE id = ?1", .{ id, json });
 }
@@ -744,7 +858,9 @@ fn moveId(ctx: Ctx, db: Db, id: i64, from: Stage, to: Stage) Error!void {
     if (from == .review) try clearFlagId(ctx, db, id, flag_review);
     if (from == .testing) try clearFlagId(ctx, db, id, flag_testing);
     if (to == .testing) try setFlagId(ctx, db, id, flag_testing, "auto", "");
-    if (to == .done) try db.exec("UPDATE flags SET cleared = ?2 WHERE ticket = ?1 AND cleared IS NULL", .{ id, now(ctx) });
+    // All but a failed after-merge run's: that comes after the merge, so it
+    // stays until the next run (or the human) clears it.
+    if (to == .done) try db.exec("UPDATE flags SET cleared = ?2 WHERE ticket = ?1 AND cleared IS NULL AND kind != ?3", .{ id, now(ctx), flag_after_merge });
     try touch(ctx, db, id);
 }
 
