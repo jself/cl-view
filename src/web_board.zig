@@ -9,7 +9,7 @@
 //!   POST /api/ticket/<key>/<action>     edit move rank comment flag unflag done approve start
 //!                                       answer key kill hide unhide rm cleanup gutter
 //!                                       gutter-stop launch launch-stop test-progress
-//!                                       test-results relocate
+//!                                       test-results relocate park unpark
 //!   POST /api/project                   add a project
 //!   POST /api/project/<name>/<action>   set rm after-merge
 const std = @import("std");
@@ -25,6 +25,7 @@ const worktree = @import("worktree.zig");
 const web = @import("web.zig");
 const operator = @import("operator.zig");
 const after_merge = @import("after_merge.zig");
+const park = @import("park.zig");
 
 const board_html = @embedFile("web/board.html");
 
@@ -106,6 +107,9 @@ pub fn handle(ctx: Ctx, cfg: config.Config, req: *std.http.Server.Request, path:
             error.WorktreeFailed => .{ .internal_server_error, worktree.lastError() },
             error.Busy => .{ .conflict, "Claude is working in its session or waiting on you; it can move once it is idle" },
             error.NoChange => .{ .conflict, "its work has no jj change of its own to move with it" },
+            error.NotParked => .{ .conflict, "it isn't parked" },
+            error.Finished => .{ .conflict, "it's done; there's nothing to park" },
+            error.BadDuration => .{ .bad_request, "every and max are durations like 90s, 30m, 1h, 1d, 1w (every at least 1m)" },
             error.SessionFailed => .{ .internal_server_error, "the session didn't start" },
             error.OperatorFailed => .{ .internal_server_error, "couldn't reach the operator; open Chat to check on it" },
             error.OpenSubtickets => .{ .conflict, "it has sub-tickets that aren't done yet; finish them or spin them off" },
@@ -165,7 +169,22 @@ const Body = struct {
     /// Moving or ranking: the keys of the tickets it lands between.
     after: ?[]const u8 = null,
     before: ?[]const u8 = null,
+    /// unpark: end the park without resuming the session.
+    no_resume: ?bool = null,
+    /// park: what it waits on, the check command ("" for none), and its
+    /// interval and give-up time as durations ("1h", "7d"; "" for defaults).
+    reason: ?[]const u8 = null,
+    until: ?[]const u8 = null,
+    every: ?[]const u8 = null,
+    max: ?[]const u8 = null,
 };
+
+/// A duration from the board ("1h"), or `default` when it is left empty.
+fn durationOr(s: ?[]const u8, default: i64) !i64 {
+    const v = std.mem.trim(u8, s orelse "", " ");
+    if (v.len == 0) return default;
+    return park.parseDuration(v) orelse error.BadDuration;
+}
 
 fn finishOf(b: Body) !actions.Finish {
     const f = b.finish orelse "close";
@@ -316,6 +335,15 @@ fn ticketAction(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator
         try actions.answer(ctx, cfg, db, a, key, b.answers orelse return error.BadInput);
     } else if (eql(u8, action, "kill")) {
         return ok(req, a, try actions.kill(ctx, cfg, db, a, key));
+    } else if (eql(u8, action, "park")) {
+        const every = try durationOr(b.every, park.default_every);
+        if (every < 60) return error.BadDuration;
+        const r = try park.park(ctx, db, a, key, .{ .reason = b.reason orelse "", .until = b.until orelse "", .every = every, .max = try durationOr(b.max, park.default_max) });
+        try park.stopSession(ctx, cfg, db, a, key);
+        return ok(req, a, .{ .session = r.session orelse "", .others = r.others });
+    } else if (eql(u8, action, "unpark")) {
+        const r = try park.unpark(ctx, cfg, db, a, key, !(b.no_resume orelse false));
+        return ok(req, a, .{ .resumed = if (r.resumed) |x| @tagName(x) else "" });
     } else if (eql(u8, action, "hide") or eql(u8, action, "unhide")) {
         _ = try board.hideNeeds(ctx, db, a, key, eql(u8, action, "hide"));
     } else if (eql(u8, action, "key")) {

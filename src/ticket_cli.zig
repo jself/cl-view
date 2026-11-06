@@ -12,6 +12,7 @@ const worktree = @import("worktree.zig");
 const actions = @import("actions.zig");
 const review = @import("review.zig");
 const after_merge = @import("after_merge.zig");
+const park = @import("park.zig");
 
 pub const ticket_usage =
     \\usage: cl ticket <command>    (cl t for short)
@@ -23,7 +24,7 @@ pub const ticket_usage =
     \\  sub <title> [-m <body>] [options of new]
     \\                              in a ticket's session: a sub-ticket of $CL_TICKET
     \\  list [--stage <s>] [--project <p>] [--flag <f>] [--needs] [--search <q>] [--open]
-    \\      [--top] [--parent <key>]
+    \\      [--top] [--parent <key>] [--parked]
     \\                              tickets, newest first (--needs: oldest ask first;
     \\                              --top: no sub-tickets; --parent: its sub-tickets)
     \\  needs [--hidden]            tickets with a flag, oldest first (the inbox); a ticket
@@ -55,6 +56,16 @@ pub const ticket_usage =
     \\  kill <key>                  end its session, as cl kill does; it keeps its stage, raises
     \\                              no flag, and waits for start to restart it. A queue
     \\                              project's session is shared: other tickets on it let go too
+    \\  park [<key>] --reason <text> [--until <shell command>] [--every <interval>] [--max <time>]
+    \\                              wait on something outside cl (a PR review, a deploy): end its
+    \\                              session as kill does and keep it out of the inbox. With --until
+    \\                              the dispatcher runs the command from the ticket's directory
+    \\                              every --every (default 1h; 90s 30m 1h 1d 1w); exit 0 wakes it:
+    \\                              flagged unparked, and its session resumes, told so. No pass
+    \\                              within --max (default 7d): flagged park-expired, not resumed.
+    \\                              The dispatcher never starts a parked ticket, even in Queued
+    \\  unpark <key> [--no-resume]   end the park now and resume its session (--no-resume: just
+    \\                              end it; the session stays stopped)
     \\  approve <key> [--spin-off] [--merge | --pr | --tell <text> | --close]
     \\                              plan → running (tells Claude), review → testing, testing → done
     \\  answer <key> <answer>...    answer the question (one per question: an option number or
@@ -351,6 +362,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
     const cmd = argv[0];
     const args = try Args.parse(a, argv[1..], &.{
         "--body", "--target", "--stage", "--profile", "--project", "--flag", "--search", "--title", "--as", "--summary", "--test-plan", "--step", "--parent", "--skill", "--pr-url", "--before", "--after", "--tell",
+        "--reason", "--until", "--every", "--max", "--at",
     }, ticket_usage);
     const env_key = ctx.env.get("CL_TICKET");
     const db = openBoard(ctx, cfg);
@@ -380,7 +392,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         return out(try std.fmt.allocPrint(a, "{s}\n", .{key}));
     }
     if (std.mem.eql(u8, cmd, "list") or std.mem.eql(u8, cmd, "ls") or std.mem.eql(u8, cmd, "needs")) {
-        args.only(&.{ "--stage", "--project", "--flag", "--needs", "--hidden", "--search", "--open", "--top", "--parent", "--json" }, ticket_usage);
+        args.only(&.{ "--stage", "--project", "--flag", "--needs", "--hidden", "--search", "--open", "--top", "--parent", "--parked", "--json" }, ticket_usage);
         if (pos.len != 0) fail("{s} takes no arguments\n{s}", .{ cmd, ticket_usage });
         const needs = args.has("--needs") or args.has("--hidden") or std.mem.eql(u8, cmd, "needs");
         const ts = board.listTickets(db, a, .{
@@ -395,11 +407,12 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
             .done = !args.has("--open"),
             .top = args.has("--top"),
             .parent = args.get("--parent"),
+            .parked = args.has("--parked"),
         }) catch |e| boardFail(db, e, "ticket");
         if (args.has("--json")) return out(try std.fmt.allocPrint(a, "{f}\n", .{std.json.fmt(ts, .{})}));
         var aw: std.Io.Writer.Allocating = .init(a);
         // key, stage, project, flags, parent, title
-        for (ts) |t| try aw.writer.print("{s}\t{s}\t{s}\t{s}\t{s}\t{s}\n", .{ t.key, @tagName(t.stage), t.project, try flagList(a, t.flags), if (t.parent.len > 0) t.parent else "-", t.title });
+        for (ts) |t| try aw.writer.print("{s}\t{s}\t{s}\t{s}\t{s}\t{s}{s}{s}\n", .{ t.key, @tagName(t.stage), t.project, try flagList(a, t.flags), if (t.parent.len > 0) t.parent else "-", t.title, if (t.park != null) "\tparked: " else "", if (t.park) |p| p.reason else "" });
         return out(aw.writer.buffered());
     }
     if (std.mem.eql(u8, cmd, "show")) {
@@ -577,6 +590,60 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         });
         if (r.others.len > 0) try aw.writer.print("it was shared: {s} let go of it too\n", .{try std.mem.join(a, ", ", r.others)});
         return out(aw.writer.buffered());
+    }
+    if (std.mem.eql(u8, cmd, "park")) {
+        args.only(&.{ "--reason", "--until", "--every", "--max" }, ticket_usage);
+        const usage = "cl ticket park [<key>] --reason <text> [--until <shell command>] [--every <interval>] [--max <time>]";
+        const key = keyArg(pos, 0, env_key, usage);
+        const reason = args.get("--reason") orelse fail("say what it waits on: --reason <text>\nusage: {s}", .{usage});
+        const until = args.get("--until") orelse "";
+        if (until.len == 0 and (args.has("--every") or args.has("--max"))) fail("--every and --max go with --until (a check to run)", .{});
+        const every = durationArg(args, "--every", park.default_every);
+        if (every < 60) fail("--every is at least 1m", .{});
+        const max = durationArg(args, "--max", park.default_max);
+        const r = park.park(ctx, db, a, key, .{ .reason = reason, .until = until, .every = every, .max = max }) catch |e| switch (e) {
+            error.Finished => fail("{s} is done; there's nothing to park", .{key}),
+            error.BadInput => fail("say what it waits on: --reason <text>", .{}),
+            else => boardFail(db, e, "ticket"),
+        };
+        const t = board.getTicket(db, a, key) catch |e| boardFail(db, e, "ticket");
+        var aw: std.Io.Writer.Allocating = .init(a);
+        try aw.writer.print("{s} parked: {s}\n", .{ t.key, t.park.?.reason });
+        if (until.len > 0) {
+            try aw.writer.print("The dispatcher (cl web, or cl ticket dispatch) checks it now and every {s} for up to {s}; when the check passes, its session resumes.\n", .{ try park.formatDuration(a, every), try park.formatDuration(a, max) });
+        } else try aw.writer.print("Nothing checks it: `cl ticket unpark {s}` resumes it.\n", .{t.key});
+        if (r.session) |s| {
+            try aw.writer.print("Its session {s} closes now{s}.\n", .{ s, if (t.session_id.len == 36) "; its conversation resumes when it wakes" else "" });
+            if (r.others.len > 0) try aw.writer.print("It was shared: {s} let go of it too.\n", .{try std.mem.join(a, ", ", r.others)});
+        }
+        // Said first: from inside the session, this process goes with it.
+        try out(aw.writer.buffered());
+        park.stopSession(ctx, cfg, db, a, t.key) catch |e| boardFail(db, e, "ticket");
+        return;
+    }
+    if (std.mem.eql(u8, cmd, "unpark")) {
+        args.only(&.{"--no-resume"}, ticket_usage);
+        if (pos.len != 1) fail("usage: cl ticket unpark <key> [--no-resume]", .{});
+        const r = park.unpark(ctx, cfg, db, a, pos[0], !args.has("--no-resume")) catch |e| switch (e) {
+            error.NotParked => fail("{s} isn't parked", .{pos[0]}),
+            error.WorktreeFailed => fail("unparked, but its worktree couldn't be made: {s}", .{worktree.lastError()}),
+            error.SessionFailed => fail("unparked, but its session didn't start", .{}),
+            else => boardFail(db, e, "ticket"),
+        };
+        const t = board.getTicket(db, a, pos[0]) catch |e| boardFail(db, e, "ticket");
+        return out(if (r.resumed) |how| switch (how) {
+            .started => try std.fmt.allocPrint(a, "{s} unparked; resumed in {s}\n", .{ t.key, t.tmux }),
+            .waiting => try std.fmt.allocPrint(a, "{s} unparked; its session is busy with another ticket, so it waits in Queued and resumes there\n", .{t.key}),
+            .running => try std.fmt.allocPrint(a, "{s} unparked; it already has a session ({s})\n", .{ t.key, t.tmux }),
+        } else try std.fmt.allocPrint(a, "{s} unparked; its session stays stopped (`cl ticket start {s}` restarts it)\n", .{ t.key, t.key }));
+    }
+    if (std.mem.eql(u8, cmd, "park-check")) {
+        // The dispatcher's detached check (park.zig).
+        args.only(&.{"--at"}, ticket_usage);
+        if (pos.len != 1) fail("usage: cl ticket park-check <key> --at <when>", .{});
+        const at = std.fmt.parseInt(i64, args.get("--at") orelse fail("--at <when>", .{}), 10) catch fail("--at takes the park's time", .{});
+        park.runCheck(ctx, cfg, db, pos[0], at);
+        return;
     }
     if (std.mem.eql(u8, cmd, "hide") or std.mem.eql(u8, cmd, "unhide")) {
         args.only(&.{}, ticket_usage);
@@ -793,6 +860,12 @@ fn openUrl(ctx: Ctx, url: []const u8) void {
     out("  couldn't open a browser; visit it by hand\n") catch {};
 }
 
+/// A duration option ("1h", "7d"), or `default` without it.
+fn durationArg(args: Args, name: []const u8, default: i64) i64 {
+    const s = args.get(name) orelse return default;
+    return park.parseDuration(s) orelse fail("{s}: not a duration: {s} (like 90s, 30m, 1h, 1d, 1w, 1h30m)", .{ name, s });
+}
+
 /// --merge, --pr, --tell <text> or --close (the default).
 fn finishArg(args: Args) actions.Finish {
     const n = @as(u8, @intFromBool(args.has("--merge"))) + @intFromBool(args.has("--pr")) + @intFromBool(args.has("--tell")) + @intFromBool(args.has("--close"));
@@ -868,7 +941,14 @@ fn showText(ctx: Ctx, a: std.mem.Allocator, t: board.Ticket, subs: []const board
     });
     if (t.parent.len > 0) try w.print("sub-ticket of: {s}\n", .{t.parent});
     if (t.tmux.len > 0) try w.print("session: {s}\n", .{t.tmux});
-    if (t.killed) try w.print("session: killed; `cl ticket start {s}` restarts it\n", .{t.key});
+    if (t.park) |p| {
+        try w.print("parked: {s} (since {s}; `cl ticket unpark {s}` resumes it)\n", .{ p.reason, try stamp(a, p.at), t.key });
+        if (p.until.len > 0) {
+            try w.print("  until: {s}\n  every {s}, until {s}\n", .{ p.until, try park.formatDuration(a, p.every), try stamp(a, p.deadline) });
+            if (p.checked > 0) try w.print("  last check: {s}: {s}\n", .{ try stamp(a, p.checked), p.result }) else try w.writeAll("  last check: none yet\n");
+            try w.print("  next check: {s}\n", .{try stamp(a, p.next)});
+        }
+    } else if (t.killed) try w.print("session: killed; `cl ticket start {s}` restarts it\n", .{t.key});
     if (t.custom_close.len > 0) try w.print("custom close: {s}\n", .{t.custom_close});
     if (t.finishing.len > 0) try w.print("finishing: {s} (Claude is {s}; it goes to done after)\n", .{ t.finishing, finishingWhat(t.finishing) });
     if (t.worktree.len > 0) try w.print("worktree: {s}   branch: {s}\n", .{ try ctx.shortenHomeIn(a, t.worktree), t.branch });

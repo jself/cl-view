@@ -36,7 +36,7 @@ pub const Error = error{
     CustomClose,
 };
 
-fn liveSession(ctx: Ctx, t: board.Ticket) ?[]const u8 {
+pub fn liveSession(ctx: Ctx, t: board.Ticket) ?[]const u8 {
     if (t.tmux.len == 0 or t.tmux[0] == '(' or !tmux.hasSession(ctx, t.tmux)) return null;
     return t.tmux;
 }
@@ -386,8 +386,10 @@ pub fn kill(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, ke
     var st = try db.query("SELECT key FROM tickets WHERE tmux = ?1 AND id != ?2 AND stage != 'done' ORDER BY id", .{ s, t.id });
     defer st.finalize();
     while (try st.step()) try others.append(a, try st.dupe(a, 0));
-    try tmux.kill(ctx, s);
+    // The board first: run from inside the session (Claude parking its own
+    // ticket), this process goes with it.
     try board.sessionKilled(ctx, db, a, s);
+    try tmux.kill(ctx, s);
     return .{ .session = s, .others = others.items, .resumes = t.session_id.len == 36 };
 }
 

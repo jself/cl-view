@@ -10,6 +10,8 @@ const sgr = @import("sgr.zig");
 const operator = @import("operator.zig");
 const history = @import("history.zig");
 const actions = @import("actions.zig");
+const board = @import("board.zig");
+const park = @import("park.zig");
 
 const Event = union(enum) {
     key_press: vaxis.Key,
@@ -21,6 +23,8 @@ const Mode = union(enum) {
     list,
     /// R: closed sessions, most recently closed first; Enter resumes one.
     history,
+    /// P: parked tickets (cl ticket park); Enter resumes one.
+    parked,
     confirm_kill,
     input: Input,
 };
@@ -48,6 +52,12 @@ const App = struct {
     /// Index into histVisible(), not into `closed`.
     hist_cursor: usize = 0,
     hist_filter: []const u8 = "",
+    /// The board, opened on the first refresh (null when it can't be).
+    db: ?board.Db = null,
+    db_tried: bool = false,
+    /// Parked tickets, re-read each refresh (in the arena).
+    parked: []board.Ticket = &.{},
+    park_cursor: usize = 0,
     /// The operator, when it is running (hidden from `sessions`).
     op: ?tmux.Session = null,
     statuses: claude.StatusMap = .empty,
@@ -120,6 +130,12 @@ const App = struct {
         return std.fmt.allocPrint(self.arena(), " · {d} hidden (H)", .{n});
     }
 
+    /// Header note about parked tickets: they have no session, so P lists them.
+    fn parkedNote(self: *App) ![]const u8 {
+        if (self.parked.len == 0) return "";
+        return std.fmt.allocPrint(self.arena(), " · {d} parked (P)", .{self.parked.len});
+    }
+
     fn lessByGroup(self: *App, a: usize, b: usize) bool {
         return self.status(self.sessions[a]).rank() < self.status(self.sessions[b]).rank();
     }
@@ -145,6 +161,12 @@ const App = struct {
         self.op = try tmux.operator(self.ctx, self.arena());
         self.statuses = try claude.readStatuses(self.ctx, self.arena(), self.cfg);
         history.sync(self.ctx, self.ctx.gpa, &self.known, self.sessions, self.statuses) catch {};
+        if (!self.db_tried) {
+            self.db_tried = true;
+            self.db = board.open(self.ctx, self.cfg) catch null;
+        }
+        self.parked = if (self.db) |db| board.listTickets(db, self.arena(), .{ .parked = true }) catch &.{} else &.{};
+        if (self.park_cursor >= self.parked.len) self.park_cursor = self.parked.len -| 1;
         if (keep) |k| self.selectByName(k);
         try self.loadPreview();
         self.last_refresh_ms = std.Io.Timestamp.now(self.ctx.io, .real).toMilliseconds();
@@ -207,6 +229,7 @@ const App = struct {
         switch (self.mode) {
             .list => try self.handleListKey(key),
             .history => try self.handleHistoryKey(key),
+            .parked => try self.handleParkedKey(key),
             .confirm_kill => {
                 if (key.matches('y', .{}) or key.matches(vaxis.Key.enter, .{})) {
                     if (self.selected()) |s| {
@@ -306,6 +329,10 @@ const App = struct {
             self.hist_filter = "";
             self.scroll = 0;
             self.mode = .history;
+        } else if (key.matches('P', .{}) or key.matches('p', .{ .shift = true })) {
+            self.park_cursor = 0;
+            self.scroll = 0;
+            self.mode = .parked;
         } else if (key.matches('r', .{ .ctrl = true })) {
             try self.refresh();
         } else if (key.matches(vaxis.Key.tab, .{})) {
@@ -370,6 +397,73 @@ const App = struct {
             try self.attach(tmux_name);
             if (fresh) self.setMessage("{s}: Claude had deleted the transcript, so that was a new session", .{e.name});
         }
+    }
+
+    fn handleParkedKey(self: *App, key: vaxis.Key) !void {
+        const count = self.parked.len;
+        if (key.matches(vaxis.Key.escape, .{}) or key.matches('q', .{}) or key.matches('P', .{}) or key.matches('p', .{ .shift = true })) {
+            self.mode = .list;
+            self.scroll = 0;
+        } else if (key.matches('c', .{ .ctrl = true })) {
+            self.quit = true;
+        } else if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) {
+            if (self.park_cursor + 1 < count) self.park_cursor += 1;
+        } else if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) {
+            if (self.park_cursor > 0) self.park_cursor -= 1;
+        } else if (key.matches(vaxis.Key.enter, .{}) or key.matches('u', .{}) or key.matches('x', .{})) {
+            if (count == 0) return;
+            const db = self.db orelse return;
+            const t = self.parked[self.park_cursor];
+            const resume_it = !key.matches('x', .{});
+            const r = park.unpark(self.ctx, self.cfg, db, self.arena(), t.key, resume_it) catch |err| {
+                self.setMessage("unpark failed: {s}", .{@errorName(err)});
+                return;
+            };
+            const key_s = try self.form().dupe(u8, t.key);
+            try self.refresh();
+            if (r.resumed) |how| switch (how) {
+                .waiting => self.setMessage("{s} unparked; it waits in Queued for its session", .{key_s}),
+                else => self.setMessage("{s} unparked and resumed", .{key_s}),
+            } else self.setMessage("{s} unparked; its session stays stopped", .{key_s});
+            if (self.parked.len == 0) self.mode = .list;
+        }
+    }
+
+    fn buildParkedLines(self: *App, width: u16) ![]Line {
+        var lines: std.ArrayList(Line) = .empty;
+        const now = self.ctx.nowSeconds();
+        for (self.parked, 0..) |t, i| {
+            const p = t.park.?;
+            const age = try ageText(self.arena(), now - p.at);
+            // "  KEY  title  reason  age"
+            const fixed = 2 + cols(t.key) + 2 + cols(t.title) + 2 + 2 + age.len;
+            try lines.append(self.arena(), .{ .vi = i, .segs = try self.arena().dupe(vaxis.Segment, &.{
+                .{ .text = "  " },
+                .{ .text = t.key, .style = .{ .bold = true } },
+                .{ .text = "  " },
+                .{ .text = t.title },
+                .{ .text = "  " },
+                .{ .text = try truncate(self.arena(), p.reason, width -| fixed), .style = .{ .italic = true, .dim = true } },
+                .{ .text = try std.fmt.allocPrint(self.arena(), "  {s}", .{age}), .style = .{ .dim = true } },
+            }) });
+        }
+        return lines.toOwnedSlice(self.arena());
+    }
+
+    /// What the selected parked ticket waits on, in the preview area.
+    fn parkedDetail(self: *App, t: board.Ticket) ![]const u8 {
+        const p = t.park.?;
+        const now = self.ctx.nowSeconds();
+        var aw: std.Io.Writer.Allocating = .init(self.arena());
+        try aw.writer.print("Parked {s} ago: {s}\n\n", .{ try ageText(self.arena(), now - p.at), p.reason });
+        if (p.until.len == 0) {
+            try aw.writer.writeAll("Nothing checks it: Enter resumes it.");
+        } else {
+            try aw.writer.print("Wakes when this passes, checked every {s}:\n  {s}\n\n", .{ try park.formatDuration(self.arena(), p.every), p.until });
+            if (p.checked > 0) try aw.writer.print("Last check {s}: {s}\n", .{ try agoText(self.arena(), now - p.checked), p.result }) else try aw.writer.writeAll("Not checked yet\n");
+            try aw.writer.print("Next check {s}; gives up {s}", .{ try inText(self.arena(), p.next - now), try inText(self.arena(), p.deadline - now) });
+        }
+        return aw.written();
     }
 
     fn buildHistoryLines(self: *App, vis: []const usize, width: u16) ![]Line {
@@ -530,9 +624,15 @@ const App = struct {
         };
         var hbuf: [4096]usize = undefined;
         const hvis = if (in_history) self.histVisible(&hbuf) else &.{};
+        const in_parked = self.mode == .parked;
         // Where the header text ends, so the operator label can avoid it.
         var header_end: u16 = 0;
-        if (in_history) {
+        if (in_parked) {
+            header_end = win.print(&.{
+                .{ .text = " PARKED  ", .style = bold },
+                .{ .text = try std.fmt.allocPrint(self.arena(), "{d} ticket{s} waiting on something outside cl", .{ self.parked.len, if (self.parked.len == 1) "" else "s" }), .style = .{ .dim = true } },
+            }, .{ .wrap = .none }).col;
+        } else if (in_history) {
             header_end = win.print(&.{
                 .{ .text = " RESUME  ", .style = bold },
                 .{ .text = if (self.hist_filter.len > 0)
@@ -544,7 +644,7 @@ const App = struct {
         // Header: counts per group, like `claude agents`.
         var counts = std.enums.EnumArray(claude.Status, usize).initFill(0);
         for (vis) |si| counts.getPtr(self.status(self.sessions[si])).* += 1;
-        if (!in_history) header_end = win.print(&.{
+        if (!in_history and !in_parked) header_end = win.print(&.{
             .{ .text = " SESSIONS  ", .style = bold },
             .{ .text = try std.fmt.allocPrint(self.arena(), "{d} need input", .{counts.get(.blocked)}), .style = .{ .fg = statusColor(.blocked) } },
             .{ .text = " · ", .style = .{ .dim = true } },
@@ -554,6 +654,7 @@ const App = struct {
             .{ .text = " · ", .style = .{ .dim = true } },
             .{ .text = try std.fmt.allocPrint(self.arena(), "{d} other", .{vis.len - counts.get(.blocked) - counts.get(.busy) - counts.get(.idle) - counts.get(.shell)}), .style = .{ .dim = true } },
             .{ .text = try self.hiddenNote(), .style = .{ .dim = true, .italic = true } },
+            .{ .text = try self.parkedNote(), .style = .{ .dim = true, .italic = true } },
         }, .{ .wrap = .none }).col;
         if (self.op) |op| {
             const st = self.status(op);
@@ -570,8 +671,8 @@ const App = struct {
         }
 
         // Split the rest between the list (top) and the preview (bottom).
-        const lines = if (in_history) try self.buildHistoryLines(hvis, win.width) else try self.buildLines(vis, win.width);
-        const cursor = if (in_history) self.hist_cursor else self.cursor;
+        const lines = if (in_parked) try self.buildParkedLines(win.width) else if (in_history) try self.buildHistoryLines(hvis, win.width) else try self.buildLines(vis, win.width);
+        const cursor = if (in_parked) self.park_cursor else if (in_history) self.hist_cursor else self.cursor;
         const avail: u16 = win.height -| 4; // header, gap under list, separator, bottom line
         const preview_min: u16 = @min(10, avail / 2);
         // The list takes at most a third of the window, then scrolls.
@@ -602,7 +703,9 @@ const App = struct {
                 _ = row.print(l.segs, .{ .wrap = .none });
             }
         }
-        if (in_history and hvis.len == 0) {
+        if (in_parked and self.parked.len == 0) {
+            _ = list.printSegment(.{ .text = "  no parked tickets.", .style = .{ .dim = true } }, .{ .wrap = .none });
+        } else if (in_history and hvis.len == 0) {
             const t = if (self.closed.len == 0) "  no closed sessions yet." else "  no closed sessions match the filter.";
             _ = list.printSegment(.{ .text = t, .style = .{ .dim = true } }, .{ .wrap = .none });
         } else if (!in_history and vis.len == 0) {
@@ -613,7 +716,15 @@ const App = struct {
         const sep_y: u16 = 1 + list_h + 1;
         var x: u16 = 0;
         while (x < win.width) : (x += 1) win.writeCell(x, sep_y, .{ .char = .{ .grapheme = "─" }, .style = .{ .dim = true } });
-        if (in_history) {
+        if (in_parked) {
+            if (self.parked.len > 0) {
+                const t = self.parked[self.park_cursor];
+                const title = try std.fmt.allocPrint(self.arena(), " {s}  {s} ", .{ t.key, t.project });
+                _ = win.printSegment(.{ .text = title, .style = .{ .dim = true } }, .{ .row_offset = sep_y, .col_offset = 1, .wrap = .none });
+                const right = win.child(.{ .x_off = 2, .y_off = sep_y + 1, .width = win.width -| 4, .height = preview_h });
+                _ = right.printSegment(.{ .text = try self.parkedDetail(t) }, .{ .wrap = .word });
+            }
+        } else if (in_history) {
             if (hvis.len > 0) {
                 const c = self.closed[hvis[self.hist_cursor]];
                 const how = if (!c.resumable)
@@ -642,11 +753,15 @@ const App = struct {
         const bottom = win.child(.{ .y_off = win.height -| 1, .height = 1 });
         switch (self.mode) {
             .list => {
-                const help = if (self.message.len > 0) self.message else  " enter attach  tab details  n new  o operator  R resume closed  h hide  H show hidden  d kill  r rename  s send  / filter  q quit  (ctrl-q detaches)";
+                const help = if (self.message.len > 0) self.message else  " enter attach  tab details  n new  o operator  R resume closed  P parked  h hide  H show hidden  d kill  r rename  s send  / filter  q quit  (ctrl-q detaches)";
                 _ = bottom.printSegment(.{ .text = help, .style = .{ .dim = true } }, .{ .wrap = .none });
             },
             .history => {
                 const help = if (self.message.len > 0) self.message else  " enter resume  / filter  j/k move  esc back";
+                _ = bottom.printSegment(.{ .text = help, .style = .{ .dim = true } }, .{ .wrap = .none });
+            },
+            .parked => {
+                const help = if (self.message.len > 0) self.message else  " enter unpark and resume  x unpark, leave it stopped  j/k move  esc back";
                 _ = bottom.printSegment(.{ .text = help, .style = .{ .dim = true } }, .{ .wrap = .none });
             },
             .confirm_kill => {
@@ -711,6 +826,18 @@ fn ageSince(s: tmux.Session, info: ?claude.Info) i64 {
     return if (s.activity > 0) s.activity else s.created;
 }
 
+/// "just now" or "5m ago".
+fn agoText(arena: std.mem.Allocator, secs: i64) ![]const u8 {
+    if (secs < 60) return "just now";
+    return std.fmt.allocPrint(arena, "{s} ago", .{try ageText(arena, secs)});
+}
+
+/// "now" (due, or under a minute off) or "in 5m".
+fn inText(arena: std.mem.Allocator, secs: i64) ![]const u8 {
+    if (secs < 60) return "now";
+    return std.fmt.allocPrint(arena, "in {s}", .{try ageText(arena, secs)});
+}
+
 fn ageText(arena: std.mem.Allocator, secs: i64) ![]const u8 {
     const t = @max(secs, 0);
     if (t < 60) return "now";
@@ -767,6 +894,7 @@ pub fn run(ctx: Ctx, cfg: config.Config, select: ?[]const u8) !void {
     defer app.arena_state.deinit();
     defer app.form_state.deinit();
     defer app.hist_state.deinit();
+    defer if (app.db) |db| db.close();
     defer history.freeKnown(ctx.gpa, &app.known);
     history.seed(ctx, ctx.gpa, &app.known) catch {};
     defer app.input.deinit();

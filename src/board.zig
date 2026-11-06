@@ -48,6 +48,8 @@ pub const flag_review = "review"; // Claude said done; review it
 pub const flag_testing = "testing"; // try it out
 pub const flag_conflict = "conflict"; // merging it back conflicts
 pub const flag_after_merge = "after-merge"; // the project's after-merge command failed
+pub const flag_unparked = "unparked"; // its park's condition came true; it resumed
+pub const flag_park_expired = "park-expired"; // its park's check never passed in time
 
 pub const Project = struct {
     name: []const u8,
@@ -86,6 +88,26 @@ pub const Comment = struct {
     /// Typed into the ticket's session.
     sent: bool,
     at: i64,
+};
+
+/// A parked ticket: its session was killed while it waits on something
+/// outside cl (park.zig). It stays out of Needs You until it wakes.
+pub const Park = struct {
+    reason: []const u8,
+    /// Shell command that says the wait is over (exit 0); "" for none (it
+    /// waits for `unpark`).
+    until: []const u8 = "",
+    /// Seconds between checks.
+    every: i64 = 0,
+    /// When it was parked.
+    at: i64,
+    /// Checks stop after this (0: no checks).
+    deadline: i64 = 0,
+    /// When the next check is due.
+    next: i64 = 0,
+    /// When the last check finished (0: none yet) and what it said.
+    checked: i64 = 0,
+    result: []const u8 = "",
 };
 
 pub const Event = struct {
@@ -151,6 +173,8 @@ pub const Ticket = struct {
     /// it waits for you to restart it rather than for the dispatcher.
     killed: bool = false,
     flags: []Flag = &.{},
+    /// Set while it is parked.
+    park: ?Park = null,
 };
 
 pub const Error = error{ Sqlite, NotFound, Exists, BadInput, OutOfMemory };
@@ -274,7 +298,23 @@ pub fn open(ctx: Ctx, cfg: config.Config) !Db {
     return db;
 }
 
-const version = 10;
+const version = 11;
+
+/// Version 11: parked tickets. Made whatever the version says, as the
+/// columns above are.
+const parks_schema =
+    \\CREATE TABLE IF NOT EXISTS parks (
+    \\  ticket INTEGER PRIMARY KEY REFERENCES tickets(id) ON DELETE CASCADE,
+    \\  reason TEXT NOT NULL,
+    \\  until_cmd TEXT NOT NULL DEFAULT '',
+    \\  every INTEGER NOT NULL DEFAULT 0,
+    \\  at INTEGER NOT NULL,
+    \\  deadline INTEGER NOT NULL DEFAULT 0,
+    \\  next INTEGER NOT NULL DEFAULT 0,
+    \\  checked INTEGER NOT NULL DEFAULT 0,
+    \\  result TEXT NOT NULL DEFAULT ''
+    \\);
+;
 
 pub fn migrate(db: Db) !void {
     const have = (try db.int("PRAGMA user_version", .{})) orelse 0;
@@ -291,6 +331,7 @@ pub fn migrate(db: Db) !void {
         try addColumn(db, "projects", "after_merge_pending", "TEXT NOT NULL DEFAULT ''");
         try addColumn(db, "projects", "after_merge_claude", "TEXT NOT NULL DEFAULT ''");
         try addColumn(db, "tickets", "custom_close", "TEXT NOT NULL DEFAULT ''");
+        try db.execMulti(parks_schema);
     }
     if (have >= version) return;
     // Version 1 had no sub-tickets, version 2 no planning skill.
@@ -308,6 +349,7 @@ pub fn migrate(db: Db) !void {
         try addColumn(db, "flags", "hidden", "INTEGER NOT NULL DEFAULT 0");
     }
     try db.execMulti(schema);
+    try db.execMulti(parks_schema);
     try db.execMulti(std.fmt.comptimePrint("PRAGMA user_version = {d}", .{version}));
 }
 
@@ -641,6 +683,7 @@ pub fn getTicket(db: Db, a: std.mem.Allocator, key: []const u8) Error!Ticket {
     if (!try st.step()) return error.NotFound;
     var t = try readTicket(st, a);
     t.flags = try activeFlags(db, a, t.id);
+    t.park = try parkOf(db, a, t.id);
     return t;
 }
 
@@ -681,6 +724,8 @@ pub const Filter = struct {
     top: bool = false,
     /// Only the sub-tickets of this ticket (by key).
     parent: ?[]const u8 = null,
+    /// Only parked tickets.
+    parked: bool = false,
 };
 
 /// Words of `q` as FTS5 prefix terms ("foo" bar → "foo"* "bar"*), so user
@@ -714,6 +759,9 @@ pub fn listTickets(db: Db, a: std.mem.Allocator, f: Filter) Error![]Ticket {
     if (f.top) try sql.appendSlice(a, " AND t.parent IS NULL");
     if (f.parent != null) try sql.appendSlice(a, " AND t.parent = (SELECT id FROM tickets WHERE key = ?5 COLLATE NOCASE)");
     if (f.flag != null) try sql.appendSlice(a, " AND EXISTS (SELECT 1 FROM flags g WHERE g.ticket = t.id AND g.cleared IS NULL AND g.kind = ?3)");
+    if (f.parked) try sql.appendSlice(a, " AND EXISTS (SELECT 1 FROM parks k WHERE k.ticket = t.id)");
+    // Parked: it waits on something outside cl, not on you.
+    if (f.needs) try sql.appendSlice(a, " AND NOT EXISTS (SELECT 1 FROM parks k WHERE k.ticket = t.id)");
     if (f.needs) try sql.appendSlice(a, if (f.hidden)
         " AND EXISTS (SELECT 1 FROM flags g WHERE g.ticket = t.id AND g.cleared IS NULL) AND NOT EXISTS (SELECT 1 FROM flags g WHERE g.ticket = t.id AND g.cleared IS NULL AND g.hidden = 0)"
     else
@@ -743,7 +791,10 @@ pub fn listTickets(db: Db, a: std.mem.Allocator, f: Filter) Error![]Ticket {
         if (f.needs and try isWorking(db, t, f.busy)) continue;
         try out.append(a, t);
     }
-    for (out.items) |*t| t.flags = try activeFlags(db, a, t.id);
+    for (out.items) |*t| {
+        t.flags = try activeFlags(db, a, t.id);
+        t.park = try parkOf(db, a, t.id);
+    }
     return out.toOwnedSlice(a);
 }
 
@@ -787,8 +838,12 @@ pub fn updateTicket(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, in:
 
 /// Record what a session did for a ticket (set when the dispatcher starts it).
 pub fn setSession(ctx: Ctx, db: Db, id: i64, tmux_name: []const u8, session_id: []const u8, worktree: []const u8, branch: []const u8) Error!void {
-    // A session again: it isn't killed any more.
+    // A session again: it isn't killed (or parked) any more.
     try db.exec("UPDATE tickets SET tmux = ?2, session_id = ?3, worktree = ?4, branch = ?5, killed = killed AND ?2 = '' WHERE id = ?1", .{ id, tmux_name, session_id, worktree, branch });
+    if (tmux_name.len > 0 and tmux_name[0] != '(') {
+        try db.exec("DELETE FROM parks WHERE ticket = ?1", .{id});
+        if (db.changes() > 0) try logEvent(ctx, db, id, "unparked", "started");
+    }
     try touch(ctx, db, id);
 }
 
@@ -981,6 +1036,8 @@ pub fn done(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, summary: []
     if (summary.len > 0) try db.exec("INSERT INTO comments (ticket, author, body, sent, at) VALUES (?1, 'claude', ?2, 0, ?3)", .{ t.id, summary, now(ctx) });
     try clearFlagId(ctx, db, t.id, flag_question);
     try clearFlagId(ctx, db, t.id, flag_input);
+    // Woken from a park and finished since: the review flag says it now.
+    try clearFlagId(ctx, db, t.id, flag_unparked);
     if (t.stage != .review) try moveId(ctx, db, t.id, t.stage, .review);
     try setFlagId(ctx, db, t.id, flag_review, "auto", "");
     try logEvent(ctx, db, t.id, "done", "");
@@ -1093,6 +1150,82 @@ pub fn setBase(db: Db, id: i64, base: []const u8) Error!void {
 /// Set the queue-mode target (once the dispatcher made a session for it).
 pub fn setTarget(db: Db, id: i64, target: []const u8) Error!void {
     try db.exec("UPDATE tickets SET target = ?2 WHERE id = ?1", .{ id, target });
+}
+
+// ---- parks ----
+
+fn parkOf(db: Db, a: std.mem.Allocator, id: i64) Error!?Park {
+    var st = try db.query("SELECT reason, until_cmd, every, at, deadline, next, checked, result FROM parks WHERE ticket = ?1", .{id});
+    defer st.finalize();
+    if (!try st.step()) return null;
+    return .{
+        .reason = try st.dupe(a, 0),
+        .until = try st.dupe(a, 1),
+        .every = st.int(2),
+        .at = st.int(3),
+        .deadline = st.int(4),
+        .next = st.int(5),
+        .checked = st.int(6),
+        .result = try st.dupe(a, 7),
+    };
+}
+
+/// Park a ticket (or change its park): `p.at` is now, and with a check the
+/// first one is due at once.
+pub fn setPark(ctx: Ctx, db: Db, id: i64, p: Park) Error!void {
+    try db.exec(
+        \\INSERT OR REPLACE INTO parks (ticket, reason, until_cmd, every, at, deadline, next, checked, result)
+        \\VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, '')
+    , .{ id, p.reason, p.until, p.every, p.at, p.deadline, p.next });
+    try logEvent(ctx, db, id, "parked", p.reason);
+    try touch(ctx, db, id);
+}
+
+/// End a ticket's park and return it; null when it wasn't parked. With
+/// `at`, only the park made then (a check finishing late leaves a newer
+/// park alone).
+pub fn takePark(ctx: Ctx, db: Db, a: std.mem.Allocator, id: i64, at: ?i64) Error!?Park {
+    try db.execMulti("BEGIN IMMEDIATE");
+    errdefer db.execMulti("ROLLBACK") catch {};
+    const p = try parkOf(db, a, id) orelse {
+        try db.execMulti("COMMIT");
+        return null;
+    };
+    if (at != null and at.? != p.at) {
+        try db.execMulti("COMMIT");
+        return null;
+    }
+    try db.exec("DELETE FROM parks WHERE ticket = ?1", .{id});
+    try db.execMulti("COMMIT");
+    try touch(ctx, db, id);
+    return p;
+}
+
+pub const DuePark = struct { id: i64, key: []const u8, park: Park };
+
+/// Parks whose check is due (`next` has come), or whose time is up
+/// (`deadline` has passed), at `t`.
+pub fn dueParks(db: Db, a: std.mem.Allocator, t: i64) Error![]DuePark {
+    var st = try db.query("SELECT k.ticket, t.key FROM parks k JOIN tickets t ON t.id = k.ticket WHERE k.until_cmd != '' AND (k.next <= ?1 OR (k.deadline > 0 AND k.deadline <= ?1))", .{t});
+    defer st.finalize();
+    var ids: std.ArrayList(struct { i64, []const u8 }) = .empty;
+    while (try st.step()) try ids.append(a, .{ st.int(0), try st.dupe(a, 1) });
+    var out: std.ArrayList(DuePark) = .empty;
+    for (ids.items) |x| if (try parkOf(db, a, x[0])) |p| try out.append(a, .{ .id = x[0], .key = x[1], .park = p });
+    return out.toOwnedSlice(a);
+}
+
+/// Take the due check of the park made at `at`: the next one moves an
+/// interval on, so another dispatcher doesn't run it too. False when it
+/// isn't due (any more).
+pub fn claimParkCheck(db: Db, id: i64, at: i64, t: i64) Error!bool {
+    try db.exec("UPDATE parks SET next = ?3 + every WHERE ticket = ?1 AND at = ?2 AND next <= ?3", .{ id, at, t });
+    return db.changes() == 1;
+}
+
+/// What a check said, on the park made at `at` (if it is still there).
+pub fn recordParkCheck(db: Db, id: i64, at: i64, t: i64, result: []const u8) Error!void {
+    try db.exec("UPDATE parks SET checked = ?3, result = ?4 WHERE ticket = ?1 AND at = ?2", .{ id, at, t, result });
 }
 
 /// Unsent notes from you (or from cl, about what it did to the ticket),

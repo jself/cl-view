@@ -20,7 +20,7 @@
     --fg: #ececec; --muted: #a0a3a8; --dim: #b4b6ba; --accent: #2a4f86; --accent-fg: #fff;
     --input: #ffc861; --input-bg: #3a2a0b; --question: #cdb8ff; --question-bg: #2c2440;
     --review: #9cc6ff; --review-bg: #11294a; --testing: #7ee6d6; --testing-bg: #0f3330;
-    --other: #d6d7da; --other-bg: #2c2e33; --finishing: #b6e3a0; --finishing-bg: #1b3317;
+    --other: #d6d7da; --other-bg: #2c2e33; --finishing: #b6e3a0; --finishing-bg: #1b3317; --parked: #c4b5fd; --parked-bg: #2a2342;
     --conflict: #ffb4b4; --conflict-bg: #3d1a1a;
     --mono: ui-monospace, SFMono-Regular, Menlo, "DejaVu Sans Mono", monospace;
     --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
@@ -120,7 +120,7 @@
   /* Session status colors, the same hues as `cl list`: --sc for the label and dot, --sbg tints a card's title band, stronger on the left and faint on the right. */
   .s-busy { --sc: #facc15; --sbg: var(--sc); } .s-waiting { --sc: #e879f9; --sbg: var(--sc); } .s-blocked { --sc: #f87171; --sbg: var(--sc); }
   .s-idle { --sc: #4ade80; --sbg: var(--sc); } .s-shell { --sc: #22d3ee; --sbg: var(--sc); } .s-starting { --sc: #60a5fa; --sbg: var(--sc); }
-  .s-gone, .s-killed { --sc: #8b8e94; --sbg: var(--sc); } .s-unknown, .s-none { --sc: #a0a3a8; }
+  .s-gone, .s-killed { --sc: #8b8e94; --sbg: var(--sc); } .s-parked { --sc: #c4b5fd; --sbg: var(--sc); } .s-unknown, .s-none { --sc: #a0a3a8; }
   .status { display: inline-flex; align-items: center; gap: calc(7 * var(--u)); font-size: calc(12.5 * var(--u)); color: var(--sc, #d6d7da); }
   .status.s-none { color: #d6d7da; }
   .dot { width: calc(8 * var(--u)); height: calc(8 * var(--u)); border-radius: calc(4 * var(--u)); flex: none; display: inline-block; background: var(--sc, #5d6168); }
@@ -132,6 +132,15 @@
   .f-review { background: var(--review-bg); color: var(--review); } .f-testing { background: var(--testing-bg); color: var(--testing); }
   .f-conflict { background: var(--conflict-bg); color: var(--conflict); }
   .f-finishing { background: var(--finishing-bg); color: var(--finishing); }
+  /* Parked: waiting on something outside cl. The reason is cut to the card's width. */
+  .f-parked { background: var(--parked-bg); color: var(--parked); max-width: 100%; }
+  .f-parked > span { overflow: hidden; text-overflow: ellipsis; }
+  .unpark-ic { display: inline-flex; align-items: center; height: calc(22 * var(--u)); padding: 0 calc(8 * var(--u)); border-radius: calc(11 * var(--u)); font-size: calc(11.5 * var(--u));
+               border: 1px solid var(--parked); color: var(--parked); cursor: pointer; white-space: nowrap; }
+  .unpark-ic:hover { background: var(--parked-bg); }
+  .parkbox { border: 1px solid var(--parked-bg); background: color-mix(in srgb, var(--parked-bg) 45%, transparent); border-radius: calc(10 * var(--u));
+             padding: calc(10 * var(--u)) calc(12 * var(--u)); display: grid; gap: calc(4 * var(--u)); font-size: calc(13 * var(--u)); }
+  .parkbox code { font: calc(12 * var(--u)) var(--mono); overflow-wrap: anywhere; }
 
   .lanes { overflow-x: auto; }
   .lanes table { border-collapse: separate; border-spacing: calc(8 * var(--u)) 0; min-width: calc(1100 * var(--u)); width: 100%; }
@@ -277,6 +286,17 @@
     <label>What should be added<textarea name="text" rows="4" required placeholder="In your own words. The operator picks the project and the rest."></textarea></label>
     <p class="muted" style="margin:0">Enter sends it to the operator as &ldquo;Add a Ticket: &hellip;&rdquo;; Shift+Enter starts a new line.</p>
     <div class="actions"><button type="submit" class="btn primary" id="quickSend">Send to the operator</button></div></form></div></dialog>
+<dialog id="parkDlg" aria-label="Park the ticket" style="width:min(calc(560 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg">
+  <div class="head"><h1 style="flex:1" id="parkTitle">Park</h1><button type="button" class="btn" id="closePark">Cancel</button></div>
+  <form class="form" id="parkForm">
+    <p class="muted" style="margin:0" id="parkNote"></p>
+    <label>What it waits on<input type="text" name="reason" required placeholder="PR #30: waiting for approval, merge and deploy"></label>
+    <label>Wake it when this command passes (optional)<textarea name="until" rows="3" class="mono" placeholder="gh pr view 30 --json state -q .state | grep -qx MERGED"></textarea></label>
+    <p class="muted" style="margin:0">Run with <span class="mono">sh -c</span> from the ticket's directory; exit 0 resumes it. Without a command nothing checks it: Resume brings it back.</p>
+    <div style="display:flex;gap:calc(12 * var(--u));flex-wrap:wrap">
+      <label>Check every<input type="text" name="every" value="1h" size="6"></label>
+      <label>Give up after<input type="text" name="max" value="7d" size="6"></label></div>
+    <div class="actions"><button type="submit" class="btn primary">Park it</button></div></form></div></dialog>
 <dialog id="killDlg" aria-label="Kill the session" style="width:min(calc(480 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="killBody"></div></dialog>
 <div id="toast" role="status"></div>
 
@@ -286,8 +306,8 @@
 "use strict";
 const STAGES = ["backlog", "planning", "queued", "running", "review", "testing", "done"];
 const STAGE_NAME = { backlog: "Backlog", planning: "Planning", queued: "Queued", running: "Running", review: "Review", testing: "Testing", done: "Done" };
-const FLAG_NAME = { input: "Needs input", question: "Question", review: "Ready for review", testing: "Needs testing", ended: "Session ended", "start-failed": "Didn't start", conflict: "Conflicts", "after-merge": "After-merge failed" };
-const STATUS_NAME = { busy: "Working", waiting: "Waiting on you", blocked: "Waiting on you", idle: "Idle", shell: "Idle · background task", starting: "Starting", gone: "Session ended", killed: "Killed · restart it", unknown: "Unknown" };
+const FLAG_NAME = { input: "Needs input", question: "Question", review: "Ready for review", testing: "Needs testing", ended: "Session ended", "start-failed": "Didn't start", conflict: "Conflicts", "after-merge": "After-merge failed", unparked: "Woke from park", "park-expired": "Park expired" };
+const STATUS_NAME = { busy: "Working", waiting: "Waiting on you", blocked: "Waiting on you", idle: "Idle", shell: "Idle · background task", starting: "Starting", gone: "Session ended", killed: "Killed · restart it", parked: "Parked", unknown: "Unknown" };
 
 const store = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch { return null; } };
 const state = {
@@ -330,9 +350,10 @@ const flagDetail = (f) => { try { return JSON.parse(f.detail); } catch { return 
 // The human is holding it up: it has a flag they haven't hidden, and Claude isn't working on it.
 // A Done ticket only for a failed after-merge run (it comes after the merge).
 const asksStill = (t, f) => t.stage !== "done" || f.kind === "after-merge";
-const needsMe = (row) => row.ticket.flags.some((f) => !f.hidden && asksStill(row.ticket, f)) && !row.working;
+// Parked, it waits on something outside cl, not on you.
+const needsMe = (row) => !row.ticket.park && row.ticket.flags.some((f) => !f.hidden && asksStill(row.ticket, f)) && !row.working;
 // Hidden from Needs you: every flag it has is hidden (a new one brings it back).
-const hiddenNeeds = (row) => row.ticket.flags.length > 0 && row.ticket.flags.every((f) => f.hidden) && row.ticket.flags.some((f) => asksStill(row.ticket, f)) && !row.working;
+const hiddenNeeds = (row) => !row.ticket.park && row.ticket.flags.length > 0 && row.ticket.flags.every((f) => f.hidden) && row.ticket.flags.some((f) => asksStill(row.ticket, f)) && !row.working;
 const asks = (t) => t.flags.filter((f) => f.kind !== "testing" || t.stage === "testing");
 function askText(t, f) {
   const d = flagDetail(f);
@@ -355,16 +376,22 @@ function askLine(t, f, quick) {
   return askText(t, f);
 }
 const flagLabel = (f) => f.kind === "review" && f.detail === "plan" ? "Plan ready" : (FLAG_NAME[f.kind] || f.kind);
-const flagClass = (k) => k === "after-merge" ? "f-conflict" : ["input", "question", "review", "testing", "conflict"].includes(k) ? "f-" + k : "";
+const flagClass = (k) => k === "after-merge" || k === "park-expired" ? "f-conflict" : k === "unparked" ? "f-review" : ["input", "question", "review", "testing", "conflict"].includes(k) ? "f-" + k : "";
 // Finishing: Claude is merging the branch or opening a PR before it goes to Done.
 const finishPill = (t) => t.finishing ? `<span class="pill f-finishing" title="${t.finishing === "pr" ? "Claude is opening a PR" : t.finishing === "after-merge" ? "It's merged; Claude is doing the after-merge steps (rebuilding, restarting)" : t.finishing === "tell" ? "Claude is doing what you told it" : "Claude is merging its branch"}; it goes to Done after">Finishing</span>` : "";
 // Claude asked to close it its own way (cl ticket custom-close).
 const customPill = (t) => t.custom_close ? `<span class="pill f-review" title="Claude: ${esc(t.custom_close)}">Custom close</span>` : "";
-const pills = (t) => t.flags.length || t.finishing || t.custom_close ? `<span class="pills">${customPill(t)}${finishPill(t)}${t.flags.map((f) => `<span class="pill ${flagClass(f.kind)}">${esc(flagLabel(f))}</span>`).join("")}</span>` : "";
+// Parked (cl ticket park): what it waits on, and how it's checked.
+const dur = (s) => { const u = [[86400, "d"], [3600, "h"], [60, "m"], [1, "s"]]; let out = ""; for (const [n, c] of u) if (s >= n) { out += Math.floor(s / n) + c; s %= n; } return out || "0s"; };
+const until = (t) => { if (!t) return ""; const d = t - (state.data?.now || Date.now() / 1000);
+  return d <= 0 ? "now" : "in " + (d < 3600 ? Math.max(1, Math.round(d / 60)) + "m" : d < 86400 ? Math.round(d / 3600) + "h" : Math.round(d / 86400) + "d"); };
+const parkTitle = (p) => p.until ? `Checks every ${dur(p.every)}${p.checked ? `; last ${ago(p.checked)} ago: ${p.result}` : "; not checked yet"}; next ${until(p.next)}; gives up ${until(p.deadline)}` : "Nothing checks it: Resume brings it back";
+const parkPill = (t) => t.park ? `<span class="pill f-parked" title="${esc(parkTitle(t.park))}"><span>Parked: ${esc(t.park.reason)}</span></span>` : "";
+const pills = (t) => t.flags.length || t.finishing || t.custom_close || t.park ? `<span class="pills">${parkPill(t)}${customPill(t)}${finishPill(t)}${t.flags.map((f) => `<span class="pill ${flagClass(f.kind)}">${esc(flagLabel(f))}</span>`).join("")}</span>` : "";
 // "(starting)" is the dispatcher's claim while it opens the session.
 // A Backlog or Queued ticket whose session is gone hasn't ended: it's waiting to start.
 // A killed one waits for you to restart it.
-const statusOf = (row) => row.status || (row.ticket.tmux.startsWith("(") ? "starting" : row.ticket.killed ? "killed" : row.ticket.tmux && !["backlog", "queued"].includes(row.ticket.stage) ? "gone" : "none");
+const statusOf = (row) => row.status || (row.ticket.tmux.startsWith("(") ? "starting" : row.ticket.park ? "parked" : row.ticket.killed ? "killed" : row.ticket.tmux && !["backlog", "queued"].includes(row.ticket.stage) ? "gone" : "none");
 const statusHtml = (row) => { const s = statusOf(row); const label = s === "none" ? (row.ticket.stage === "queued" ? "Waiting for a slot" : "Not started") : (STATUS_NAME[s] || s);
   return `<span class="status s-${esc(s)}"><span class="dot"></span>${esc(label)}</span>`; };
 // A live session's shell icon. In a card (a button) it's a span the click handler follows.
@@ -512,7 +539,7 @@ function cardHtml(row, compact) {
     ${t.parent ? `<span class="sub">sub-ticket of ${esc(t.parent)}</span>` : ""}
     ${compact ? "" : `<span class="meta">${esc(t.project)} · ${esc(where(t))}</span>`}
     ${t.children ? `<span class="meta">${t.children} sub-ticket${t.children > 1 ? "s" : ""}</span>` : ""}
-    ${statusHtml(row)}${pills(t)}</button>`;
+    ${statusHtml(row)}${pills(t)}${t.park ? `<span class="pills"><span class="unpark-ic" data-unpark="${esc(t.key)}" role="button" tabindex="0" title="End the park and resume its session now">Resume</span></span>` : ""}</button>`;
 }
 // Done is a column only when it's toggled on.
 const columns = () => state.done ? STAGES : STAGES.filter((s) => s !== "done");
@@ -677,10 +704,13 @@ function renderDetailInner() {
   if (liveSession) acts.push(`<a class="btn primary" href="${shellHref(t)}">Open shell</a>`);
   // Ran before (killed, or its session ended): a fresh session, resuming its conversation where Claude still has it.
   const ranBefore = t.killed || t.tmux || t.session_id;
-  if (!liveSession && t.stage !== "done") acts.push(`<button type="button" class="btn primary" data-act="start"${ranBefore ? ` title="A fresh session for it${t.session_id ? ", resuming its conversation where Claude still has it" : ""}"` : ""}>${ranBefore ? "Restart" : "Start now"}</button>`);
+  if (t.park) acts.push(`<button type="button" class="btn primary" data-act="unpark" title="End the park and resume its session now, told you unparked it">Resume now</button>`,
+    `<button type="button" class="btn" data-act="unpark-only" title="End the park; its session stays stopped">Cancel park</button>`);
+  else if (!liveSession && t.stage !== "done") acts.push(`<button type="button" class="btn primary" data-act="start"${ranBefore ? ` title="A fresh session for it${t.session_id ? ", resuming its conversation where Claude still has it" : ""}"` : ""}>${ranBefore ? "Restart" : "Start now"}</button>`);
   if (d.gutter && liveSession && (d.guide || t.worktree)) acts.push(`<button type="button" class="btn" data-act="gutter">Open in gutter</button>`);
   if (approve) acts.push(`<button type="button" class="btn" data-act="approve">${approve}</button>`);
   if (liveSession) acts.push(`<button type="button" class="btn danger" data-act="kill" title="End its session; it keeps its stage and can be restarted">Kill</button>`);
+  if (!t.park && t.stage !== "done") acts.push(`<button type="button" class="btn" data-act="park" title="Wait on something outside cl (a PR, a deploy) without a session; a check can wake it">Park</button>`);
   if (t.stage === "backlog") acts.push(`<button type="button" class="btn" data-move="queued">Queue it</button>`);
   // Moves it (with its change and conversation, once under way) to a worktree of its own or back.
   if (t.stage !== "done") acts.push(t.mode === "queue"
@@ -695,9 +725,17 @@ function renderDetailInner() {
     <h1>${esc(t.title)}</h1>
     <div class="facts">${statusHtml({ ticket: t, status: d.status })}<span class="mono">${esc(where(t))}</span>${t.tmux ? `<span class="mono">${esc(t.tmux)}</span>` : ""}
       ${t.round > 1 ? `<span>round ${t.round}</span>` : ""}${t.plan ? `<span>plan first${t.skill ? " · " + esc(t.skill) : ""}</span>` : ""}${parent}</div>
-    <div class="actions">${acts.join("")}</div>
+    <div class="actions">${acts.join("")}</div>${parkBox(t)}
     <div class="tabs" role="tablist">${tabs.map(([k, l]) => `<button type="button" role="tab" class="${state.tab === k ? "on" : ""}" aria-selected="${state.tab === k}" data-tab="${k}">${esc(l)}</button>`).join("")}</div>
     <div id="tabBody">${state.tab === tabs[0][0] && (t.body || "").trim() ? `<div class="desc">${esc(t.body)}</div>` : ""}${tabHtml(d)}</div>`;
+}
+function parkBox(t) {
+  const p = t.park; if (!p) return "";
+  const stamp = (s) => new Date(s * 1000).toLocaleString();
+  return `<div class="parkbox"><div><strong>Parked</strong> ${ago(p.at)} ago: ${esc(p.reason)}</div>
+    ${p.until ? `<div class="muted">Wakes when this passes (exit 0), checked every ${dur(p.every)} until ${esc(stamp(p.deadline))}:</div><code>${esc(p.until)}</code>
+      <div class="muted">${p.checked ? `Last check ${ago(p.checked)} ago: <span class="mono">${esc(p.result)}</span>` : "Not checked yet"} · next ${until(p.next)}</div>`
+    : `<div class="muted">Nothing checks it; Resume now brings it back.</div>`}</div>`;
 }
 function tabHtml(d) {
   const t = d.ticket;
@@ -1051,6 +1089,23 @@ document.addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target.
 // ---- killing a session ----
 // Says what goes: the session (shared, for a queue ticket, with any other
 // ticket on it) and Claude in it. Resolves to true to go ahead.
+function openPark(d) {
+  const t = d.ticket; const form = document.getElementById("parkForm");
+  form.reset(); form.dataset.key = t.key;
+  document.getElementById("parkTitle").textContent = `Park ${t.key}`;
+  const live = t.tmux && d.status && d.status !== "gone";
+  document.getElementById("parkNote").textContent = live
+    ? `This ends its session ${t.tmux}${t.mode === "queue" ? " (the project's shared one)" : ""}; it keeps its stage${t.session_id ? " and resumes this conversation when it wakes" : ""}, and stays out of Needs you meanwhile.`
+    : "It keeps its stage, stays out of Needs you, and nothing starts it until the park ends.";
+  document.getElementById("parkDlg").showModal(); form.elements.reason.focus();
+}
+async function submitPark(form) {
+  const f = form.elements; const key = form.dataset.key;
+  const until = f.until.value.trim();
+  const body = { reason: f.reason.value.trim(), until, every: until ? f.every.value : "", max: until ? f.max.value : "" };
+  try { await act(key, "park", body, until ? `${key} parked; the first check runs now` : `${key} parked`); } catch { return; }
+  document.getElementById("parkDlg").close();
+}
 function confirmKill(d) {
   const t = d.ticket;
   const others = state.data.tickets.filter((r) => r.ticket.tmux === t.tmux && r.ticket.key !== t.key && r.ticket.stage !== "done").map((r) => r.ticket.key);
@@ -1108,8 +1163,13 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape" && drag) en
 // A drop ends with a click on the card; don't let it open the ticket.
 document.addEventListener("click", (e) => { if (Date.now() - dragDone < 400 && e.target.closest("[data-drag]")) { e.stopPropagation(); e.preventDefault(); } }, true);
 
+const unparkMsg = (k, how) => how === "started" ? `${k} unparked and resumed` : how === "waiting" ? `${k} unparked; it waits in Queued for its session` : how === "running" ? `${k} unparked` : `${k} unparked; its session stays stopped`;
+
 // ---- events ----
 document.addEventListener("click", async (e) => {
+  const up = e.target.closest("[data-unpark]");
+  if (up) { e.preventDefault(); e.stopPropagation(); const k = up.dataset.unpark;
+    try { const r = await act(k, "unpark", {}); toast(unparkMsg(k, r.resumed)); } catch {} return; }
   const sh = e.target.closest("[data-shell]");
   if (sh) { e.preventDefault(); if (e.ctrlKey || e.metaKey) window.open(sh.dataset.shell); else location.href = sh.dataset.shell; return; }
   const el = e.target.closest("button, a, tr.row"); if (!el) return;
@@ -1122,6 +1182,7 @@ document.addEventListener("click", async (e) => {
   if (el.id === "quickBtn") return openQuick();
   if (el.id === "reloadBtn") return location.reload();
   if (el.id === "closeQuick") return document.getElementById("quickDlg").close();
+  if (el.id === "closePark") return document.getElementById("parkDlg").close();
   if (el.id === "closeDlg") { document.getElementById("ticketDlg").close(); return; }
   if (ds.finish === "tell") return finishTell();
   if (ds.finish !== undefined) { document.getElementById("finishDlg").close(ds.finish); return; }
@@ -1164,6 +1225,11 @@ document.addEventListener("click", async (e) => {
   if (ds.launchStop) return act(key, "launch-stop", { step: +ds.launchStop }, "Stopped");
   if (ds.act === "gutter") {
     try { const r = await act(key, "gutter"); toast("gutter's window is open"); } catch {}
+    return;
+  }
+  if (ds.act === "park") { if (state.detail) openPark(state.detail); return; }
+  if (ds.act === "unpark" || ds.act === "unpark-only") {
+    try { const r = await act(key, "unpark", { no_resume: ds.act === "unpark-only" }); toast(unparkMsg(key, r.resumed)); } catch {}
     return;
   }
   if (ds.act === "start") return act(key, "start", {}, state.detail?.ticket.killed || state.detail?.ticket.session_id ? "Restarted" : "Started");
@@ -1254,6 +1320,7 @@ document.addEventListener("submit", async (e) => {
   e.preventDefault();
   if (e.target.id === "newForm") return submitNew(e.target);
   if (e.target.id === "quickForm") return submitQuick(e.target);
+  if (e.target.id === "parkForm") return submitPark(e.target);
   if (e.target.id === "editForm") {
     const f = Object.fromEntries(new FormData(e.target));
     await act(state.open, "edit", { title: f.title, body: f.body, project: f.project, mode: f.mode, target: f.target, plan: f.plan === "1", skill: f.skill }, "Saved");

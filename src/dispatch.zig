@@ -17,6 +17,7 @@ const worktree = @import("worktree.zig");
 const signals = @import("signals.zig");
 const history = @import("history.zig");
 const review = @import("review.zig");
+const park = @import("park.zig");
 
 pub const Error = error{
     AlreadyStarted,
@@ -586,6 +587,8 @@ fn releaseGone(ctx: Ctx, db: board.Db, a: std.mem.Allocator, view: View) !void {
 /// One dispatcher pass: start what can start, and flag tickets whose session
 /// went away. Returns how many tickets it started.
 pub fn tick(ctx: Ctx, cfg: config.Config, db: board.Db) !usize {
+    // Parked tickets' checks (they run detached; a passing one resumes its ticket).
+    park.checkDue(ctx, db) catch {};
     // Nothing queued or in progress, and no session to let go of: nothing to look at.
     if ((try db.int("SELECT 1 FROM tickets WHERE stage IN ('queued', 'planning', 'running') OR (stage = 'backlog' AND tmux != '') LIMIT 1", .{})) == null) return 0;
     var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);
@@ -615,19 +618,8 @@ pub fn tick(ctx: Ctx, cfg: config.Config, db: board.Db) !usize {
 
     try releaseGone(ctx, db, a, view);
 
-    // Queued tickets, and planning tickets that never started, in board order.
-    // A killed one waits for you to restart it.
-    var waiting: std.ArrayList(board.Ticket) = .empty;
-    for (try board.listTickets(db, a, .{ .stage = .queued })) |t| if (t.tmux.len == 0 and !t.killed) try waiting.append(a, t);
-    for (try board.listTickets(db, a, .{ .stage = .planning })) |t| if (t.tmux.len == 0 and !t.killed) try waiting.append(a, t);
-    std.mem.sort(board.Ticket, waiting.items, {}, struct {
-        fn lt(_: void, x: board.Ticket, y: board.Ticket) bool {
-            return x.rank < y.rank or (x.rank == y.rank and x.id < y.id);
-        }
-    }.lt);
-
     var started: usize = 0;
-    for (waiting.items) |t0| {
+    for (try waitingToStart(db, a)) |t0| {
         // Earlier starts this pass may have set its target.
         const t = board.getTicket(db, a, t0.key) catch continue;
         if (t.tmux.len > 0) continue;
@@ -647,6 +639,23 @@ pub fn tick(ctx: Ctx, cfg: config.Config, db: board.Db) !usize {
         return started + try tick(ctx, cfg, db);
     }
     return started;
+}
+
+/// What the dispatcher may start, in board order: queued tickets, and
+/// planning tickets that never started. A killed one waits for you to
+/// restart it, and a parked one for its park to end, in whatever stage
+/// (moving it to Queued doesn't start it).
+fn waitingToStart(db: board.Db, a: std.mem.Allocator) ![]board.Ticket {
+    var waiting: std.ArrayList(board.Ticket) = .empty;
+    for ([_]board.Stage{ .queued, .planning }) |stage| {
+        for (try board.listTickets(db, a, .{ .stage = stage })) |t| if (t.tmux.len == 0 and !t.killed and t.park == null) try waiting.append(a, t);
+    }
+    std.mem.sort(board.Ticket, waiting.items, {}, struct {
+        fn lt(_: void, x: board.Ticket, y: board.Ticket) bool {
+            return x.rank < y.rank or (x.rank == y.rank and x.id < y.id);
+        }
+    }.lt);
+    return waiting.items;
 }
 
 /// Run the dispatcher until killed, every few seconds.
@@ -855,4 +864,27 @@ test "a ticket moved back to the queue lets go of its dead session" {
     try std.testing.expectEqualStrings("", (try board.getTicket(db, a, kw)).tmux);
     // A running ticket keeps its own (it gets the "ended" flag).
     try std.testing.expectEqualStrings("cl_dead_1", (try board.getTicket(db, a, kr)).tmux);
+}
+
+test "a parked ticket isn't started, even moved to Queued" {
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp" };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "qa", .dir = "/x/qa-tool" });
+    const kp = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Parked", .stage = .running });
+    const kq = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Queued", .stage = .queued });
+    _ = try park.park(ctx, db, a, kp, .{ .reason = "PR #30", .until = "false" });
+    // Moved to Queued it's no longer killed, but still parked: not started.
+    try board.move(ctx, db, a, kp, .queued);
+    try std.testing.expect(!(try board.getTicket(db, a, kp)).killed);
+    const w = try waitingToStart(db, a);
+    try std.testing.expectEqual(@as(usize, 1), w.len);
+    try std.testing.expectEqualStrings(kq, w[0].key);
+    // Unparked (without resuming), it waits its turn like the others.
+    _ = try board.takePark(ctx, db, a, (try board.getTicket(db, a, kp)).id, null);
+    try std.testing.expectEqual(@as(usize, 2), (try waitingToStart(db, a)).len);
 }

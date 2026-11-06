@@ -123,7 +123,9 @@ const tickets_skill =
     \\
     \\Stages: backlog, planning, queued, running, review, testing, done. Flags say what a
     \\ticket needs from the human: question (Claude asked something), input (a permission
-    \\prompt), review (finished, to review), testing (to try), ended (its session went away).
+    \\prompt), review (finished, to review), testing (to try), ended (its session went away),
+    \\unparked (its park's check passed and it resumed), park-expired (the check never passed).
+    \\`cl ticket list --parked` lists parked tickets; `show` has what each waits on and its checks.
     \\
     \\## Changing tickets
     \\
@@ -133,6 +135,11 @@ const tickets_skill =
     \\                                     stage (all projects), or --before / --after <key>;
     \\                                     the dispatcher starts queued tickets in this order
     \\  cl ticket start <key>              start it now
+    \\  cl ticket park <key> --reason "<what it waits on>" [--until '<shell check>'] [--every 1h] [--max 7d]
+    \\                                     wait on something outside cl (a PR, a deploy): its
+    \\                                     session ends and it leaves the inbox; the dispatcher
+    \\                                     runs the check from its directory, and exit 0 resumes it
+    \\  cl ticket unpark <key> [--no-resume]  end the park now (and resume it, by default)
     \\  cl ticket comment <key> "<text>"   a note; with --send it is also typed into the
     \\                                     ticket's session, and a ticket in review or testing
     \\                                     goes back to running

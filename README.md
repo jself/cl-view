@@ -104,7 +104,7 @@ The latest reply comes from the transcript Claude writes under
 `<config dir>/projects/<cwd>/<session id>.jsonl` (only the last 256 KB is read).
 
 Chooser keys: `j`/`k` move, `Enter` attach, `Tab` toggle details, `n` new session
-(asks for directory, name, profile, optional first message), `o` operator, `R` resume a closed session, `h` hide / unhide, `H` show hidden, `d` kill, `r` rename,
+(asks for directory, name, profile, optional first message), `o` operator, `R` resume a closed session, `P` parked tickets (Enter resumes one, `x` ends the park), `h` hide / unhide, `H` show hidden, `d` kill, `r` rename,
 `s` send a line, `/` filter (name, directory, profile), `gg`/`G`, `Ctrl-R` refresh, `Ctrl-L` redraw, `q` quit.
 
 `h` hides the selected session without stopping it: Claude, its background
@@ -364,6 +364,36 @@ Sessions cl starts for tickets get `CL_TICKET` and hooks (`--settings
 <board.dir>/claude-hooks.json`): a permission prompt sets `input`, and the
 end of a turn clears it. A ticket whose session goes away gets `ended`;
 `cl t start` starts it again.
+
+### Parking a ticket
+
+A ticket waiting on something outside cl (a PR review, a deploy) can be
+parked rather than left with an idle session:
+
+```
+cl t park QA-3 --reason "PR #30: waiting for approval, merge and deploy" --every 1h \
+  --until 'gh run list --repo org/repo --workflow deploy.yml --json conclusion -q ".[0].conclusion" | grep -qx success'
+cl t unpark QA-3 [--no-resume]
+cl t list --parked
+```
+
+Parking ends its session as `cl t kill` does (stage and conversation kept),
+keeps it out of Needs You, and shows "Parked: <reason>" on its card. The
+dispatcher never starts a parked ticket, even one moved to Queued; only the
+park ending (or `cl t start`, which ends it) brings it back. With
+`--until`, the dispatcher (`cl web`, `cl t dispatch`) runs the command with
+`sh -c` from the ticket's directory, at once and then every `--every`
+(default 1h), detached and in the dispatcher's environment (your `gh` login
+and so on); one check may run up to 10 minutes. Exit 0 ends the park: the
+ticket gets the `unparked` flag and its session resumes, told "Parked
+condition met: <reason>. Continue." No pass within `--max` (default 7d)
+ends it with `park-expired`, and the session stays stopped. Without
+`--until` nothing checks it. On the board, Park in the ticket popup does the
+same with a form. `unpark` (the board's Resume, `P` in the
+chooser) ends it by hand and resumes the session; `--no-resume` (Cancel
+park) only ends it. Claude can park its own ticket from its session (the
+key may be left out); the session closes after the command answers.
+`cl t show` (and `--json`) has the park, its last check and the next.
 
 ### What needs you
 
