@@ -667,6 +667,16 @@ pub const TicketInput = struct {
     parent: ?[]const u8 = null,
     /// Planning skill.
     skill: ?[]const u8 = null,
+    /// createTicket: the body to store once the key is known, or null to
+    /// keep it (images pasted before the ticket had a key move to its own
+    /// folder). Called before the ticket is visible, so nothing starts it
+    /// with the old body.
+    body_for_key: ?BodyForKey = null,
+};
+
+pub const BodyForKey = struct {
+    ctx: *const anyopaque,
+    call: *const fn (ctx: *const anyopaque, a: std.mem.Allocator, key: []const u8, body: []const u8) anyerror!?[]const u8,
 };
 
 /// Create a ticket and return its key (e.g. QA-12). Mode and profile default
@@ -685,11 +695,15 @@ pub fn createTicket(ctx: Ctx, db: Db, a: std.mem.Allocator, in: TicketInput) Err
     const num = (try db.int("SELECT next_num FROM projects WHERE name = ?1", .{p.name})) orelse return error.NotFound;
     try db.exec("UPDATE projects SET next_num = next_num + 1 WHERE name = ?1", .{p.name});
     const key = try std.fmt.allocPrint(a, "{s}-{d}", .{ p.prefix, num });
+    var body = in.body orelse "";
+    if (in.body_for_key) |f| if (f.call(f.ctx, a, key, body) catch null) |b| {
+        body = b;
+    };
     const t = now(ctx);
     try db.exec(
         \\INSERT INTO tickets (key, project, title, body, stage, mode, plan, target, profile, parent, skill, created, updated, rank)
         \\VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, (SELECT coalesce(max(rank), 0) + ?13 FROM tickets))
-    , .{ key, p.name, title, in.body orelse "", @tagName(stage), @tagName(in.mode orelse p.mode), plan, in.target orelse "", in.profile orelse p.profile, if (parent) |pt| pt.id else null, in.skill orelse "", t, rank_gap });
+    , .{ key, p.name, title, body, @tagName(stage), @tagName(in.mode orelse p.mode), plan, in.target orelse "", in.profile orelse p.profile, if (parent) |pt| pt.id else null, in.skill orelse "", t, rank_gap });
     const id = db.lastId();
     try logEvent(ctx, db, id, "created", @tagName(stage));
     if (parent) |pt| try logEvent(ctx, db, pt.id, "sub-ticket", key);

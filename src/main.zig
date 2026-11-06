@@ -370,4 +370,5 @@ test {
     std.testing.refAllDecls(@import("park.zig"));
     std.testing.refAllDecls(@import("ticket_watch.zig"));
     std.testing.refAllDecls(@import("board_view.zig"));
+    std.testing.refAllDecls(@import("images.zig"));
 }

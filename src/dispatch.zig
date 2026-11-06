@@ -19,6 +19,7 @@ const history = @import("history.zig");
 const review = @import("review.zig");
 const park = @import("park.zig");
 const actions = @import("actions.zig");
+const images = @import("images.zig");
 
 pub const Error = error{
     AlreadyStarted,
@@ -42,6 +43,7 @@ pub fn prompt(a: std.mem.Allocator, t: board.Ticket, notes: []const board.Commen
     try w.print("Ticket {s}: {s}\n", .{ t.key, t.title });
     if (t.parent.len > 0) try w.print("(a sub-ticket of {s}; `cl ticket show {s}` has the bigger picture)\n", .{ t.parent, t.parent });
     if (t.body.len > 0) try w.print("\n{s}\n", .{t.body});
+    try images.writeNote(w, a, t.body);
     if (notes.len > 0) {
         try w.writeAll("\nNotes on the ticket:\n");
         for (notes) |n| try w.print("- {s}\n", .{n.body});
@@ -104,6 +106,7 @@ pub fn planPrompt(a: std.mem.Allocator, t: board.Ticket, notes: []const board.Co
     try w.print("Ticket {s}: {s}\n", .{ t.key, t.title });
     if (t.parent.len > 0) try w.print("(a sub-ticket of {s}; `cl ticket show {s}` has the bigger picture)\n", .{ t.parent, t.parent });
     if (t.body.len > 0) try w.print("\n{s}\n", .{t.body});
+    try images.writeNote(w, a, t.body);
     if (notes.len > 0) {
         try w.writeAll("\nNotes on the ticket:\n");
         for (notes) |n| try w.print("- {s}\n", .{n.body});
@@ -172,6 +175,10 @@ fn hooksFile(ctx: Ctx, a: std.mem.Allocator, cfg: config.Config) ![]const u8 {
 /// `sid`, or with `resuming` the existing conversation `sid`.
 fn claudeArgs(ctx: Ctx, cfg: config.Config, a: std.mem.Allocator, t: board.Ticket, sid: []const u8, resuming: bool) ![]const []const u8 {
     var args: std.ArrayList([]const u8) = .empty;
+    // Its pasted images, readable without a permission prompt (they're
+    // outside the project). Like the tool list, it takes every argument up to
+    // the next option.
+    if (images.ticketDir(ctx, a, cfg, t.key)) |d| try args.appendSlice(a, &.{ "--add-dir", d });
     try args.appendSlice(a, &.{ if (resuming) "--resume" else "--session-id", sid, "--settings", try hooksFile(ctx, a, cfg) });
     // Planning writes nothing, and ExitPlanMode would let it start building.
     // The tool list goes before another option: it takes every argument up to one.
@@ -946,6 +953,22 @@ test prompt {
     try std.testing.expect(std.mem.indexOf(u8, plain, "gutter") == null);
     try std.testing.expect(std.mem.indexOf(u8, plain, "me:\n  1. Run `cl ticket done QA-3") != null);
     try std.testing.expect(std.mem.indexOf(u8, plain, "  2. If there is something") != null);
+}
+
+test "the session is told to open the description's images" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var t: board.Ticket = .{
+        .id = 1, .key = "QA-3", .project = "qa", .title = "Retry", .body = "It breaks here:\n![image](/b/images/QA-3/0a1b.png)", .stage = .queued,
+        .mode = .queue, .plan = false, .skill = "", .target = "", .worktree = "", .branch = "", .profile = "",
+        .tmux = "", .session_id = "", .summary = "", .round = 1, .created = 0, .updated = 0, .parent = "", .children = 0,
+    };
+    const want = "![image](/b/images/QA-3/0a1b.png)\n\nThe description has an image (pasted on the board). Open it with your Read tool to see it:\n- /b/images/QA-3/0a1b.png\n";
+    try std.testing.expect(std.mem.indexOf(u8, try prompt(a, t, &.{}, false), want) != null);
+    try std.testing.expect(std.mem.indexOf(u8, try planPrompt(a, t, &.{}, .checkout), want) != null);
+    t.body = "no pictures";
+    try std.testing.expect(std.mem.indexOf(u8, try prompt(a, t, &.{}, false), "Read tool") == null);
 }
 
 test "the session that builds a planned ticket is told the plan" {

@@ -242,6 +242,14 @@
   .comment.claude { background: #1b1f27; }
   .desc { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 30vh; overflow-y: auto; padding-bottom: calc(12 * var(--u)); margin-bottom: calc(12 * var(--u)); border-bottom: 1px solid var(--line2); }
   .form { display: grid; gap: calc(12 * var(--u)); }
+  /* Images pasted into a description: thumbnails that open full size. */
+  .thumb { display: inline-block; vertical-align: top; padding: 0; margin: calc(4 * var(--u)) calc(4 * var(--u)) calc(4 * var(--u)) 0; border: 1px solid var(--line2);
+           border-radius: calc(8 * var(--u)); overflow: hidden; background: var(--card); cursor: zoom-in; }
+  .thumb img { display: block; max-width: calc(220 * var(--u)); max-height: calc(150 * var(--u)); }
+  .thumbs:empty { display: none; }
+  .thumbs { margin-top: calc(-6 * var(--u)); }
+  #imgDlg { max-width: 96vw; max-height: 96vh; width: auto; height: auto; background: #000; cursor: zoom-out; }
+  #imgDlg img { display: block; max-width: 96vw; max-height: 96vh; object-fit: contain; margin: auto; }
   .form label { display: flex; flex-direction: column; gap: calc(5 * var(--u)); font-size: calc(12.5 * var(--u)); color: var(--muted); }
   .form .row2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(calc(200 * var(--u)), 1fr)); gap: calc(12 * var(--u)); }
   .check { display: flex; flex-direction: column; gap: calc(6 * var(--u)); padding: calc(10 * var(--u)) calc(12 * var(--u)); border: 1px solid var(--line); border-radius: calc(10 * var(--u)); }
@@ -326,6 +334,7 @@
 
 <dialog id="ticketDlg" aria-label="Ticket"><div class="dlg" id="ticketBody"></div></dialog>
 <dialog id="newDlg" aria-label="New ticket"><div class="dlg" id="newBody"></div></dialog>
+<dialog id="imgDlg" aria-label="Image"><img id="imgFull" alt=""></dialog>
 <dialog id="finishDlg" aria-label="Finish the ticket" style="width:min(calc(480 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="finishBody"></div></dialog>
 <dialog id="subsDlg" aria-label="Unfinished sub-tickets" style="width:min(calc(520 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="subsBody"></div></dialog>
 <dialog id="quickDlg" aria-label="Quick ticket" style="width:min(calc(520 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg">
@@ -909,7 +918,7 @@ function renderDetailInner() {
       ${t.round > 1 ? `<span>round ${t.round}</span>` : ""}${t.plan ? `<span>plan first${t.skill ? " · " + esc(t.skill) : ""}</span>` : ""}${parent}</div>
     <div class="actions">${acts.join("")}</div>${parkBox(t)}
     <div class="tabs" role="tablist">${tabs.map(([k, l]) => `<button type="button" role="tab" class="${state.tab === k ? "on" : ""}" aria-selected="${state.tab === k}" data-tab="${k}">${esc(l)}</button>`).join("")}</div>
-    <div id="tabBody">${state.tab === tabs[0][0] && (t.body || "").trim() ? `<div class="desc">${esc(t.body)}</div>` : ""}${tabHtml(d)}</div>`;
+    <div id="tabBody">${state.tab === tabs[0][0] && (t.body || "").trim() ? `<div class="desc">${descHtml(t.body)}</div>` : ""}${tabHtml(d)}</div>`;
 }
 function parkBox(t) {
   const p = t.park; if (!p) return "";
@@ -1066,7 +1075,8 @@ function detailsTab(d) {
   const t = d.ticket; const sessions = state.data.sessions;
   return `<form class="form" id="editForm">
     <label>Title<input type="text" name="title" value="${esc(t.title)}"></label>
-    <label>Description<textarea name="body" rows="5">${esc(t.body)}</textarea></label>
+    <label>Description<textarea name="body" rows="5" placeholder="Paste or drop screenshots here too">${esc(t.body)}</textarea></label>
+    <div class="thumbs">${thumbsHtml(t.body)}</div>
     <div class="row2"><label>Project<select name="project">${state.data.projects.map((p) => `<option ${p.name === t.project ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select></label>
       <label>Runs as<select name="mode"><option value="queue" ${t.mode === "queue" ? "selected" : ""}>Queue in a session</option><option value="worktree" ${t.mode === "worktree" ? "selected" : ""}>Its own worktree</option></select></label>
       <label>Queue session<select name="target"><option value="">Project default / parent's</option>${sessions.map((s) => `<option value="${esc(s.tmux)}" ${s.tmux === t.target ? "selected" : ""}>${esc(s.name)} (${esc(s.status)})</option>`).join("")}</select></label></div>
@@ -1077,6 +1087,84 @@ function detailsTab(d) {
       ${t.worktree && t.stage === "done" ? `<button type="button" class="btn" data-act="cleanup">Remove worktree</button>` : ""}
       <button type="button" class="btn danger" id="deleteTicket">Delete ticket</button></div></form>`;
 }
+
+// ---- images in a description ----
+// Pasting or dropping an image into a ticket's description uploads it (to
+// the ticket's folder, or images/new until the ticket is created) and puts a
+// Markdown image with its absolute path at the cursor. The board shows it as
+// a thumbnail, and the session's first message tells Claude to open it.
+const IMG_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+const IMG_MAX = 10 * 1024 * 1024;
+const IMG_RE = /!\[([^\]\n]*)\]\((\/[^)\s]+)\)/g;
+const imgFiles = (list) => [...(list || [])].filter((f) => f.type.startsWith("image/"));
+const descBox = (el) => el?.closest?.("#newForm textarea[name=body], #editForm textarea[name=body]") || null;
+// Its URL on the board, for a path under the board's images folder.
+function imgUrl(path) {
+  const root = state.data?.images_dir;
+  if (!root || !path.startsWith(root + "/")) return null;
+  const m = path.slice(root.length + 1).match(/^([A-Za-z0-9-]+)\/([0-9a-f]+\.(?:png|jpg|gif|webp))$/);
+  return m ? `/api/image/${m[1]}/${m[2]}` : null;
+}
+const thumbHtml = (url, alt) => `<button type="button" class="thumb" data-img="${esc(url)}" title="Open full size"><img src="${esc(url)}" alt="${esc(alt || "image")}" loading="lazy"></button>`;
+// The description with its images drawn in place.
+function descHtml(body) {
+  let out = "", at = 0;
+  for (const m of body.matchAll(IMG_RE)) {
+    const url = imgUrl(m[2]); if (!url) continue;
+    out += esc(body.slice(at, m.index)) + thumbHtml(url, m[1]);
+    at = m.index + m[0].length;
+  }
+  return out + esc(body.slice(at));
+}
+const thumbsHtml = (body) => [...(body || "").matchAll(IMG_RE)].map((m) => [imgUrl(m[2]), m[1]]).filter(([u]) => u).map(([u, alt]) => thumbHtml(u, alt)).join("");
+function showThumbs(ta) {
+  const box = ta.closest("label")?.nextElementSibling;
+  if (box?.classList.contains("thumbs")) box.innerHTML = thumbsHtml(ta.value);
+}
+async function addImages(ta, files) {
+  const owner = ta.closest("#editForm") ? state.open : "new";
+  if (!owner) return;
+  for (const f of files) {
+    const what = f.name && f.name !== "image.png" ? f.name : "That image";
+    if (!IMG_TYPES.includes(f.type)) { toast(`${what}: only png, jpeg, gif and webp images`, true); continue; }
+    if (f.size > IMG_MAX) { toast(`${what} is over 10 MB`, true); continue; }
+    // Hold its place while it uploads. Focus keeps the 3-second refresh from redrawing the form.
+    const mark = `![uploading ${Math.random().toString(36).slice(2, 8)}…]()`;
+    // Each on a line of its own.
+    ta.focus();
+    const v = ta.value, from = ta.selectionStart, to = ta.selectionEnd;
+    const pre = from > 0 && v[from - 1] !== "\n" ? "\n" : "", post = to < v.length && v[to] !== "\n" ? "\n" : "";
+    ta.setRangeText(pre + mark + post, from, to, "end");
+    let text = "";
+    try {
+      const r = await fetch(`/api/image/${encodeURIComponent(owner)}`, { method: "POST", headers: { "content-type": f.type }, body: f });
+      if (r.status === 401) { location.href = "/"; return; }
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || r.statusText);
+      text = `![image](${j.path})`;
+    } catch (e) { toast(e.message, true); }
+    const i = ta.value.indexOf(mark);
+    if (i >= 0) ta.setRangeText(text, i, i + mark.length, "end");
+    else if (text) ta.setRangeText(text, ta.selectionStart, ta.selectionEnd, "end");
+    ta.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+}
+document.addEventListener("paste", (e) => {
+  const ta = descBox(e.target); const files = imgFiles(e.clipboardData?.files);
+  if (!ta || !files.length) return;
+  e.preventDefault(); addImages(ta, files);
+});
+document.addEventListener("dragover", (e) => {
+  if (!descBox(e.target) || ![...(e.dataTransfer?.types || [])].includes("Files")) return;
+  e.preventDefault(); e.dataTransfer.dropEffect = "copy";
+});
+document.addEventListener("drop", (e) => {
+  const ta = descBox(e.target); const files = imgFiles(e.dataTransfer?.files);
+  if (!ta || !files.length) return;
+  e.preventDefault(); addImages(ta, files);
+});
+document.addEventListener("input", (e) => { const ta = descBox(e.target); if (ta) showThumbs(ta); });
+document.getElementById("imgDlg").addEventListener("click", (e) => e.currentTarget.close());
 
 // ---- new ticket ----
 // The new-ticket form starts from the settings of the last ticket created here.
@@ -1096,7 +1184,8 @@ function openNew(parentKey, pick = {}) {
       ${d.projects.length ? `<label>Project<select name="project">${d.projects.map((x) => `<option ${x.name === proj ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select></label>` :
         `<div class="row2"><label>Project name<input type="text" name="pname" required></label><label>Directory<input type="text" name="pdir" placeholder="~/devel/project" required></label></div>`}
       <label>Title<input type="text" name="title" required></label>
-      <label>What should happen<textarea name="body" rows="4"></textarea></label>
+      <label>What should happen<textarea name="body" rows="4" placeholder="Paste or drop screenshots here too"></textarea></label>
+      <div class="thumbs"></div>
       <div class="row2"><label>When<select name="when"><option value="queued">Start when there's room</option><option value="backlog">Backlog for now</option><option value="planning">Plan first</option></select></label>
         <label>Runs as<select name="mode"><option value="queue" ${p?.mode !== "worktree" ? "selected" : ""}>Queue in a session</option><option value="worktree" ${p?.mode === "worktree" ? "selected" : ""}>Its own worktree</option></select></label></div>
       <div class="row2"><label>Queue session<select name="target"><option value="">Project default / parent's</option>${d.sessions.map((s) => `<option value="${esc(s.tmux)}">${esc(s.name)} (${esc(s.status)})</option>`).join("")}</select></label>
@@ -1371,6 +1460,8 @@ const unparkMsg = (k, how) => how === "started" ? `${k} unparked and resumed` : 
 
 // ---- events ----
 document.addEventListener("click", async (e) => {
+  const img = e.target.closest("[data-img]");
+  if (img) { e.preventDefault(); document.getElementById("imgFull").src = img.dataset.img; document.getElementById("imgDlg").showModal(); return; }
   const up = e.target.closest("[data-unpark]");
   if (up) { e.preventDefault(); e.stopPropagation(); const k = up.dataset.unpark;
     try { const r = await act(k, "unpark", {}); toast(unparkMsg(k, r.resumed)); } catch {} return; }

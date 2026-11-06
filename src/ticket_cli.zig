@@ -7,6 +7,7 @@ const config = @import("config.zig");
 const tmux = @import("tmux.zig");
 const claude = @import("claude.zig");
 const board = @import("board.zig");
+const images = @import("images.zig");
 const dispatch = @import("dispatch.zig");
 const worktree = @import("worktree.zig");
 const actions = @import("actions.zig");
@@ -621,10 +622,12 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
     if (std.mem.eql(u8, cmd, "rm")) {
         args.only(&.{}, ticket_usage);
         if (pos.len != 1) fail("usage: cl ticket rm <key>", .{});
-        board.removeTicket(db, a, pos[0]) catch |e| switch (e) {
+        const t = board.getTicket(db, a, pos[0]) catch |e| boardFail(db, e, "ticket");
+        board.removeTicket(db, a, t.key) catch |e| switch (e) {
             error.Exists => fail("{s} has sub-tickets; remove them first", .{pos[0]}),
             else => boardFail(db, e, "ticket"),
         };
+        images.removeTicket(ctx, a, cfg, t.key);
         return;
     }
     if (std.mem.eql(u8, cmd, "start")) {

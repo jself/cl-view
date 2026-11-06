@@ -6,6 +6,8 @@
 //!   GET  /api/board                     projects, tickets, sessions, profiles
 //!   GET  /api/ticket/<key>              one ticket in full (+ session tail, review, test plan)
 //!   POST /api/ticket                    new ticket
+//!   POST /api/image/<key|new>           upload an image (the raw bytes) for a ticket's description
+//!   GET  /api/image/<key|new>/<file>    one such image
 //!   POST /api/ticket/<key>/<action>     edit move rank comment flag unflag dismiss done approve
 //!                                       start answer key kill hide unhide rm cleanup gutter
 //!                                       gutter-stop launch launch-stop test-progress
@@ -27,6 +29,7 @@ const web = @import("web.zig");
 const operator = @import("operator.zig");
 const after_merge = @import("after_merge.zig");
 const park = @import("park.zig");
+const images = @import("images.zig");
 
 const board_html = @embedFile("web/board.html");
 
@@ -86,6 +89,17 @@ pub fn handle(ctx: Ctx, cfg: config.Config, req: *std.http.Server.Request, path:
     // The page escapes names (encodeURIComponent): a project may be called "scratch 2".
     const name = std.Uri.percentDecodeInPlace(try a.dupe(u8, parts.next() orelse ""));
     const action = parts.next() orelse "";
+
+    // An image's bytes, not JSON.
+    if (post and std.mem.eql(u8, what, "image")) {
+        uploadImage(ctx, cfg, db, a, req, name) catch |err| switch (err) {
+            error.TooBig => try fail(req, .payload_too_large, "an image can be up to 10 MB"),
+            error.BadInput => try fail(req, .bad_request, "only png, jpeg, gif and webp images"),
+            error.NotFound => try fail(req, .not_found, "no such ticket"),
+            else => try fail(req, .internal_server_error, @errorName(err)),
+        };
+        return true;
+    }
 
     const body: Body = if (post) readBody(req, a) catch {
         try fail(req, .bad_request, "the request body isn't valid JSON");
@@ -224,10 +238,12 @@ fn route(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: 
     if (!post) {
         if (std.mem.eql(u8, what, "board")) return getBoard(ctx, cfg, db, a, req);
         if (std.mem.eql(u8, what, "ticket") and name.len > 0) return getTicket(ctx, cfg, db, a, req, name);
+        if (std.mem.eql(u8, what, "image")) return getImage(ctx, cfg, a, req, name, action);
         return error.NotFound;
     }
     if (std.mem.eql(u8, what, "ticket")) {
         if (name.len == 0) {
+            const adopt_ctx: AdoptCtx = .{ .ctx = ctx, .cfg = cfg };
             const key = try board.createTicket(ctx, db, a, .{
                 .project = b.project orelse "",
                 .title = b.title,
@@ -239,6 +255,7 @@ fn route(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: 
                 .target = b.target,
                 .profile = b.profile,
                 .parent = nonEmpty(b.parent),
+                .body_for_key = .{ .ctx = &adopt_ctx, .call = adoptImages },
             });
             return ok(req, a, .{ .key = key });
         }
@@ -311,6 +328,45 @@ fn route(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: 
         return ok(req, a, .{ .ok = true });
     }
     return error.NotFound;
+}
+
+const AdoptCtx = struct { ctx: Ctx, cfg: config.Config };
+
+/// A new ticket's body, with the images pasted in the New ticket dialog moved
+/// to the ticket's own folder.
+fn adoptImages(p: *const anyopaque, a: std.mem.Allocator, key: []const u8, body: []const u8) anyerror!?[]const u8 {
+    const c: *const AdoptCtx = @ptrCast(@alignCast(p));
+    return images.adopt(c.ctx, a, c.cfg, key, body);
+}
+
+/// Store an image pasted into a description: `owner` is the ticket's key,
+/// or images.staging for a ticket not created yet. Answers its path (what
+/// the description refers to it by) and its URL here.
+fn uploadImage(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: *std.http.Server.Request, owner: []const u8) !void {
+    const key = if (std.mem.eql(u8, owner, images.staging)) owner else (try board.getTicket(db, a, owner)).key;
+    const len = req.head.content_length orelse return error.BadInput;
+    if (len > images.max_bytes) return error.TooBig;
+    if (len == 0) return error.BadInput;
+    const buf = try a.alloc(u8, @intCast(len));
+    const r = try req.readerExpectContinue(&.{});
+    try r.readSliceAll(buf);
+    const path = try images.save(ctx, a, cfg, key, buf);
+    const url = try std.fmt.allocPrint(a, "/api/image/{s}/{s}", .{ key, std.fs.path.basename(path) });
+    return ok(req, a, .{ .path = path, .url = url });
+}
+
+/// Serve one image, to the logged-in board only (it is under /api/).
+fn getImage(ctx: Ctx, cfg: config.Config, a: std.mem.Allocator, req: *std.http.Server.Request, owner: []const u8, file: []const u8) !void {
+    if (!images.validOwner(owner) or !images.validName(file)) return error.NotFound;
+    const ctype = images.contentType(std.fs.path.extension(file)[1..]) orelse return error.NotFound;
+    const path = try std.fmt.allocPrint(a, "{s}/{s}/{s}", .{ try images.root(ctx, a, cfg), owner, file });
+    const data = std.Io.Dir.cwd().readFileAlloc(ctx.io, path, a, .limited(images.max_bytes + 1)) catch return error.NotFound;
+    try req.respond(data, .{ .extra_headers = &.{
+        .{ .name = "content-type", .value = ctype },
+        // Named by their content: a name never shows another image.
+        .{ .name = "cache-control", .value = "private, max-age=86400" },
+        .{ .name = "x-content-type-options", .value = "nosniff" },
+    } });
 }
 
 /// Adding or changing a project: say which input was wrong.
@@ -398,7 +454,9 @@ fn ticketAction(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator
     } else if (eql(u8, action, "key")) {
         try actions.press(ctx, db, a, key, std.meta.stringToEnum(actions.Key, b.key orelse "") orelse return error.BadInput);
     } else if (eql(u8, action, "rm")) {
-        try board.removeTicket(db, a, key);
+        const t = try board.getTicket(db, a, key);
+        try board.removeTicket(db, a, t.key);
+        images.removeTicket(ctx, a, cfg, t.key);
     } else if (eql(u8, action, "cleanup")) {
         const t = try board.getTicket(db, a, key);
         if (t.worktree.len == 0) return error.BadInput;
@@ -477,6 +535,8 @@ fn getBoard(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, re
         .profiles = profiles.items,
         .now = ctx.nowSeconds(),
         .build = try buildId(a),
+        // Descriptions refer to pasted images by their path under here.
+        .images_dir = try images.root(ctx, a, cfg),
     });
 }
 

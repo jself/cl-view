@@ -652,6 +652,16 @@ phone, hold it first). Each column runs top to bottom in priority order,
 except Done (latest first); new tickets go to the bottom, and the dispatcher
 starts queued tickets from the top.
 
+Paste or drop an image (png, jpeg, gif or webp, up to 10 MB) into a
+ticket's description, in New ticket or its Details, and it is uploaded and
+put in as `![image](/absolute/path.png)`. The popup shows it as a thumbnail
+that opens full size. Images live with the board, in
+`<board.dir>/images/<KEY>/` (`images/new/` until the ticket is created;
+unused ones there go after a day), and are served only to the logged-in
+board. The session's first message lists the paths and tells Claude to open
+them with its Read tool (it starts with `--add-dir` on the folder, so that
+needs no permission). Deleting the ticket deletes its images.
+
 - Sub-tickets are tickets with a parent: their own key, stage, flags and
   comments. `cl t new --parent QA-1 "title"`, or from the ticket's own
   session `cl t sub "title"`. `list --top` leaves them out, `list --parent
