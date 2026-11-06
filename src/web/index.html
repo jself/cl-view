@@ -61,8 +61,10 @@
 <div id="overlay"><button id="reconnect">Reconnect</button></div>
 <script src="/xterm.js"></script>
 <script src="/addon-fit.js"></script>
+<script src="/addon-web-links.js"></script>
 <script>
   const narrow = window.matchMedia("(max-width: 600px)").matches;
+  const openLink = (uri) => { if (/^https?:\/\//i.test(uri)) window.open(uri, "_blank", "noopener"); };
   const term = new Terminal({
     fontFamily: 'ui-monospace, SFMono-Regular, Menlo, "DejaVu Sans Mono", monospace',
     // web.font_size, set by the server; 14 is the size it scales from.
@@ -70,9 +72,16 @@
     cursorBlink: true,
     scrollback: 0,
     theme: { background: "#111111" },
+    // Claude's links (OSC 8). xterm.js's own handler asks first, then opens
+    // a blank window and points it at the link, which loses the link in
+    // `cl window`; this opens it in one step, in a new tab (or, in `cl
+    // window`, the default browser).
+    linkHandler: { activate: (e, uri) => openLink(uri) },
   });
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
+  // Bare URLs too.
+  term.loadAddon(new WebLinksAddon.WebLinksAddon((e, uri) => openLink(uri)));
   term.open(document.getElementById("term"));
 
   // A swipe on a phone only scrolls xterm.js's own scrollback, and there is

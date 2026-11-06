@@ -46,6 +46,12 @@ static void open_outside(const char *uri) {
     g_object_unref(l);
 }
 
+// A new window's URI, if it's one to hand to the browser. An empty or
+// about:blank one (window.open() with no URL, filled in afterwards) isn't.
+static gboolean openable(const char *uri) {
+    return uri && (g_str_has_prefix(uri, "http://") || g_str_has_prefix(uri, "https://") || g_str_has_prefix(uri, "mailto:"));
+}
+
 // Links to other sites, and anything opened in a new window (the gutter
 // review), go to the default browser; the window stays on cl.
 static gboolean on_decide_policy(WebKitWebView *v, WebKitPolicyDecision *d, WebKitPolicyDecisionType type, gpointer _) {
@@ -54,9 +60,20 @@ static gboolean on_decide_policy(WebKitWebView *v, WebKitPolicyDecision *d, WebK
     WebKitNavigationAction *a = webkit_navigation_policy_decision_get_navigation_action(WEBKIT_NAVIGATION_POLICY_DECISION(d));
     const char *uri = webkit_uri_request_get_uri(webkit_navigation_action_get_request(a));
     if (type == WEBKIT_POLICY_DECISION_TYPE_NAVIGATION_ACTION && (same_origin(uri) || g_str_has_prefix(uri, "about:"))) return FALSE;
-    if (webkit_navigation_action_is_user_gesture(a) || type == WEBKIT_POLICY_DECISION_TYPE_NEW_WINDOW_ACTION) open_outside(uri);
+    if (type == WEBKIT_POLICY_DECISION_TYPE_NEW_WINDOW_ACTION ? openable(uri) : webkit_navigation_action_is_user_gesture(a))
+        open_outside(uri);
     webkit_policy_decision_ignore(d);
     return TRUE;
+}
+
+// window.open() doesn't ask decide-policy (only <a target=_blank> does): it
+// asks for a new web view here. That's how the terminal's links open. Hand
+// the URI to the browser and make no view.
+static GtkWidget *on_create(WebKitWebView *v, WebKitNavigationAction *a, gpointer _) {
+    (void)v;
+    const char *uri = webkit_uri_request_get_uri(webkit_navigation_action_get_request(a));
+    if (openable(uri)) open_outside(uri);
+    return NULL;
 }
 
 static void on_title(WebKitWebView *v, GParamSpec *p, gpointer _) {
@@ -142,6 +159,7 @@ static void activate(GtkApplication *app, gpointer _) {
     webkit_settings_set_javascript_can_access_clipboard(s, TRUE);
     webkit_settings_set_enable_developer_extras(s, TRUE);
     g_signal_connect(view, "decide-policy", G_CALLBACK(on_decide_policy), NULL);
+    g_signal_connect(view, "create", G_CALLBACK(on_create), NULL);
     g_signal_connect(view, "notify::title", G_CALLBACK(on_title), NULL);
     g_signal_connect(view, "load-changed", G_CALLBACK(on_load), NULL);
 

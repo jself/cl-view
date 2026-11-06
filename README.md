@@ -259,8 +259,8 @@ cl window install
   inspector. On the board, Ctrl+= / Ctrl+- resize it too (see `web.font_size`).
 - Sign in once; the cookie and page storage are kept in
   `~/.local/share/cl/window`. Its log is `~/.local/state/cl/window.log`.
-- Links to other sites and "open in the browser" links (gutter) open in the
-  default browser.
+- Links to other sites, "open in the browser" links (gutter) and links in a
+  terminal (Claude's, and bare URLs) open in the default browser.
 - Without `cl-window` (release binaries are static and don't include it),
   `cl window` opens a Chromium-family browser with `--app`, or else the default
   browser. Those keep Ctrl+W, Ctrl+T and Ctrl+N for themselves.

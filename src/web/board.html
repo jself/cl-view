@@ -347,6 +347,7 @@
 
 <script src="/xterm.js"></script>
 <script src="/addon-fit.js"></script>
+<script src="/addon-web-links.js"></script>
 <script>
 "use strict";
 const STAGES = ["backlog", "planning", "queued", "running", "review", "testing", "done"];
@@ -799,12 +800,7 @@ function tailTerm() {
     linkHandler: { activate: (e, uri) => openLink(uri) },
   });
   // Bare URLs too.
-  term.registerLinkProvider({ provideLinks(y, done) {
-    const line = term.buffer.active.getLine(y - 1)?.translateToString(true) || "";
-    const links = [...line.matchAll(/https?:\/\/[^\s"'<>()]*[^\s"'<>().,;:!?]/g)].map((m) => ({
-      range: { start: { x: m.index + 1, y }, end: { x: m.index + m[0].length, y } }, text: m[0], activate: () => openLink(m[0]) }));
-    done(links.length ? links : undefined);
-  } });
+  term.loadAddon(new WebLinksAddon.WebLinksAddon((e, uri) => openLink(uri)));
   // It's read-only: leave every key to the page, so Escape still closes the
   // popup once the terminal has focus.
   term.attachCustomKeyEventHandler(() => false);

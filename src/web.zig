@@ -17,6 +17,7 @@ const vendor = .{
     .{ "/xterm.js", "text/javascript", @embedFile("web/vendor/xterm.js") },
     .{ "/xterm.css", "text/css", @embedFile("web/vendor/xterm.css") },
     .{ "/addon-fit.js", "text/javascript", @embedFile("web/vendor/addon-fit.js") },
+    .{ "/addon-web-links.js", "text/javascript", @embedFile("web/vendor/addon-web-links.js") },
 };
 
 const cookie_name = "cl_session";
