@@ -10,6 +10,8 @@ const pty = @import("pty.zig");
 const dispatch = @import("dispatch.zig");
 const review = @import("review.zig");
 const web_board = @import("web_board.zig");
+const board = @import("board.zig");
+const worktree = @import("worktree.zig");
 
 const index_html = @embedFile("web/index.html");
 const login_html = @embedFile("web/login.html");
@@ -64,6 +66,7 @@ fn serve(ctx: Ctx, cfg: config.Config) !void {
     const exe_len = try std.process.executablePath(ctx.io, &exe_buf);
     var state: State = .{ .ctx = ctx, .cfg = cfg, .key = undefined, .exe = exe_buf[0..exe_len] };
     std.crypto.hash.sha2.Sha256.hash(cfg.web.password, &state.key, .{});
+    if (cfg.web.port) |p| replaceOld(ctx, cfg, p);
 
     // One listener per comma-separated address. Mistakes in the config stop us
     // here; an address that is not available yet (tailscale) is retried.
@@ -79,10 +82,214 @@ fn serve(ctx: Ctx, cfg: config.Config) !void {
     (try std.Thread.spawn(.{}, reapLoop, .{&state})).detach();
     if (cfg.board.dispatch) {
         (try std.Thread.spawn(.{}, dispatch.loop, .{ ctx, cfg, &logLine })).detach();
+        (try std.Thread.spawn(.{}, sweepLoop, .{ ctx, cfg })).detach();
     } else if (cfg.web.port) |p| {
         logf("port {d} overrides web.listen: a second server, so the board's dispatcher stays with the main one", .{p});
     }
     for (threads.items) |t| t.join();
+}
+
+/// A second server takes its port over from the cl servers already on it
+/// (another ticket's test server, still running): it stops that port's
+/// background server (`cl web start` with the port) and every other
+/// `cl web` started with the same CL_PORT or --port. The main server (no
+/// port of its own) is never touched.
+fn replaceOld(ctx: Ctx, cfg: config.Config, port: u16) void {
+    var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // The background one first: its loop would start it again in 10s. Unless
+    // we are that loop's server, being restarted.
+    var name_buf: [16]u8 = undefined;
+    const bg_name = std.fmt.bufPrint(&name_buf, "web-{d}", .{port}) catch unreachable;
+    if (!std.mem.eql(u8, ctx.env.get("CL_SESSION") orelse "", bg_name)) {
+        if (role(arena, cfg)) |r| {
+            if (tmux.findRole(ctx, arena, r) catch null) |s| {
+                tmux.kill(ctx, s.tmux_name) catch {};
+                logf("stopped the background cl web on port {d} to take its place", .{port});
+            }
+        } else |_| {}
+    }
+
+    var pids: std.ArrayList(std.posix.pid_t) = .empty;
+    for (testServers(ctx, arena)) |srv| if (srv.port == port) {
+        logf("stopping the cl web already on port {d} (pid {d}) to take its place", .{ port, srv.pid });
+        pids.append(arena, srv.pid) catch {};
+    };
+    stopAll(ctx, pids.items);
+}
+
+/// The main server's sweep, every minute: what a ticket started for its
+/// tests doesn't outlive the ticket. Once a ticket is done (or deleted),
+/// its test plan's launches (clrun_<key>_s<n>) are stopped, and so is any
+/// second `cl web` (a test server) running from its worktree or planning
+/// workspace, by its build or its directory, that its Claude started by
+/// hand. Finishing a ticket stops its launches already; this catches what
+/// that missed.
+fn sweepLoop(ctx: Ctx, cfg: config.Config) void {
+    while (true) {
+        ctx.sleepMs(60_000);
+        sweepTests(ctx, cfg) catch |err| logf("sweep: {s}", .{@errorName(err)});
+    }
+}
+
+fn sweepTests(ctx: Ctx, cfg: config.Config) !void {
+    var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try board.open(ctx, cfg);
+    defer db.close();
+    var live: std.ArrayList(board.Ticket) = .empty;
+    for (try board.listTickets(db, a, .{})) |t| if (t.stage != .done) try live.append(a, t);
+
+    var keys: std.ArrayList([]const u8) = .empty;
+    for (live.items) |t| try keys.append(a, t.key);
+    for (try review.staleLaunches(ctx, a, keys.items)) |name| {
+        review.killLaunch(ctx, a, name) catch continue;
+        logf("sweep: stopped {s}, a test launch of a finished ticket", .{name});
+    }
+
+    const root = try worktree.root(ctx, a, cfg);
+    var wts: std.ArrayList([]const u8) = .empty;
+    for (live.items) |t| {
+        if (t.worktree.len > 0) try wts.append(a, t.worktree);
+        try wts.append(a, try worktree.planPath(ctx, a, cfg, t.project, t.key));
+    }
+    var pids: std.ArrayList(std.posix.pid_t) = .empty;
+    for (testServers(ctx, a)) |srv| {
+        var path_buf: [32]u8 = undefined;
+        var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const exe = linkOf(ctx, std.fmt.bufPrint(&path_buf, "/proc/{d}/exe", .{srv.pid}) catch continue, &exe_buf);
+        const cwd = linkOf(ctx, std.fmt.bufPrint(&path_buf, "/proc/{d}/cwd", .{srv.pid}) catch continue, &cwd_buf);
+        if (!leftOver(root, wts.items, exe, cwd)) continue;
+        logf("sweep: stopping test server pid {d} (port {d}), left from a finished ticket in {s}", .{ srv.pid, srv.port, if (under(root, exe)) exe else cwd });
+        try pids.append(a, srv.pid);
+    }
+    stopAll(ctx, pids.items);
+}
+
+fn linkOf(ctx: Ctx, path: []const u8, buf: []u8) []const u8 {
+    const n = std.Io.Dir.readLinkAbsolute(ctx.io, path, buf) catch return "";
+    return buf[0..n];
+}
+
+fn under(dir: []const u8, path: []const u8) bool {
+    return dir.len > 0 and std.mem.startsWith(u8, path, dir) and
+        (path.len == dir.len or path[dir.len] == '/' or dir[dir.len - 1] == '/');
+}
+
+/// A test server whose build or directory is in the worktrees root, but
+/// neither is in an unfinished ticket's worktree.
+fn leftOver(root: []const u8, live: []const []const u8, exe: []const u8, cwd: []const u8) bool {
+    if (!under(root, exe) and !under(root, cwd)) return false;
+    for (live) |wt| if (under(wt, exe) or under(wt, cwd)) return false;
+    return true;
+}
+
+test "leftOver" {
+    const root = "/w";
+    const live: []const []const u8 = &.{"/w/p/cl-2-two"};
+    try std.testing.expect(leftOver(root, live, "/w/p/cl-1-one/zig-out/bin/cl", "/w/p/cl-1-one"));
+    try std.testing.expect(leftOver(root, live, "/w/p/cl-1-one/zig-out/bin/cl (deleted)", "/"));
+    try std.testing.expect(!leftOver(root, live, "/w/p/cl-2-two/zig-out/bin/cl", "/w/p/cl-2-two"));
+    // Started from a live ticket's directory, whatever build it runs.
+    try std.testing.expect(!leftOver(root, live, "/w/p/cl-1-one/zig-out/bin/cl", "/w/p/cl-2-two"));
+    // Not from a ticket at all.
+    try std.testing.expect(!leftOver(root, live, "/home/u/src/cl/zig-out/bin/cl", "/home/u/src/cl"));
+    // A sibling whose name starts the same isn't inside it.
+    try std.testing.expect(leftOver(root, live, "/w/p/cl-2-two-b/zig-out/bin/cl", "/w"));
+}
+
+/// SIGTERM each, then wait up to 3s for them to go (SIGKILL after), so a
+/// port they held is free.
+fn stopAll(ctx: Ctx, pids: []const std.posix.pid_t) void {
+    for (pids) |pid| std.posix.kill(pid, .TERM) catch {};
+    for (pids) |pid| {
+        var path_buf: [32]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "/proc/{d}", .{pid}) catch continue;
+        var tries: u32 = 0;
+        while (std.Io.Dir.cwd().access(ctx.io, path, .{})) |_| : (tries += 1) {
+            if (tries == 30) std.posix.kill(pid, .KILL) catch {};
+            if (tries == 40) break;
+            ctx.sleepMs(100);
+        } else |_| {}
+    }
+}
+
+const TestServer = struct { pid: std.posix.pid_t, port: u16 };
+
+/// Every running second `cl web` but this process (see `testServerPort`).
+fn testServers(ctx: Ctx, arena: std.mem.Allocator) []TestServer {
+    var out: std.ArrayList(TestServer) = .empty;
+    var proc = std.Io.Dir.openDirAbsolute(ctx.io, "/proc", .{ .iterate = true }) catch return &.{};
+    defer proc.close(ctx.io);
+    const self: std.posix.pid_t = std.os.linux.getpid();
+    var it = proc.iterate();
+    while (it.next(ctx.io) catch null) |entry| {
+        const pid = std.fmt.parseInt(std.posix.pid_t, entry.name, 10) catch continue;
+        if (pid == self) continue;
+        var path_buf: [32]u8 = undefined;
+        const cmd = readProc(ctx, proc, std.fmt.bufPrint(&path_buf, "{d}/cmdline", .{pid}) catch continue, arena) catch continue;
+        // Most processes aren't cl web; skip reading their environment.
+        if (std.mem.indexOf(u8, cmd, "\x00web\x00") == null) continue;
+        const env = readProc(ctx, proc, std.fmt.bufPrint(&path_buf, "{d}/environ", .{pid}) catch continue, arena) catch continue;
+        const port = testServerPort(cmd, env) orelse continue;
+        out.append(arena, .{ .pid = pid, .port = port }) catch break;
+    }
+    return out.items;
+}
+
+/// A /proc file, which reports a size of 0, so it is read as a stream.
+fn readProc(ctx: Ctx, proc: std.Io.Dir, path: []const u8, arena: std.mem.Allocator) ![]u8 {
+    var file = try proc.openFile(ctx.io, path, .{});
+    defer file.close(ctx.io);
+    var r = file.readerStreaming(ctx.io, &.{});
+    return r.interface.allocRemaining(arena, .limited(1024 * 1024)) catch |err| switch (err) {
+        error.ReadFailed => r.err.?,
+        else => |e| e,
+    };
+}
+
+/// For a process (its NUL-separated /proc cmdline and environ) that is a
+/// `cl web` serving as a second server: its port. That is `cl web` with
+/// CL_PORT set, `cl web --port <port>`, or `.claude/test-web.sh`'s server
+/// (CL_TEST_WEB set; its port is in its own config, so 0 here). Null for
+/// anything else, the main server and `cl web stop` included.
+fn testServerPort(cmdline: []const u8, environ: []const u8) ?u16 {
+    var args: [5][]const u8 = undefined;
+    var n: usize = 0;
+    var it = std.mem.splitScalar(u8, std.mem.trimEnd(u8, cmdline, "\x00"), 0);
+    while (it.next()) |a| {
+        if (n == args.len) return null;
+        args[n] = a;
+        n += 1;
+    }
+    if (n < 2 or !std.mem.eql(u8, std.fs.path.basename(args[0]), "cl") or !std.mem.eql(u8, args[1], "web")) return null;
+    if (n == 4) return if (std.mem.eql(u8, args[2], "--port")) std.fmt.parseInt(u16, args[3], 10) catch null else null;
+    if (n != 2) return null;
+    var test_web = false;
+    var vars = std.mem.splitScalar(u8, environ, 0);
+    while (vars.next()) |v| {
+        if (std.mem.startsWith(u8, v, "CL_PORT=")) if (std.fmt.parseInt(u16, v["CL_PORT=".len..], 10) catch null) |p| return p;
+        if (std.mem.startsWith(u8, v, "CL_TEST_WEB=")) test_web = true;
+    }
+    return if (test_web) 0 else null;
+}
+
+test "testServerPort" {
+    const env = "HOME=/h\x00CL_PORT=8422\x00";
+    try std.testing.expectEqual(@as(?u16, 8422), testServerPort("zig-out/bin/cl\x00web\x00", env));
+    try std.testing.expectEqual(@as(?u16, 8422), testServerPort("/x/cl\x00web\x00--port\x008422\x00", ""));
+    try std.testing.expectEqual(@as(?u16, 0), testServerPort("/x/cl\x00web\x00", "HOME=/t\x00CL_TEST_WEB=1\x00"));
+    // The main server has no port of its own.
+    try std.testing.expectEqual(@as(?u16, null), testServerPort("/home/u/.local/bin/cl\x00web\x00", "HOME=/h\x00"));
+    // Other cl web commands with CL_PORT aren't servers.
+    try std.testing.expectEqual(@as(?u16, null), testServerPort("cl\x00web\x00stop\x00", env));
+    try std.testing.expectEqual(@as(?u16, null), testServerPort("cl\x00web\x00--port\x008422\x00stop\x00", ""));
+    try std.testing.expectEqual(@as(?u16, null), testServerPort("cl-window\x00web\x00", env));
+    try std.testing.expectEqual(@as(?u16, null), testServerPort("cl\x00list\x00", env));
 }
 
 /// One web.listen entry: "host:port", where host `tailscale` means this

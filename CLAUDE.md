@@ -35,7 +35,9 @@ same config and board (it leaves the dispatcher to the main server):
     ~/.local/share/zvm/0.16.0/zig build && CL_PORT=8422 zig-out/bin/cl web
 
 and give http://127.0.0.1:8422/board (or http://<machine>:8422/board over
-tailscale) as what to open. Use any free port other than web.listen's.
+tailscale) as what to open. Use any port other than web.listen's. Another
+ticket's test server left on 8422 is fine: the new one stops it before it
+listens (README, `CL_PORT`), so don't add a `fuser -k` step.
 
 ## Sandboxes and tests
 

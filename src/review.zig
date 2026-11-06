@@ -552,6 +552,46 @@ pub fn stopLaunch(ctx: Ctx, a: std.mem.Allocator, key: []const u8, n: ?usize) !v
     try killExact(ctx, a, try sessionName(a, "clrun_", key));
 }
 
+/// The launch sessions (clrun_<key>_s<n>, or an old clrun_<key>) of
+/// tickets not in `live`: finished or deleted ones.
+pub fn staleLaunches(ctx: Ctx, a: std.mem.Allocator, live: []const []const u8) ![]const []const u8 {
+    const names = tmux.run(ctx, &.{ "list-sessions", "-F", "#{session_name}" }) catch return &.{};
+    defer ctx.gpa.free(names);
+    var lower: std.ArrayList([]const u8) = .empty;
+    for (live) |k| try lower.append(a, try std.ascii.allocLowerString(a, k));
+    var out: std.ArrayList([]const u8) = .empty;
+    var it = std.mem.tokenizeScalar(u8, names, '\n');
+    while (it.next()) |name| {
+        const key = launchKey(name) orelse continue;
+        for (lower.items) |k| {
+            if (std.mem.eql(u8, k, key)) break;
+        } else try out.append(a, try a.dupe(u8, name));
+    }
+    return out.items;
+}
+
+/// The (lowercase) ticket key a launch session belongs to.
+fn launchKey(name: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, name, "clrun_")) return null;
+    const rest = name["clrun_".len..];
+    if (std.mem.lastIndexOf(u8, rest, "_s")) |i| {
+        if (i + 2 < rest.len and (std.fmt.parseInt(usize, rest[i + 2 ..], 10) catch null) != null) return rest[0..i];
+    }
+    return rest;
+}
+
+test "launchKey" {
+    try std.testing.expectEqualStrings("cl-50", launchKey("clrun_cl-50_s1").?);
+    try std.testing.expectEqualStrings("cl-50", launchKey("clrun_cl-50_s12").?);
+    try std.testing.expectEqualStrings("cl-50", launchKey("clrun_cl-50").?);
+    try std.testing.expect(launchKey("cl_cl-50_ab12") == null);
+}
+
+/// Stop one launch session by its full name.
+pub fn killLaunch(ctx: Ctx, a: std.mem.Allocator, name: []const u8) !void {
+    return killExact(ctx, a, name);
+}
+
 pub const LaunchState = struct {
     running: bool,
     /// The end of its output.

@@ -264,7 +264,10 @@ web.font_size = 16              # text size of the board and terminal pages, in 
   commands run with `CL_PORT` set don't autostart anything, and `cl web start`
   / `cl web stop` with it start and stop only that port's background server
   (logging to `web-8422.log`), never the main one. `cl window` with `CL_PORT`
-  opens and starts that port's server.
+  opens and starts that port's server. Such a server takes its port over:
+  it first stops any other `cl web` started with the same port (another
+  ticket's test server still running, or `cl web start`'s), so the newest
+  build is the one that answers. The main server is never stopped this way.
 
 ## Window
 
@@ -738,6 +741,14 @@ submitting (or `--stop`) leaves the ticket as it was. gutter only listens on
 same port on its other `web.listen` addresses (tailscale) and forwards it. Test results that all pass move a ticket in testing to
 done; a failure sends them to Claude for another round, and so can comments
 when everything passed (the board asks).
+
+Tests clean up after themselves. Sending test results stops the ticket's
+launches, and so does finishing it. Once a minute the main `cl web` also
+stops whatever a finished (or deleted) ticket left running: its launch
+sessions, and any second `cl web` (`CL_PORT`, `--port`, or
+`.claude/test-web.sh`'s) whose build or directory is in that ticket's
+worktree, such as one its Claude started by hand. Test servers outside the
+worktrees root are left alone.
 
 ### Finishing
 
