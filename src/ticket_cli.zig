@@ -761,6 +761,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
     }
     if (std.mem.eql(u8, cmd, "dispatch")) {
         args.only(&.{"--once"}, ticket_usage);
+        tmux.requireServer(ctx);
         if (args.has("--once")) {
             const n = dispatch.tick(ctx, cfg, db) catch |e| boardFail(db, e, "ticket");
             return out(try std.fmt.allocPrint(a, "started {d}\n", .{n}));

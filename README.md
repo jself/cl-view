@@ -54,13 +54,35 @@ work = ~/.claude-work
 personal = ~/.claude
 ```
 
-`default`, `operator` and dotted keys (`web.*`, `board.*`, `gutter.*`) are settings; every other key is a profile.
+`default`, `operator` and dotted keys (`web.*`, `board.*`, `gutter.*`, `tmux.*`) are settings; every other key is a profile.
 `-p <profile>` selects a profile, and `operator` picks the operator's
 profile (falling back to `default`). If `CLAUDE_CONFIG_DIR` is set when
 `cl` runs, it overrides `default`: the profile with that directory is used, or
 one named after the directory (`~/.claude-work` becomes `claude-work`) is added
 for this run. Without a config file there is a single `default` profile that
 leaves `CLAUDE_CONFIG_DIR` untouched.
+
+### tmux server
+
+cl uses tmux's default server unless it is given a socket, as an absolute path:
+
+```
+tmux.socket = /run/user/1000/cl-try/tmux
+```
+
+or `CL_TMUX_SOCKET=/run/user/1000/cl-try/tmux`, which wins over the config.
+Then every tmux call cl makes, `cl web`'s and the dispatcher's included, is
+`tmux -S <socket>`, and the sessions cl starts get `CL_TMUX_SOCKET` too, so a
+`cl` run inside one stays on that server.
+
+A sandbox (a `cl` whose `HOME` isn't your home directory from the passwd
+database) without a socket runs no tmux at all: `cl web`, `cl ticket
+dispatch` and the session commands refuse to start and say why, and the
+board commands that need tmux fail. Its default server is most likely your
+real one (a `TMUX_TMPDIR` that doesn't exist yet makes tmux fall back to
+`/tmp`), and a sandbox that reached it has killed every session at once. To
+mean the real server from a sandbox, name its socket (`tmux display -p
+'#{socket_path}'`).
 
 ## Usage
 

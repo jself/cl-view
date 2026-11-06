@@ -52,7 +52,7 @@ const launch = @import("launch.zig");
 pub const LaunchOptions = launch.Options;
 
 pub fn main(init: std.process.Init) !void {
-    const ctx = Ctx.init(init);
+    var ctx = Ctx.init(init);
     var args_it: std.process.Args.Iterator = .init(init.minimal.args);
     _ = args_it.next(); // argv[0]
     var args: std.ArrayList([]const u8) = .empty;
@@ -60,6 +60,15 @@ pub fn main(init: std.process.Init) !void {
     const argv = args.items;
 
     const cfg = try config.load(ctx);
+    try tmux.configure(&ctx, cfg);
+
+    // In a sandbox with no tmux socket, only the board's commands (which
+    // mostly don't need tmux; those that do fail at tmux.run) and help run.
+    const cmd0 = if (argv.len > 0) argv[0] else "";
+    const tmux_free = for ([_][]const u8{ "ticket", "t", "project", "help", "-h", "--help" }) |c| {
+        if (std.mem.eql(u8, cmd0, c)) break true;
+    } else false;
+    if (!tmux_free) tmux.requireServer(ctx);
 
     if (argv.len > 0) {
         const cmd = argv[0];

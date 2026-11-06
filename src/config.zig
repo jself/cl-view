@@ -17,6 +17,8 @@
 //!
 //!   gutter.path = ~/bin/gutter           (gutter for reviews; "" looks it up on PATH)
 //!
+//!   tmux.socket = /run/user/1000/cl-try/tmux   (tmux -S for every tmux call; CL_TMUX_SOCKET overrides)
+//!
 //! `default`, `operator` and dotted keys are settings; every other key is a
 //! profile. `operator` picks the operator's profile and falls back to `default`.
 //!
@@ -44,6 +46,7 @@ pub const Config = struct {
     web: Web = .{},
     board: Board = .{},
     gutter: Gutter = .{},
+    tmux: Tmux = .{},
 
     pub fn find(self: Config, name: []const u8) ?Profile {
         for (self.profiles) |p| if (std.mem.eql(u8, p.name, name)) return p;
@@ -99,6 +102,13 @@ pub const Gutter = struct {
     path: []const u8 = "",
 };
 
+pub const Tmux = struct {
+    /// Absolute path of the tmux server's socket, passed as `tmux -S` on
+    /// every call; "" for tmux's default server. CL_TMUX_SOCKET overrides it.
+    /// For sandboxes: see `tmux.configure`.
+    socket: []const u8 = "",
+};
+
 pub fn load(ctx: Ctx) !Config {
     var cfg = try loadFile(ctx);
     if (ctx.env.get("CL_PORT")) |v| if (v.len > 0) {
@@ -124,6 +134,7 @@ fn loadFile(ctx: Ctx) !Config {
     var web: Web = .{};
     var board: Board = .{};
     var gutter: Gutter = .{};
+    var tmux: Tmux = .{};
     var lines = std.mem.splitScalar(u8, data, '\n');
     while (lines.next()) |raw| {
         const line = std.mem.trim(u8, raw, " \t\r");
@@ -154,6 +165,8 @@ fn loadFile(ctx: Ctx) !Config {
             board.dispatch = !(std.mem.eql(u8, val, "false") or std.mem.eql(u8, val, "no") or std.mem.eql(u8, val, "off"));
         } else if (std.mem.eql(u8, key, "gutter.path")) {
             gutter.path = try expandHomePerm(ctx, val);
+        } else if (std.mem.eql(u8, key, "tmux.socket")) {
+            tmux.socket = try expandHomePerm(ctx, val);
         } else if (std.mem.indexOfScalar(u8, key, '.') != null) {
             continue; // unknown setting
         } else {
@@ -165,6 +178,7 @@ fn loadFile(ctx: Ctx) !Config {
         c.web = web;
         c.board = board;
         c.gutter = gutter;
+        c.tmux = tmux;
         return c;
     }
     const operator_profile = operator orelse default orelse profiles.items[0].name;
@@ -178,6 +192,7 @@ fn loadFile(ctx: Ctx) !Config {
         .web = web,
         .board = board,
         .gutter = gutter,
+        .tmux = tmux,
     };
 }
 

@@ -36,3 +36,9 @@ same config and board (it leaves the dispatcher to the main server):
 
 and give http://127.0.0.1:8422/board (or http://<machine>:8422/board over
 tailscale) as what to open. Use any free port other than web.listen's.
+
+## Sandboxes and tests
+
+A sandbox's tmux is never the real server: set `CL_TMUX_SOCKET` (or `tmux.socket` in the sandbox's config) to an absolute path inside the sandbox, and in scripts pass `tmux -S <socket>` (or `-L <name>`) on every tmux call, `tmux ls` and checks included. Never a bare `tmux kill-server`, and never rely on `TMUX_TMPDIR` alone. Why: when `TMUX_TMPDIR` names a directory that doesn't exist yet, tmux silently uses /tmp, so a sandbox's `kill-server` killed the real server and every cl session with it (twice, 2026-11-05).
+
+A cl whose HOME isn't the real home and has no socket refuses to run tmux (README, "tmux server"); don't work around that by pointing it at the default socket unless the sandbox is meant to see the real sessions, as `.claude/test-web.sh` is.

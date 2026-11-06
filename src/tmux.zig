@@ -1,7 +1,9 @@
 //! All tmux interaction. tmux is the session store: every cl session is a tmux
 //! session named `cl_<name>_<id>` carrying @cl_* user options.
 const std = @import("std");
+const builtin = @import("builtin");
 const Ctx = @import("ctx.zig");
+const config = @import("config.zig");
 
 pub const prefix = "cl_";
 
@@ -26,14 +28,120 @@ pub const Session = struct {
 pub const operator_role = "operator";
 pub const web_role = "web";
 
-pub const Error = error{TmuxFailed};
+pub const Error = error{ TmuxFailed, NoTmuxSocket };
+
+pub const socket_env = "CL_TMUX_SOCKET";
+
+/// Which tmux server cl talks to, decided once at startup.
+pub const Server = struct {
+    /// `tmux -S` on every call; null for tmux's default server.
+    socket: ?[]const u8,
+    /// A sandbox with no socket: cl runs no tmux at all.
+    blocked: bool,
+};
+
+/// CL_TMUX_SOCKET (`env_socket`) wins over tmux.socket (`cfg_socket`); either
+/// must be an absolute path short enough for a Unix socket. With neither, cl uses tmux's default server,
+/// unless HOME isn't the user's home from the passwd database (`real_home`):
+/// then cl is running in a sandbox, whose default server is very likely the
+/// real one (a sandbox's TMUX_TMPDIR that doesn't exist yet falls back to
+/// /tmp), so it is blocked. `real_home` null (no passwd entry) can't tell, so
+/// doesn't block.
+pub fn decide(env_socket: ?[]const u8, cfg_socket: []const u8, home: []const u8, real_home: ?[]const u8) error{ RelativeSocket, SocketPathTooLong }!Server {
+    const sock: ?[]const u8 = if (env_socket) |e| (if (e.len > 0) e else null) else null;
+    if (sock orelse (if (cfg_socket.len > 0) cfg_socket else null)) |p| {
+        if (!std.fs.path.isAbsolute(p)) return error.RelativeSocket;
+        // sockaddr_un's sun_path; tmux would only say so on stderr, which cl drops.
+        if (p.len >= 104) return error.SocketPathTooLong;
+        return .{ .socket = p, .blocked = false };
+    }
+    const real = real_home orelse return .{ .socket = null, .blocked = false };
+    const same = std.mem.eql(u8, std.mem.trimEnd(u8, home, "/"), std.mem.trimEnd(u8, real, "/"));
+    return .{ .socket = null, .blocked = !same };
+}
+
+/// The user's home directory from the passwd database, not $HOME.
+fn realHome() ?[]const u8 {
+    const pw = std.c.getpwuid(std.c.getuid()) orelse return null;
+    const dir = pw.dir orelse return null;
+    return std.mem.sliceTo(dir, 0);
+}
+
+/// Pick the tmux server for this process (see `decide`) and record it in
+/// `ctx`. A socket is also put in the environment as CL_TMUX_SOCKET, so the
+/// processes cl starts (web terminals' `cl list`, `cl web` itself) use it too;
+/// `newSession` passes it into every session for the same reason.
+pub fn configure(ctx: *Ctx, cfg: config.Config) !void {
+    const server = decide(ctx.env.get(socket_env), cfg.tmux.socket, ctx.home, realHome()) catch |err| {
+        std.debug.print("cl: the tmux socket ({s} or tmux.socket) must be {s}\n", .{ socket_env, switch (err) {
+            error.RelativeSocket => "an absolute path",
+            error.SocketPathTooLong => "shorter than 104 bytes (a Unix socket path)",
+        } });
+        std.process.exit(1);
+    };
+    // A copy: the socket may be the environment's own value, which `put` frees.
+    ctx.tmux_socket = if (server.socket) |p| try ctx.perm.dupe(u8, p) else null;
+    ctx.tmux_blocked = server.blocked;
+    if (ctx.tmux_socket) |p| try ctx.env.put(socket_env, p);
+}
+
+/// Why cl won't run tmux, for `ctx.tmux_blocked`.
+pub fn blockedMessage(ctx: Ctx, buf: []u8) []const u8 {
+    return std.fmt.bufPrint(buf,
+        \\cl: HOME is {s}, not your home directory {s}, so this looks like a sandbox,
+        \\and no tmux socket is set. cl won't run tmux here: tmux's default server is
+        \\probably your real one. Set {s} (or tmux.socket in the config) to the
+        \\sandbox's own socket, an absolute path; to really use the default server,
+        \\set it to that server's socket (tmux display -p '#{{socket_path}}').
+        \\
+    , .{ ctx.home, realHome() orelse "?", socket_env }) catch "cl: no tmux socket set in a sandbox; set " ++ socket_env ++ "\n";
+}
+
+/// Exit with `blockedMessage` when cl can't use tmux: for commands that
+/// can't do anything without it, and for `cl web` and the dispatcher, which
+/// would otherwise run (and start ticket sessions) with no sessions at all.
+pub fn requireServer(ctx: Ctx) void {
+    if (!ctx.tmux_blocked) return;
+    var buf: [1024]u8 = undefined;
+    std.debug.print("{s}", .{blockedMessage(ctx, &buf)});
+    std.process.exit(1);
+}
+
+var warned = std.atomic.Value(bool).init(false);
+
+/// "tmux" and, with a socket, "-S <socket>": the start of every tmux argv.
+/// Blocked: says why once (on stderr) and fails.
+fn prefixArgs(ctx: Ctx, buf: *[3][]const u8) Error![]const []const u8 {
+    if (ctx.tmux_blocked) {
+        if (!builtin.is_test and !warned.swap(true, .monotonic)) {
+            var mbuf: [1024]u8 = undefined;
+            std.debug.print("{s}", .{blockedMessage(ctx, &mbuf)});
+        }
+        return error.NoTmuxSocket;
+    }
+    buf[0] = "tmux";
+    if (ctx.tmux_socket) |p| {
+        buf[1] = "-S";
+        buf[2] = p;
+        return buf[0..3];
+    }
+    return buf[0..1];
+}
+
+/// The full argv for tmux `argv` on ctx's server. Caller frees the slice.
+fn fullArgv(ctx: Ctx, argv: []const []const u8) ![]const []const u8 {
+    var pbuf: [3][]const u8 = undefined;
+    const pre = try prefixArgs(ctx, &pbuf);
+    const full = try ctx.gpa.alloc([]const u8, pre.len + argv.len);
+    @memcpy(full[0..pre.len], pre);
+    @memcpy(full[pre.len..], argv);
+    return full;
+}
 
 /// Run tmux with argv and return stdout (trailing newline trimmed). Caller owns result.
 pub fn run(ctx: Ctx, argv: []const []const u8) ![]u8 {
-    const full = try ctx.gpa.alloc([]const u8, argv.len + 1);
+    const full = try fullArgv(ctx, argv);
     defer ctx.gpa.free(full);
-    full[0] = "tmux";
-    @memcpy(full[1..], argv);
     const res = try std.process.run(ctx.gpa, ctx.io, .{ .argv = full });
     defer ctx.gpa.free(res.stderr);
     switch (res.term) {
@@ -133,6 +241,12 @@ pub fn newSession(ctx: Ctx, opts: NewOptions) ![]const u8 {
     if (opts.config_dir) |cd| {
         cfg_env = try std.fmt.allocPrint(ctx.gpa, "CLAUDE_CONFIG_DIR={s}", .{cd});
         try argv.appendSlice(ctx.gpa, &.{ "-e", cfg_env.? });
+    }
+    var sock_env: ?[]const u8 = null;
+    defer if (sock_env) |e| ctx.gpa.free(e);
+    if (ctx.tmux_socket) |p| {
+        sock_env = try std.fmt.allocPrint(ctx.gpa, "{s}={s}", .{ socket_env, p });
+        try argv.appendSlice(ctx.gpa, &.{ "-e", sock_env.? });
     }
     for (opts.env) |e| try argv.appendSlice(ctx.gpa, &.{ "-e", e });
     try argv.append(ctx.gpa, "--");
@@ -344,8 +458,10 @@ pub fn attach(ctx: Ctx, tmux_name: []const u8) !void {
     _ = env.swapRemove("TMUX_PANE");
     // Clear scrollback so the previous screen doesn't linger above.
     std.Io.File.stdout().writeStreamingAll(ctx.io, "\x1b[3J\x1b[H\x1b[2J") catch {};
+    const argv = try fullArgv(ctx, &.{ "attach-session", "-t", tmux_name });
+    defer ctx.gpa.free(argv);
     var child = try std.process.spawn(ctx.io, .{
-        .argv = &.{ "tmux", "attach-session", "-t", tmux_name },
+        .argv = argv,
         .environ_map = &env,
     });
     const term = try child.wait(ctx.io);
@@ -353,4 +469,100 @@ pub fn attach(ctx: Ctx, tmux_name: []const u8) !void {
         .exited => |code| if (code > 1) return error.TmuxFailed,
         else => return error.TmuxFailed,
     }
+}
+
+test "decide: CL_TMUX_SOCKET wins over tmux.socket, and must be absolute" {
+    const s = try decide("/run/a.sock", "/run/b.sock", "/sandbox", "/home/me");
+    try std.testing.expectEqualStrings("/run/a.sock", s.socket.?);
+    try std.testing.expect(!s.blocked);
+    try std.testing.expectEqualStrings("/run/b.sock", (try decide(null, "/run/b.sock", "/sandbox", "/home/me")).socket.?);
+    try std.testing.expectEqualStrings("/run/b.sock", (try decide("", "/run/b.sock", "/sandbox", "/home/me")).socket.?);
+    try std.testing.expectError(error.RelativeSocket, decide("cl-try/tmux", "", "/home/me", "/home/me"));
+    try std.testing.expectError(error.RelativeSocket, decide(null, "sock", "/home/me", "/home/me"));
+    try std.testing.expectError(error.SocketPathTooLong, decide("/" ++ "x" ** 110, "", "/home/me", "/home/me"));
+}
+
+test "decide: a sandbox HOME without a socket is blocked" {
+    const real = try decide(null, "", "/home/me/", "/home/me");
+    try std.testing.expect(real.socket == null and !real.blocked);
+    try std.testing.expect((try decide(null, "", "/tmp/cl-try", "/home/me")).blocked);
+    // No passwd entry: can't tell, so the default server.
+    try std.testing.expect(!(try decide(null, "", "/tmp/cl-try", null)).blocked);
+}
+
+fn testCtx(socket: ?[]const u8, blocked: bool) Ctx {
+    return .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp", .tmux_socket = socket, .tmux_blocked = blocked };
+}
+
+test "every tmux argv names the socket when one is set" {
+    const a = std.testing.allocator;
+    const with = try fullArgv(testCtx("/run/x/tmux", false), &.{ "list-sessions", "-F", "#{session_name}" });
+    defer a.free(with);
+    try std.testing.expectEqualDeep(@as([]const []const u8, &.{ "tmux", "-S", "/run/x/tmux", "list-sessions", "-F", "#{session_name}" }), with);
+    const without = try fullArgv(testCtx(null, false), &.{"list-sessions"});
+    defer a.free(without);
+    try std.testing.expectEqualDeep(@as([]const []const u8, &.{ "tmux", "list-sessions" }), without);
+    try std.testing.expectError(error.NoTmuxSocket, run(testCtx(null, true), &.{"list-sessions"}));
+    try std.testing.expectError(error.NoTmuxSocket, fullArgv(testCtx(null, true), &.{"kill-server"}));
+}
+
+test "sessions go to the socket's server, not the default one" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    // Skip without tmux on PATH.
+    const probe = std.process.run(a, io, .{ .argv = &.{ "tmux", "-V" } }) catch return error.SkipZigTest;
+    a.free(probe.stdout);
+    a.free(probe.stderr);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = dir_buf[0..try tmp.dir.realPath(io, &dir_buf)];
+    const sock = try std.fmt.allocPrint(a, "{s}/tmux", .{dir});
+    defer a.free(sock);
+    // The server is stopped with an explicit -S, never through the code under test.
+    defer if (std.process.run(a, io, .{ .argv = &.{ "tmux", "-S", sock, "kill-server" } })) |r| {
+        a.free(r.stdout);
+        a.free(r.stderr);
+    } else |_| {};
+
+    var arena_state = std.heap.ArenaAllocator.init(a);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var ctx = testCtx(sock, false);
+    ctx.perm = arena;
+    const name = try newSession(ctx, .{ .name = "socket-test", .dir = dir, .profile = "", .config_dir = null, .command = &.{ "sleep", "60" } });
+
+    const sessions = try list(ctx, arena);
+    try std.testing.expectEqual(@as(usize, 1), sessions.len);
+    try std.testing.expectEqualStrings(name, sessions[0].tmux_name);
+    // The session's processes get the socket too.
+    const env = try run(ctx, &.{ "show-environment", "-t", name, socket_env });
+    defer a.free(env);
+    try std.testing.expectEqualStrings(try std.fmt.allocPrint(arena, "{s}={s}", .{ socket_env, sock }), env);
+    // And the default server never saw it.
+    try std.testing.expect(!hasSession(testCtx(null, false), name));
+}
+
+test "configure keeps CL_TMUX_SOCKET from the environment, and passes on tmux.socket" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    // The testing allocator poisons freed memory, so a use-after-free shows.
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+    try env.put(socket_env, "/run/user/1000/cl-try/tmux");
+    var ctx = testCtx(null, false);
+    ctx.perm = a;
+    ctx.env = &env;
+    try configure(&ctx, .{ .profiles = &.{}, .default = "", .operator = "" });
+    try std.testing.expectEqualStrings("/run/user/1000/cl-try/tmux", ctx.tmux_socket.?);
+    try std.testing.expectEqualStrings("/run/user/1000/cl-try/tmux", env.get(socket_env).?);
+
+    var env2: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env2.deinit();
+    ctx.env = &env2;
+    try configure(&ctx, .{ .profiles = &.{}, .default = "", .operator = "", .tmux = .{ .socket = "/run/cfg.sock" } });
+    try std.testing.expectEqualStrings("/run/cfg.sock", ctx.tmux_socket.?);
+    try std.testing.expectEqualStrings("/run/cfg.sock", env2.get(socket_env).?);
 }

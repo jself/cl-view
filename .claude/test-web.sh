@@ -15,4 +15,7 @@ board.dir = $HOME/.local/state/cl
 board.worktrees = $HOME/.local/share/cl/worktrees
 board.dispatch = false
 EOF
-exec env HOME="$T" CL_TEST_WEB=1 "$PWD/zig-out/bin/cl" web
+# It shows the real sessions, so it names the real tmux server's socket: with
+# its own HOME and no socket, cl would refuse to run tmux (a sandbox).
+SOCK=$(tmux display -p '#{socket_path}' 2>/dev/null || echo "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/default")
+exec env HOME="$T" CL_TEST_WEB=1 CL_TMUX_SOCKET="$SOCK" "$PWD/zig-out/bin/cl" web

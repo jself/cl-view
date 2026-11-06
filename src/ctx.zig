@@ -9,6 +9,12 @@ gpa: std.mem.Allocator,
 perm: std.mem.Allocator,
 env: *std.process.Environ.Map,
 home: []const u8,
+/// The tmux server's socket (`tmux -S`), from CL_TMUX_SOCKET or tmux.socket;
+/// null for tmux's default. Set by `tmux.configure`.
+tmux_socket: ?[]const u8 = null,
+/// A sandbox (HOME isn't the user's home) with no socket set: cl won't run
+/// tmux at all, as it could reach the real server. Set by `tmux.configure`.
+tmux_blocked: bool = false,
 
 pub fn init(i: std.process.Init) Ctx {
     return .{
