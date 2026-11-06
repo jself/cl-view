@@ -94,12 +94,21 @@
   .switch .n { font: calc(12 * var(--u)) var(--mono); color: var(--muted); }
 
   main { padding: 0 calc(16 * var(--u)) calc(32 * var(--u)); }
-  .cols { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(calc(230 * var(--u)), 1fr); gap: calc(12 * var(--u)); overflow-x: auto;
-          align-items: start; scroll-snap-type: x mandatory; padding-bottom: calc(8 * var(--u)); }
-  .col { background: var(--panel); border: 1px solid #222428; border-radius: calc(12 * var(--u)); padding: calc(10 * var(--u)); display: flex; flex-direction: column;
+  /* Board and Lanes fill the window below the bar and scroll inside their own
+     box, down and sideways, so their headers can stick. If the bar and Needs
+     you leave too little room, the box keeps a minimum and the page scrolls. */
+  body.fit { height: 100vh; height: 100dvh; display: flex; flex-direction: column; }
+  body.fit > * { flex: none; }
+  body.fit > main { flex: 1 1 auto; min-height: calc(320 * var(--u)); display: flex; flex-direction: column; padding-bottom: calc(12 * var(--u)); }
+  .cols { flex: 1 1 auto; min-height: 0; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(calc(230 * var(--u)), 1fr); grid-auto-rows: minmax(max-content, 1fr); gap: calc(12 * var(--u)); overflow: auto;
+          scroll-snap-type: x mandatory; overscroll-behavior-x: contain; }
+  /* Columns stretch to the tallest one, so each header stays stuck while scrolling down. */
+  .col { background: var(--panel); border: 1px solid #222428; border-radius: calc(12 * var(--u)); padding: 0 calc(10 * var(--u)) calc(10 * var(--u)); display: flex; flex-direction: column;
          gap: calc(8 * var(--u)); min-height: calc(160 * var(--u)); scroll-snap-align: start; }
-  .col h2 { margin: 0; font-size: calc(13 * var(--u)); font-weight: 600; display: flex; gap: calc(8 * var(--u)); align-items: center; padding: calc(2 * var(--u)) calc(4 * var(--u)); }
-  .col h2 .n { font: calc(12 * var(--u)) var(--mono); color: var(--muted); }
+  .col h2, .lanes .lhd h2 { margin: 0; font-size: calc(13 * var(--u)); font-weight: 600; display: flex; gap: calc(8 * var(--u)); align-items: center; }
+  .col h2 { position: sticky; top: 0; z-index: 1; background: var(--panel); margin: 0 calc(-10 * var(--u)); padding: calc(12 * var(--u)) calc(14 * var(--u)) calc(6 * var(--u));
+            border-radius: calc(12 * var(--u)) calc(12 * var(--u)) 0 0; }
+  .col h2 .n, .lanes .lhd .n { font: calc(12 * var(--u)) var(--mono); color: var(--muted); }
   .add { width: 100%; min-height: calc(34 * var(--u)); border: 1px dashed var(--line); border-radius: calc(10 * var(--u)); background: none;
          color: var(--muted); font-size: calc(18 * var(--u)); line-height: 1; cursor: pointer; }
   .add:hover { color: var(--fg); border-color: var(--muted); background: #18191c; }
@@ -123,13 +132,11 @@
   .card.lifted { opacity: .35; }
   #ghost { position: fixed; z-index: 20; pointer-events: none; margin: 0; box-shadow: 0 calc(12 * var(--u)) calc(32 * var(--u)) rgba(0,0,0,.55); transform: rotate(1.5deg); opacity: .95; }
   .drop-on { outline: calc(2 * var(--u)) dashed #60a5fa; outline-offset: calc(-2 * var(--u)); background: #16202e; }
-  .lanes td.drop-on { border-radius: calc(10 * var(--u)); }
   /* Where a dragged card would land in its column: a line in the gap between cards. */
   .card { position: relative; }
   .card.ins-above::before, .card.ins-below::after { content: ""; position: absolute; left: calc(4 * var(--u)); right: calc(4 * var(--u)); height: calc(3 * var(--u)); border-radius: calc(2 * var(--u));
     background: #60a5fa; pointer-events: none; z-index: 21; box-shadow: 0 0 0 1px #0b0b0c; } /* over the ghost */
   .card.ins-above::before { top: calc(-6 * var(--u)); } .card.ins-below::after { bottom: calc(-6 * var(--u)); }
-  .lanes .card.ins-above::before { top: calc(-5 * var(--u)); } .lanes .card.ins-below::after { bottom: calc(-5 * var(--u)); }
   /* Session status colors, the same hues as `cl list`: --sc for the label and dot, --sbg tints a card's title band, stronger on the left and faint on the right. */
   .s-busy { --sc: #facc15; --sbg: var(--sc); } .s-waiting { --sc: #e879f9; --sbg: var(--sc); } .s-blocked { --sc: #f87171; --sbg: var(--sc); }
   .s-idle { --sc: #4ade80; --sbg: var(--sc); } .s-shell { --sc: #22d3ee; --sbg: var(--sc); } .s-starting { --sc: #60a5fa; --sbg: var(--sc); }
@@ -155,12 +162,22 @@
              padding: calc(10 * var(--u)) calc(12 * var(--u)); display: grid; gap: calc(4 * var(--u)); font-size: calc(13 * var(--u)); }
   .parkbox code { font: calc(12 * var(--u)) var(--mono); overflow-wrap: anywhere; }
 
-  .lanes { overflow-x: auto; }
-  .lanes table { border-collapse: separate; border-spacing: calc(8 * var(--u)) 0; min-width: calc(1100 * var(--u)); width: 100%; }
-  .lanes th { text-align: left; font-size: calc(11.5 * var(--u)); font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); padding: calc(4 * var(--u)) 0; }
-  .lanes td { vertical-align: top; padding: calc(10 * var(--u)) 0; border-top: 1px solid var(--line2); }
-  .lanes td.lane { width: calc(150 * var(--u)); }
-  .lanes td > div { display: flex; flex-direction: column; gap: calc(6 * var(--u)); }
+  /* Lanes: a grid of panels, a row per project and a column per stage. The
+     stage headers stick to the top and the project names to the left. Each
+     grid cell pads its panel by half a gap rather than using grid gaps, so the
+     stuck cells' background covers the cards that scroll under them. */
+  .lanes { --lane: calc(160 * var(--u)); --stage: minmax(calc(230 * var(--u)), 1fr); --hg: calc(6 * var(--u));
+           flex: 1 1 auto; min-height: 0; overflow: auto; display: grid; grid-template-columns: var(--lane) repeat(var(--n), var(--stage)); align-content: start;
+           scroll-snap-type: x mandatory; scroll-padding-left: var(--lane); overscroll-behavior-x: contain; }
+  .lanes > div { padding: var(--hg); display: flex; flex-direction: column; min-width: 0; }
+  .lanes .lhd { position: sticky; top: 0; z-index: 2; background: var(--bg); padding-top: 0; scroll-snap-align: start; }
+  .lanes .lhd.corner { left: 0; z-index: 3; scroll-snap-align: none; }
+  .lanes .lhd h2 { background: var(--panel); border: 1px solid #222428; border-radius: calc(12 * var(--u)); padding: calc(10 * var(--u)) calc(14 * var(--u)); }
+  .lanes .lane { position: sticky; left: 0; z-index: 1; background: var(--bg); }
+  .lanes .lane > div { flex: 1; background: var(--panel); display: flex; flex-direction: column; gap: calc(6 * var(--u)); padding: calc(10 * var(--u)); border-radius: calc(12 * var(--u)); border: 1px solid #222428; }
+  .lanes .lane strong { overflow-wrap: anywhere; }
+  .lanes .cell { flex: 1; background: var(--panel); border: 1px solid #222428; border-radius: calc(12 * var(--u)); padding: calc(10 * var(--u));
+                 display: flex; flex-direction: column; gap: calc(8 * var(--u)); min-height: calc(60 * var(--u)); }
 
   .list { overflow-x: auto; border: 1px solid var(--line2); border-radius: calc(12 * var(--u)); }
   .list table { border-collapse: collapse; width: 100%; min-width: calc(900 * var(--u)); }
@@ -258,6 +275,7 @@
     header { padding: calc(10 * var(--u)) calc(12 * var(--u)); } main { padding: 0 calc(12 * var(--u)) calc(24 * var(--u)); } nav#filters { padding: calc(10 * var(--u)) calc(12 * var(--u)); }
     #needs { margin: calc(10 * var(--u)) calc(12 * var(--u)) 0; } #needs .sum#needsSum { display: none; }
     .cols { grid-auto-columns: 86vw; }
+    .lanes { --lane: calc(104 * var(--u)); --stage: calc(100vw - var(--lane) - calc(48 * var(--u))); }
     dialog { width: 100vw; max-width: 100vw; height: 100dvh; max-height: 100dvh; border-radius: 0; margin: 0; }
     .dlg { padding: calc(14 * var(--u)); }
   }
@@ -518,11 +536,13 @@ function render() {
   const main = document.getElementById("main");
   // The filters are about tickets; the Projects view lists every project.
   document.getElementById("filters").hidden = state.view === "projects";
+  if (state.view === "projects" || !d.projects.length) document.body.classList.remove("fit");
   if (state.view === "projects") { setHtml(main, projectsHtml()); return; }
   if (!d.projects.length) {
     setHtml(main, `<p class="empty">No projects yet. Add one with <span class="mono">cl project add &lt;name&gt; &lt;dir&gt;</span>, or with New ticket.</p>`); return;
   }
   const rows = visible();
+  document.body.classList.toggle("fit", state.view === "board" || state.view === "lanes");
   setHtml(main, state.view === "lanes" ? lanesHtml(rows) : state.view === "list" ? listHtml(rows) : boardHtml(rows));
 }
 
@@ -611,14 +631,18 @@ function boardHtml(rows) {
   return `<div class="cols">${columns().map((s) => { const cs = inColumn(rows, s);
     return `<section class="col" data-drop="${s}"><h2>${STAGE_NAME[s]}<span class="n">${cs.length}</span></h2>${cs.map((r) => cardHtml(r)).join("")}<button type="button" class="add" data-new-when="${s}" aria-label="New ticket in ${STAGE_NAME[s]}">+</button></section>`; }).join("")}</div>`;
 }
+// A grid rather than a table, so the headers and project names can stick
+// (see .lanes in the CSS). Headers count the stage's cards in the lanes shown.
 function lanesHtml(rows) {
   const projects = state.data.projects.filter((p) => state.project ? p.name === state.project : projectShown(p.name));
-  return `<div class="lanes"><table><thead><tr><th></th>${columns().map((s) => `<th>${STAGE_NAME[s]}</th>`).join("")}</tr></thead><tbody>
-    ${projects.map((p) => { const mine = rows.filter((r) => r.ticket.project === p.name);
+  const lanes = projects.map((p) => [p, rows.filter((r) => r.ticket.project === p.name)]);
+  const count = (s) => lanes.reduce((n, [, mine]) => n + mine.filter((r) => r.ticket.stage === s).length, 0);
+  return `<div class="lanes" style="--n:${columns().length}"><div class="lhd corner"></div>${columns().map((s) => `<div class="lhd"><h2>${STAGE_NAME[s]}<span class="n">${count(s)}</span></h2></div>`).join("")}
+    ${lanes.map(([p, mine]) => {
       const running = mine.filter((r) => r.ticket.stage === "running" && r.status && r.status !== "gone").length;
-      return `<tr><td class="lane"><div><strong>${esc(p.name)}</strong><span class="mono muted" style="font-size:calc(11.5 * var(--u))">${p.mode === "worktree" ? `${running} of ${p.slots} running` : "queue"}</span><button type="button" class="add" data-new-project="${esc(p.name)}" aria-label="New ticket in ${esc(p.name)}">+</button></div></td>
-        ${columns().map((s) => `<td data-drop="${s}" data-project="${esc(p.name)}"><div>${inColumn(mine, s).map((r) => cardHtml(r, true)).join("")}</div></td>`).join("")}</tr>`; }).join("")}
-  </tbody></table></div>`;
+      return `<div class="lane"><div><strong>${esc(p.name)}</strong><span class="mono muted" style="font-size:calc(11.5 * var(--u))">${p.mode === "worktree" ? `${running} of ${p.slots} running` : "queue"}</span><button type="button" class="add" data-new-project="${esc(p.name)}" aria-label="New ticket in ${esc(p.name)}">+</button></div></div>
+        ${columns().map((s) => `<div><div class="cell" data-drop="${s}" data-project="${esc(p.name)}">${inColumn(mine, s).map((r) => cardHtml(r, true)).join("")}</div></div>`).join("")}`; }).join("")}
+  </div>`;
 }
 function listHtml(rows) {
   if (!rows.length) return `<p class="empty">Nothing matches.</p>`;
@@ -1155,8 +1179,12 @@ function showSlot(s, on) {
 function autoScroll() {
   if (!drag?.ghost) return;
   const sc = drag.scroller, edge = 48;
+  // Near an edge of the scroll box, scroll it; the stuck headers and project
+  // names count as the edge, since nothing scrolls into view under them.
   if (sc) { const r = sc.getBoundingClientRect();
-    if (drag.lx < r.left + edge) sc.scrollLeft -= 14; else if (drag.lx > r.right - edge) sc.scrollLeft += 14; }
+    const left = r.left + (sc.querySelector(".lane")?.offsetWidth || 0), top = r.top + (sc.querySelector(".lhd, .col h2")?.offsetHeight || 0);
+    if (drag.lx < left + edge) sc.scrollLeft -= 14; else if (drag.lx > r.right - edge) sc.scrollLeft += 14;
+    if (drag.ly < top + edge) sc.scrollTop -= 14; else if (drag.ly > r.bottom - edge) sc.scrollTop += 14; }
   if (drag.ly < edge) scrollBy(0, -14); else if (drag.ly > innerHeight - edge) scrollBy(0, 14);
   dragMove(drag.lx, drag.ly);
   drag.raf = requestAnimationFrame(autoScroll);
