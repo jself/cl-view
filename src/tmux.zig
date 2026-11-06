@@ -518,8 +518,14 @@ test "sessions go to the socket's server, not the default one" {
     defer tmp.cleanup();
     var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
     const dir = dir_buf[0..try tmp.dir.realPath(io, &dir_buf)];
-    const sock = try std.fmt.allocPrint(a, "{s}/tmux", .{dir});
+    // The socket goes straight in /tmp: a socket path has to fit in 108 bytes,
+    // and the test's own temporary dir sits under .zig-cache in the checkout,
+    // which in a worktree with a long path is already longer than that.
+    var rnd: [8]u8 = undefined;
+    io.random(&rnd);
+    const sock = try std.fmt.allocPrint(a, "/tmp/cl-test-tmux-{x}", .{rnd});
     defer a.free(sock);
+    defer std.Io.Dir.deleteFileAbsolute(io, sock) catch {};
     // The server is stopped with an explicit -S, never through the code under test.
     defer if (std.process.run(a, io, .{ .argv = &.{ "tmux", "-S", sock, "kill-server" } })) |r| {
         a.free(r.stdout);
