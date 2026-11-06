@@ -275,6 +275,8 @@
   .wiz .do a { color: var(--fg); }
   .wiz .wait { margin: 0; color: var(--muted); overflow-wrap: anywhere; }
   .wiz .wait.up { color: #86efac; }
+  .wiz .keys { font-size: calc(12 * var(--u)); }
+  .wiz kbd { font: inherit; border: 1px solid var(--line); border-radius: calc(3 * var(--u)); padding: 0 calc(4 * var(--u)); }
   .wiz a.btn { text-decoration: none; color: inherit; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .wiz .results { margin: 0; padding-left: 0; list-style: none; display: flex; flex-direction: column; gap: calc(6 * var(--u)); }
   .wiz .results .results { margin-top: calc(6 * var(--u)); padding-left: calc(12 * var(--u)); }
@@ -1155,7 +1157,7 @@ function testTab(d) {
         ${comment ? `<li class="muted">Comment: ${esc(comment)}</li>` : ""}</ul></li>`; }).join("");
     return `<div class="wiz">${dots}<strong>Results</strong><ul class="results">${rows}</ul>
       <label class="muted" style="display:flex;flex-direction:column;gap:calc(5 * var(--u));font-size:calc(12.5 * var(--u))">Anything else for Claude<textarea id="testNote" rows="2">${esc(state.checks.note || "")}</textarea></label>
-      <div class="actions" id="submitRow">${submitButtons(d, all)}</div>${nav}</div>`;
+      <div class="actions" id="submitRow">${submitButtons(d, all)}</div>${nav}<span class="keys muted">Keys: <kbd>c</kbd> comment</span></div>`;
   }
   const st = p.steps[at]; const l = d.launches?.[at]; const ready = d.ready?.[at];
   let ci = all.findIndex((c) => c.si === at);
@@ -1174,7 +1176,8 @@ function testTab(d) {
         ${r.pass === false ? `<input type="text" data-note="${i}" placeholder="What happened?" value="${esc(r.note || "")}">` : ""}</div>`; }).join("")}</div>` : ""}
     <label class="muted" style="display:flex;flex-direction:column;gap:calc(5 * var(--u));font-size:calc(12.5 * var(--u))">Comment on this step (goes to Claude with the results)<textarea data-comment="${at}" rows="2">${esc(state.checks["s" + at] || "")}</textarea></label>
     ${nav}
-    <div class="actions" style="justify-content:flex-end"><button type="button" class="btn" id="sendResults" data-send="1" title="Checks you haven't marked go as not tested">Send what I have to Claude</button></div></div>`;
+    <div class="actions" style="justify-content:space-between;align-items:center"><span class="keys muted">Keys: <kbd>p</kbd> pass · <kbd>f</kbd> fail · <kbd>n</kbd> next · <kbd>c</kbd> comment</span>
+      <button type="button" class="btn" id="sendResults" data-send="1" title="Checks you haven't marked go as not tested">Send what I have to Claude</button></div></div>`;
 }
 // What Submit does: anything failed or not tested goes to Claude; everything passed with
 // comments lets you choose; everything passed and nothing to say approves a
@@ -1980,6 +1983,32 @@ document.addEventListener("keydown", (e) => {
   if (t.isContentEditable || t.closest?.("input, textarea, select") || document.querySelector("dialog[open]")) return;
   e.preventDefault();
   document.getElementById("chatBtn").click();
+});
+// In the test plan walk-through (the ticket's Test tab): P and F pass or fail
+// the first check of this step not answered yet, N goes to the next step and
+// C puts the cursor in the step's comment box (the note box on Results).
+// Not while typing: Esc leaves a box there without closing the ticket.
+document.addEventListener("keydown", (e) => {
+  const dlg = document.getElementById("ticketDlg");
+  if (!dlg.open || state.tab !== "test" || !state.detail?.test_plan) return;
+  if (document.querySelectorAll("dialog[open]").length > 1) return;
+  const t = e.target; const typing = t.isContentEditable || t.closest?.("input, textarea, select");
+  if (e.key === "Escape" && typing && t.closest(".wiz")) { e.preventDefault(); t.blur(); return; }
+  if (typing || e.ctrlKey || e.metaKey || e.altKey || e.isComposing || e.repeat) return;
+  const wiz = dlg.querySelector(".wiz"); if (!wiz) return;
+  const k = e.key.toLowerCase();
+  if (k === "p" || k === "f") {
+    const open = [...wiz.querySelectorAll(".check")].find((c) => !c.querySelector(".pf .btn.on"));
+    if (!open) return;
+    e.preventDefault(); open.querySelector(`.pf .btn[data-pass="${k === "p" ? 1 : 0}"]`).click();
+  } else if (k === "n") {
+    const next = wiz.querySelector(`.actions .btn.primary[data-step-go="${Math.min(state.checks.step || 0, state.detail.test_plan.steps.length) + 1}"]`);
+    if (!next) return;
+    e.preventDefault(); next.click();
+  } else if (k === "c") {
+    const box = wiz.querySelector("textarea[data-comment], #testNote"); if (!box) return;
+    e.preventDefault(); box.focus(); box.setSelectionRange(box.value.length, box.value.length);
+  }
 });
 // Ctrl+= / Ctrl+- / Ctrl+0 zoom the board, as browser zoom would (and in
 // place of it), in the browser's own steps. Remembered per browser; 0 goes

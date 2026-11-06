@@ -249,6 +249,11 @@ web.font_size = 16              # text size of the board and terminal pages, in 
   remembers its own.
 - On the board, O (outside a text box, with no dialog open) opens the
   operator chat, like the Chat button.
+- In a ticket's test plan walk-through (its Test tab), P and F pass or fail
+  the first check of the step that isn't answered yet, N goes to the next
+  step, and C puts the cursor in the step's comment box (the note box on the
+  results page). They don't fire while you type in a box; Esc leaves it
+  without closing the ticket.
 - Attaching from the phone resizes that session to the phone's width
   (`window-size latest`); it switches back when you use it at the desk.
 - `CL_PORT=8422` (or `cl web --port 8422`) replaces the port of every
