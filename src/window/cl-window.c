@@ -76,6 +76,22 @@ static GtkWidget *on_create(WebKitWebView *v, WebKitNavigationAction *a, gpointe
     return NULL;
 }
 
+// The board's mic button (voice.* in cl's config): the microphone, for cl's
+// own pages only. Camera and everything else stay refused.
+static gboolean on_permission(WebKitWebView *v, WebKitPermissionRequest *r, gpointer _) {
+    if (WEBKIT_IS_USER_MEDIA_PERMISSION_REQUEST(r)) {
+        WebKitUserMediaPermissionRequest *m = WEBKIT_USER_MEDIA_PERMISSION_REQUEST(r);
+        const char *uri = webkit_web_view_get_uri(v);
+        if (webkit_user_media_permission_is_for_audio_device(m) && !webkit_user_media_permission_is_for_video_device(m) &&
+            uri && same_origin(uri)) {
+            webkit_permission_request_allow(r);
+            return TRUE;
+        }
+    }
+    webkit_permission_request_deny(r);
+    return TRUE;
+}
+
 static void on_title(WebKitWebView *v, GParamSpec *p, gpointer _) {
     (void)p;
     const char *t = webkit_web_view_get_title(v);
@@ -154,10 +170,16 @@ static void activate(GtkApplication *app, gpointer _) {
     g_free(cookies);
     g_free(cache);
 
-    view = WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW, "network-session", session, NULL));
+    // Autoplay: the operator's spoken answer plays when it arrives, seconds
+    // after the key or click that asked for it.
+    WebKitWebsitePolicies *policies = webkit_website_policies_new_with_policies("autoplay", WEBKIT_AUTOPLAY_ALLOW, NULL);
+    view = WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW, "network-session", session, "website-policies", policies, NULL));
+    g_object_unref(policies);
     WebKitSettings *s = webkit_web_view_get_settings(view);
     webkit_settings_set_javascript_can_access_clipboard(s, TRUE);
     webkit_settings_set_enable_developer_extras(s, TRUE);
+    webkit_settings_set_enable_media_stream(s, TRUE);
+    g_signal_connect(view, "permission-request", G_CALLBACK(on_permission), NULL);
     g_signal_connect(view, "decide-policy", G_CALLBACK(on_decide_policy), NULL);
     g_signal_connect(view, "create", G_CALLBACK(on_create), NULL);
     g_signal_connect(view, "notify::title", G_CALLBACK(on_title), NULL);

@@ -283,6 +283,16 @@
   #toast { position: fixed; left: 50%; bottom: calc(20 * var(--u)); transform: translateX(-50%); background: #2c2e33; color: #fff; padding: calc(10 * var(--u)) calc(16 * var(--u));
            border-radius: calc(10 * var(--u)); display: none; max-width: calc(100vw - calc(32 * var(--u))); z-index: 10; }
   #toast.err { background: #7f1d1d; }
+  #micBtn svg { width: calc(16 * var(--u)); height: calc(16 * var(--u)); }
+  #micBtn.rec { background: #b91c1c; border-color: #b91c1c; color: #fff; }
+  #micBtn.wait { opacity: .7; }
+  #voiceBar { position: fixed; right: calc(20 * var(--u)); bottom: calc(70 * var(--u)); max-width: min(calc(440 * var(--u)), calc(100vw - calc(32 * var(--u))));
+              background: #2c2e33; color: #fff; padding: calc(10 * var(--u)) calc(12 * var(--u)) calc(10 * var(--u)) calc(16 * var(--u)); border-radius: calc(10 * var(--u));
+              z-index: 10; display: flex; gap: calc(10 * var(--u)); align-items: flex-start; box-shadow: 0 4px 16px rgba(0,0,0,.35); }
+  #voiceBar[hidden] { display: none; }
+  #voiceBar .txt { flex: 1; white-space: pre-wrap; overflow-wrap: anywhere; }
+  #voiceBar .heard { color: #b4b6ba; font-size: .9em; }
+  #voiceBar button { background: none; border: 0; color: inherit; cursor: pointer; font-size: 1.1em; line-height: 1; padding: 0 calc(2 * var(--u)); }
   #reloadBar { display: flex; align-items: center; gap: calc(10 * var(--u)); margin: calc(10 * var(--u)) calc(20 * var(--u)) 0; padding: calc(8 * var(--u)) calc(12 * var(--u));
                border: 1px solid var(--line, #3a3d44); border-radius: calc(10 * var(--u)); flex-wrap: wrap; }
   #reloadBar[hidden] { display: none; }
@@ -330,6 +340,7 @@
   </div>
   <div class="acts">
   <a class="btn" href="/">Terminal</a>
+  <button type="button" class="btn" id="micBtn" hidden title="Talk to the operator: click, speak, click again (or hold V); it answers out loud" aria-label="Talk to the operator"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5.5" y="1.5" width="5" height="8.5" rx="2.5"/><path d="M3 7.5a5 5 0 0 0 10 0M8 12.5v2"/></svg></button>
   <a class="btn" id="chatBtn" href="/?attach=operator" title="Talk to the operator: it can make tickets and check on sessions (O)">Chat</a>
   <button type="button" class="btn" id="quickBtn" title="Tell the operator what to add; it makes the ticket"><span>Quick<span class="long"> ticket</span></span></button>
   <button type="button" class="btn primary" id="newBtn" title="New ticket"><span>New<span class="long"> ticket</span></span></button>
@@ -383,6 +394,7 @@
 <dialog id="dismissDlg" aria-label="Dismiss alerts" style="width:min(calc(480 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="dismissBody"></div></dialog>
 <dialog id="killDlg" aria-label="Kill the session" style="width:min(calc(480 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="killBody"></div></dialog>
 <div id="toast" role="status"></div>
+<div id="voiceBar" hidden role="status"><div class="txt"><div class="heard" id="voiceHeard"></div><div id="voiceText"></div></div><button type="button" id="voiceReplay" title="Say it again" aria-label="Say it again" hidden>&#8635;</button><button type="button" id="voiceClose" title="Stop and close" aria-label="Stop and close">&times;</button></div>
 
 <script src="/xterm.js"></script>
 <script src="/addon-fit.js"></script>
@@ -543,6 +555,7 @@ function setHtml(el, html) {
 async function refresh() {
   try { state.data = await api("board"); } catch (e) { if (e.message !== "log in") toast(e.message, true); return; }
   checkBuild(state.data.build);
+  document.getElementById("micBtn").hidden = !state.data.voice?.on;
   if (!drag) render();
   if (state.open) loadDetail(state.open, true);
 }
@@ -1677,6 +1690,208 @@ document.addEventListener("change", (e) => {
 });
 document.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && e.target.id === "msg") { e.preventDefault(); document.getElementById("sendMsg").click(); }
+});
+// ---- voice (voice.* in the config; src/voice.zig): talk to the operator ----
+// The mic button (or holding V) records; cl web transcribes it with voice.stt
+// and types it into the operator as "[voice] ...". The operator answers with
+// `cl say`, which this polls for and speaks: voice.tts's WAV, or the
+// browser's own voice without it.
+const voice = { want: false, rec: null, poll: 0, last: "", audio: null };
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// A silent WAV: playing it during the click unlocks audio on phones,
+// so the answer can play when it arrives seconds later.
+const SILENT_WAV = "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQQAAAAAAAAA";
+function voiceBar(heard, text, done) {
+  const bar = document.getElementById("voiceBar");
+  if (heard === null) { bar.hidden = true; return; }
+  document.getElementById("voiceHeard").textContent = heard;
+  document.getElementById("voiceText").textContent = text;
+  document.getElementById("voiceReplay").hidden = !done;
+  bar.hidden = false;
+}
+function micState(cls) { const b = document.getElementById("micBtn"); b.className = "btn" + (cls ? " " + cls : ""); }
+function voiceQuiet() {
+  voice.poll++;
+  if (voice.audio) voice.audio.pause();
+  if ("speechSynthesis" in window) speechSynthesis.cancel();
+}
+async function micStart() {
+  if (voice.want || voice.rec || !state.data?.voice?.on) return;
+  if (!navigator.mediaDevices?.getUserMedia) {
+    toast("The browser only allows the mic on HTTPS or 127.0.0.1 (README, Voice)", true);
+    return;
+  }
+  voiceQuiet();
+  voice.want = true;
+  if (!voice.audio) voice.audio = new Audio();
+  voice.audio.src = SILENT_WAV; voice.audio.play().catch(() => {});
+  micState("rec");
+  voiceBar("", "Listening…  click the mic again, or let go of V, to send. Esc cancels.");
+  let stream;
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } }); }
+  catch (e) { voice.want = false; micState(""); voiceBar(null); toast("No microphone: " + e.message, true); return; }
+  if (!voice.want) { stream.getTracks().forEach((t) => t.stop()); return; } // let go already
+  const ac = new AudioContext();
+  const src = ac.createMediaStreamSource(stream);
+  // ScriptProcessor is deprecated but works everywhere, WebKitGTK included.
+  const proc = ac.createScriptProcessor(4096, 1, 1);
+  const chunks = [];
+  proc.onaudioprocess = (e) => chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+  src.connect(proc); proc.connect(ac.destination);
+  voice.rec = { stream, ac, src, proc, chunks, at: Date.now() };
+}
+async function micStop(cancel) {
+  voice.want = false;
+  const r = voice.rec;
+  voice.rec = null;
+  micState("");
+  if (!r) { voiceBar(null); return; }
+  r.proc.disconnect(); r.src.disconnect(); r.stream.getTracks().forEach((t) => t.stop());
+  const rate = r.ac.sampleRate;
+  r.ac.close();
+  if (cancel || Date.now() - r.at < 500) { voiceBar(null); return; }
+  // Whisper makes words up out of silence ("you", "Thank you."): don't send
+  // a recording that never got louder than background noise.
+  if (loudest(r.chunks) < 0.015) { voiceBar("", "Didn't hear anything. Hold V or click the mic, then speak.", false); return; }
+  micState("wait");
+  voiceBar("", "Working out what you said…");
+  try {
+    const res = await fetch("/api/voice/ask", { method: "POST", headers: { "content-type": "audio/wav" }, body: wavOf(r.chunks, rate, 16000) });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(j.error || res.statusText);
+    const heard = "You: " + j.text;
+    voiceBar(heard, j.started ? "Starting the operator…" : "Waiting for the operator…");
+    await voiceWait(j.since, heard);
+  } catch (e) {
+    voiceBar("", e.message, true); voice.last = "";
+  } finally { micState(""); }
+}
+// The loudest stretch (RMS of each chunk, ~0.1 s), 0..1.
+function loudest(chunks) {
+  let max = 0;
+  for (const c of chunks) { let sum = 0; for (const x of c) sum += x * x; max = Math.max(max, Math.sqrt(sum / c.length)); }
+  return max;
+}
+// Float32 chunks at `from` Hz -> a 16-bit mono WAV at `to` Hz (what whisper wants).
+function wavOf(chunks, from, to) {
+  const len = chunks.reduce((n, c) => n + c.length, 0);
+  const all = new Float32Array(len);
+  let o = 0; for (const c of chunks) { all.set(c, o); o += c.length; }
+  const step = from / to, n = Math.floor(len / step);
+  const buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+  const str = (at, s) => { for (let i = 0; i < s.length; i++) v.setUint8(at + i, s.charCodeAt(i)); };
+  str(0, "RIFF"); v.setUint32(4, 36 + n * 2, true); str(8, "WAVE"); str(12, "fmt ");
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, to, true); v.setUint32(28, to * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  str(36, "data"); v.setUint32(40, n * 2, true);
+  for (let i = 0; i < n; i++) {
+    // Average the samples this one covers: a cheap low-pass before dropping the rate.
+    const a = Math.floor(i * step), b = Math.max(a + 1, Math.floor((i + 1) * step));
+    let sum = 0; for (let k = a; k < b; k++) sum += all[k];
+    const x = Math.max(-1, Math.min(1, sum / (b - a)));
+    v.setInt16(44 + i * 2, x < 0 ? x * 0x8000 : x * 0x7fff, true);
+  }
+  return new Blob([buf], { type: "audio/wav" });
+}
+// Wait for the operator to say something (cl say) after `since`. Each
+// request is a long poll: the server answers as soon as cl say lands, or when
+// the operator's status changes, or after 10 s. If it finishes its turn
+// without cl say, fall back to its written reply's first sentence.
+async function voiceWait(since, heard) {
+  const id = ++voice.poll, t0 = Date.now();
+  let busy = false, done = false;
+  while (id === voice.poll && Date.now() - t0 < 5 * 60_000) {
+    let r; try { r = await api("voice/reply/" + since); } catch { await sleep(1000); continue; }
+    if (id !== voice.poll) return;
+    if (r.said) return voiceSay(heard, r.said);
+    if (r.status === "gone") return voiceSay(heard, "The operator isn't running.");
+    if (["busy", "starting", "unknown"].includes(r.status)) { busy = busy || r.status === "busy"; done = false; continue; }
+    // idle, shell (its cl watch runs in the background), blocked, waiting:
+    if (!busy) { if (Date.now() - t0 > 20_000) return voiceSay(heard, "The operator didn't pick that up. Check the chat."); continue; }
+    if (!done) { done = true; continue; } // one more poll: its cl say may still be landing
+    return voiceSay(heard, r.status === "blocked" ? "The operator is waiting on you in the chat." : (r.reply || "The operator answered in the chat."));
+  }
+}
+// "Two tickets need you: CL-39 has a question. CL-41 is ready." -> one piece
+// per sentence (or clause after a colon or semicolon), tiny ones joined to
+// the next, so the first can play while the rest are made.
+function speechParts(text) {
+  const parts = [];
+  for (const b of text.split(/(?<=[.!?:;])\s+/)) {
+    if (parts.length && parts[parts.length - 1].length < 12) parts[parts.length - 1] += " " + b;
+    else parts.push(b);
+  }
+  return parts.map((p) => p.trim()).filter(Boolean);
+}
+async function speakWav(text) {
+  const res = await fetch("/api/voice/speak", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text }) });
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+  return URL.createObjectURL(await res.blob());
+}
+// Play one clip on the shared (unlocked) element; resolves when it ends or is stopped.
+function playClip(url) {
+  if (!voice.audio) voice.audio = new Audio();
+  const a = voice.audio;
+  return new Promise((resolve, reject) => {
+    const end = () => { a.onended = a.onpause = null; URL.revokeObjectURL(url); resolve(); };
+    a.onended = end; a.onpause = end;
+    a.src = url;
+    // voice.tts_pitch: faster playback without keeping pitch raises the voice
+    // (cl made the speech that much slower to match). Set after src: loading resets it.
+    const pitch = state.data?.voice?.pitch || 1;
+    a.preservesPitch = a.webkitPreservesPitch = a.mozPreservesPitch = pitch === 1;
+    a.defaultPlaybackRate = a.playbackRate = pitch;
+    a.play().catch((e) => { a.onended = a.onpause = null; reject(e); });
+  });
+}
+async function voiceSay(heard, text) {
+  voice.last = text;
+  voiceBar(heard, text, true);
+  const id = voice.poll;
+  const v = state.data?.voice;
+  if (v?.tts) {
+    try {
+      // With a resident TTS server, ask for every piece at once and play
+      // them in order; otherwise one request (each one loads the model).
+      const clips = (v.split ? speechParts(text) : [text]).map((p) => speakWav(p));
+      clips.forEach((c) => c.catch(() => {}));
+      for (const c of clips) {
+        const url = await c;
+        if (id !== voice.poll) { URL.revokeObjectURL(url); continue; }
+        await playClip(url);
+      }
+      return;
+    } catch (e) {
+      if (id !== voice.poll) return;
+      toast("Couldn't play the answer (" + e.message + "); using the browser's voice", true);
+    }
+  }
+  if ("speechSynthesis" in window) {
+    const u = new SpeechSynthesisUtterance(text);
+    u.rate = v?.speed || 1;
+    u.pitch = v?.pitch || 1;
+    speechSynthesis.cancel(); speechSynthesis.speak(u);
+  }
+}
+document.getElementById("micBtn").addEventListener("click", () => (voice.want || voice.rec ? micStop(false) : micStart()));
+document.getElementById("voiceClose").addEventListener("click", () => { voiceQuiet(); if (voice.want || voice.rec) micStop(true); voiceBar(null); });
+document.getElementById("voiceReplay").addEventListener("click", () => {
+  if (voice.last) voiceSay(document.getElementById("voiceHeard").textContent, voice.last);
+});
+// Hold V to talk (push-to-talk), outside text boxes and dialogs; Esc cancels.
+function voiceKeyOk(e) {
+  if (!state.data?.voice?.on || e.ctrlKey || e.metaKey || e.altKey || e.isComposing) return false;
+  const t = e.target;
+  return !(t.isContentEditable || t.closest?.("input, textarea, select") || document.querySelector("dialog[open]"));
+}
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && (voice.want || voice.rec)) { e.preventDefault(); micStop(true); return; }
+  if (e.key !== "v" || !voiceKeyOk(e)) return;
+  e.preventDefault();
+  if (!e.repeat) micStart();
+});
+document.addEventListener("keyup", (e) => {
+  if (e.key === "v" && (voice.want || voice.rec)) { e.preventDefault(); micStop(false); }
 });
 // O opens the operator chat, like the Chat button, unless you're typing
 // somewhere or a dialog is open.

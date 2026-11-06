@@ -2,6 +2,7 @@
 //!
 //!   default = work
 //!   operator = work
+//!   operator.model = sonnet            (the operator's model; default: the profile's)
 //!   work = ~/.claude-work
 //!   personal = ~/.claude
 //!
@@ -19,6 +20,14 @@
 //!   gutter.path = ~/bin/gutter           (gutter for reviews; "" looks it up on PATH)
 //!
 //!   tmux.socket = /run/user/1000/cl-try/tmux   (tmux -S for every tmux call; CL_TMUX_SOCKET overrides)
+//!
+//!   voice.stt = whisper-cli -m ~/.local/share/whisper/ggml-base.en.bin -nt -np -f
+//!   voice.tts = ~/.local/bin/piper -m ~/.local/share/piper/en_US-lessac-medium.onnx -f
+//!               (or http://127.0.0.1:5005/synthesize, a resident Piper server)
+//!   voice.tts_voice = en_GB-alba-medium  (with a server: which of its voices)
+//!   voice.tts_speed = 1.2               (speaking speed; 1 is normal)
+//!   voice.tts_pitch = 1.08              (a bit higher; the board shifts it)
+//!                                        (talking to the operator from the board: see voice.zig)
 //!
 //! `default`, `operator` and dotted keys are settings; every other key is a
 //! profile. `operator` picks the operator's profile and falls back to `default`.
@@ -44,10 +53,14 @@ pub const Config = struct {
     default: []const u8,
     /// Profile for the operator session. Not affected by CLAUDE_CONFIG_DIR.
     operator: []const u8,
+    /// `operator.model`: the operator's Claude model (`--model`, e.g. sonnet);
+    /// "" leaves it to the profile's default.
+    operator_model: []const u8 = "",
     web: Web = .{},
     board: Board = .{},
     gutter: Gutter = .{},
     tmux: Tmux = .{},
+    voice: Voice = .{},
 
     pub fn find(self: Config, name: []const u8) ?Profile {
         for (self.profiles) |p| if (std.mem.eql(u8, p.name, name)) return p;
@@ -111,6 +124,29 @@ pub const Tmux = struct {
     socket: []const u8 = "",
 };
 
+/// Talking to the operator from the board (voice.zig). Both are shell
+/// commands; the file they read or write is added as the last argument.
+pub const Voice = struct {
+    /// Speech to text: gets a 16 kHz mono WAV file, prints the words. ""
+    /// turns voice off (the board shows no mic button).
+    stt: []const u8 = "",
+    /// Text to speech: gets the text on stdin, writes a WAV file; or the URL
+    /// of a TTS server (Piper's `.../synthesize`), which keeps the model
+    /// loaded. "" leaves speaking to the browser.
+    tts: []const u8 = "",
+    /// With a URL `tts`: the voice to ask it for (Piper: a model name in its
+    /// --data-dir, like en_GB-alba-medium); "" for the server's own.
+    tts_voice: []const u8 = "",
+    /// How fast the answer is spoken: 1 is normal, 1.2 is 20% faster. With
+    /// a URL `tts` it is Piper's length_scale (1 / speed); the browser's own
+    /// voice uses it as its rate.
+    tts_speed: f32 = 1,
+    /// Raise (or lower) the voice: the board plays each clip this much faster
+    /// without keeping its pitch (1.08 is about a semitone up). With a URL
+    /// `tts`, the speech is made that much slower first, so `tts_speed` holds.
+    tts_pitch: f32 = 1,
+};
+
 pub fn load(ctx: Ctx) !Config {
     var cfg = try loadFile(ctx);
     if (ctx.env.get("CL_PORT")) |v| if (v.len > 0) {
@@ -133,10 +169,12 @@ fn loadFile(ctx: Ctx) !Config {
     var profiles: std.ArrayList(Profile) = .empty;
     var default: ?[]const u8 = null;
     var operator: ?[]const u8 = null;
+    var operator_model: []const u8 = "";
     var web: Web = .{};
     var board: Board = .{};
     var gutter: Gutter = .{};
     var tmux: Tmux = .{};
+    var voice: Voice = .{};
     var lines = std.mem.splitScalar(u8, data, '\n');
     while (lines.next()) |raw| {
         const line = std.mem.trim(u8, raw, " \t\r");
@@ -148,6 +186,8 @@ fn loadFile(ctx: Ctx) !Config {
             default = val;
         } else if (std.mem.eql(u8, key, "operator")) {
             operator = val;
+        } else if (std.mem.eql(u8, key, "operator.model")) {
+            operator_model = val;
         } else if (std.mem.eql(u8, key, "web.autostart")) {
             web.autostart = std.mem.eql(u8, val, "true") or std.mem.eql(u8, val, "yes") or std.mem.eql(u8, val, "on");
         } else if (std.mem.eql(u8, key, "web.listen")) {
@@ -169,6 +209,18 @@ fn loadFile(ctx: Ctx) !Config {
             gutter.path = try expandHomePerm(ctx, val);
         } else if (std.mem.eql(u8, key, "tmux.socket")) {
             tmux.socket = try expandHomePerm(ctx, val);
+        } else if (std.mem.eql(u8, key, "voice.stt")) {
+            voice.stt = val;
+        } else if (std.mem.eql(u8, key, "voice.tts")) {
+            voice.tts = val;
+        } else if (std.mem.eql(u8, key, "voice.tts_voice")) {
+            voice.tts_voice = val;
+        } else if (std.mem.eql(u8, key, "voice.tts_speed")) {
+            const speed = std.fmt.parseFloat(f32, val) catch 1;
+            voice.tts_speed = std.math.clamp(speed, 0.5, 2);
+        } else if (std.mem.eql(u8, key, "voice.tts_pitch")) {
+            const pitch = std.fmt.parseFloat(f32, val) catch 1;
+            voice.tts_pitch = std.math.clamp(pitch, 0.8, 1.25);
         } else if (std.mem.indexOfScalar(u8, key, '.') != null) {
             continue; // unknown setting
         } else {
@@ -181,6 +233,8 @@ fn loadFile(ctx: Ctx) !Config {
         c.board = board;
         c.gutter = gutter;
         c.tmux = tmux;
+        c.voice = voice;
+        c.operator_model = operator_model;
         return c;
     }
     const operator_profile = operator orelse default orelse profiles.items[0].name;
@@ -191,10 +245,12 @@ fn loadFile(ctx: Ctx) !Config {
         .profiles = try profiles.toOwnedSlice(ctx.perm),
         .default = default orelse profiles.items[0].name,
         .operator = operator_profile,
+        .operator_model = operator_model,
         .web = web,
         .board = board,
         .gutter = gutter,
         .tmux = tmux,
+        .voice = voice,
     };
 }
 

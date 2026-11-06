@@ -28,6 +28,7 @@ const instructions =
     \\  cl ticket watch [options] [--json] print one line per ticket flag or stage change, forever
     \\  cl alert <text>                    raise a flag for the human: their session list and the web board's
     \\                                     Needs You show it (cl alert --clear removes it)
+    \\  cl say <text>                      the spoken answer to a [voice] message (below)
     \\  cl closed                          closed sessions, newest first: name, profile, dir, closed at, session id, reply
     \\  cl -d -r <session id> -n <name> -p <profile> <dir>
     \\                                     bring a closed session back (use the values from cl closed);
@@ -129,6 +130,14 @@ const instructions =
     \\that kind of question. Permission prompts are menus: `cl send` types text, so tell the
     \\human instead of trying to pick an option. Never kill a session without asking.
     \\Keep replies short: the human usually wants who needs them and why.
+    \\
+    \\Voice: a message that starts with `[voice]` was spoken on the web board and transcribed,
+    \\so expect misheard words: read it for what was meant ("see el thirty nine" is CL-39),
+    \\and ask when it's unclear. Handle it as usual, then, as the last thing in your turn,
+    \\run `cl say "<answer>"` once. The board reads that aloud, so write it to be heard: one
+    \\or two short sentences, plain words, no markdown, lists, paths or IDs beyond ticket keys,
+    \\the answer first ("Two tickets need you: CL-39 has a question, CL-41 is ready to test.").
+    \\If you need something from them, ask it there. Your written reply can carry the details.
 ;
 
 /// The operator's ticket skill, written to <dir>/.claude/skills/cl-tickets
@@ -267,14 +276,44 @@ pub fn ensure(ctx: Ctx, cfg: config.Config) ![]const u8 {
     if (try tmux.operator(ctx, arena)) |s| return ctx.perm.dupe(u8, s.tmux_name);
 
     // --continue keeps the chat going across restarts (a fresh one the first time).
+    var extra: std.ArrayList([]const u8) = .empty;
+    try extra.appendSlice(arena, &.{ "--append-system-prompt", try withSelfPath(ctx, arena) });
+    if (cfg.operator_model.len > 0) try extra.appendSlice(arena, &.{ "--model", cfg.operator_model });
     return launch.create(ctx, cfg, .{
         .dir = dir,
         .name = name,
         .profile = cfg.operator,
         .role = tmux.operator_role,
         .continue_flag = true,
-        .extra = &.{ "--append-system-prompt", instructions },
+        .extra = extra.items,
     });
+}
+
+/// The instructions, plus where this cl is. Claude's Bash tool takes PATH
+/// from the human's shell startup files, which may not have cl on it (or
+/// may have another build): without the path, the operator spent its first
+/// tool calls looking for cl. Naming this binary also means an operator
+/// started by a branch's test server runs that branch's commands.
+fn withSelfPath(ctx: Ctx, a: std.mem.Allocator) ![]const u8 {
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const exe = std.process.executablePath(ctx.io, &exe_buf) catch return instructions;
+    return selfPathText(a, exe_buf[0..exe]);
+}
+
+fn selfPathText(a: std.mem.Allocator, exe: []const u8) ![]const u8 {
+    return std.mem.concat(a, u8, &.{
+        instructions,
+        "\n\nWhere it says `cl`, run `",
+        exe,
+        "`: that is the cl these instructions belong to. `cl` on\nPATH may be missing or a different build.",
+    });
+}
+
+test selfPathText {
+    const a = std.testing.allocator;
+    const s = try selfPathText(a, "/home/u/.local/bin/cl");
+    defer a.free(s);
+    try std.testing.expect(std.mem.endsWith(u8, s, "run `/home/u/.local/bin/cl`: that is the cl these instructions belong to. `cl` on\nPATH may be missing or a different build."));
 }
 
 /// Type `text` into the operator and press Enter, starting it first if it

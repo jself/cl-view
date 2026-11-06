@@ -32,6 +32,7 @@ const after_merge = @import("after_merge.zig");
 const park = @import("park.zig");
 const images = @import("images.zig");
 const alerts = @import("alerts.zig");
+const voice = @import("voice.zig");
 
 const board_html = @embedFile("web/board.html");
 
@@ -103,6 +104,12 @@ pub fn handle(ctx: Ctx, cfg: config.Config, req: *std.http.Server.Request, path:
         return true;
     }
 
+    // Voice: the request body is a WAV recording, not JSON.
+    if (post and std.mem.eql(u8, what, "voice") and std.mem.eql(u8, name, "ask")) {
+        voiceAsk(ctx, cfg, a, req) catch |err| try fail(req, voiceStatus(err), try voiceDetail(a, err, "voice.stt"));
+        return true;
+    }
+
     const body: Body = if (post) readBody(req, a) catch {
         try fail(req, .bad_request, "the request body isn't valid JSON");
         return true;
@@ -140,6 +147,7 @@ pub fn handle(ctx: Ctx, cfg: config.Config, req: *std.http.Server.Request, path:
             error.SharedSession => .{ .conflict, "another ticket is in progress in its session, so stopping it would cut that one off; move or finish that ticket first, or kill the session for both" },
             error.Starting => .{ .conflict, "it is starting right now; try again in a moment" },
             error.Sqlite => .{ .internal_server_error, db.message() },
+            error.VoiceOff, error.SpeechFailed => .{ voiceStatus(err), voiceDetail(a, err, "voice.tts") catch voiceMessage(err) },
             else => .{ .internal_server_error, @errorName(err) },
         };
         try fail(req, status, msg);
@@ -237,6 +245,11 @@ fn ok(req: *std.http.Server.Request, a: std.mem.Allocator, value: anytype) !void
 }
 
 fn route(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: *std.http.Server.Request, post: bool, what: []const u8, name: []const u8, action: []const u8, b: Body) !void {
+    if (std.mem.eql(u8, what, "voice")) {
+        if (!post and std.mem.eql(u8, name, "reply")) return voiceReply(ctx, cfg, a, req, action);
+        if (post and std.mem.eql(u8, name, "speak")) return voiceSpeak(ctx, cfg, a, req, b.text orelse "");
+        return error.NotFound;
+    }
     if (!post) {
         if (std.mem.eql(u8, what, "board")) return getBoard(ctx, cfg, db, a, req);
         if (std.mem.eql(u8, what, "ticket") and name.len > 0) return getTicket(ctx, cfg, db, a, req, name);
@@ -546,7 +559,101 @@ fn getBoard(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, re
         .build = try buildId(a),
         // Descriptions refer to pasted images by their path under here.
         .images_dir = try images.root(ctx, a, cfg),
+        // The mic button shows only with voice.stt; voice.tts picks who speaks.
+        // `split`: a resident TTS server (voice.tts is a URL) is quick per
+        // request, so the board asks for each sentence and starts on the first.
+        .voice = .{ .on = cfg.voice.stt.len > 0, .tts = cfg.voice.tts.len > 0, .split = voice.ttsIsUrl(cfg.voice.tts), .speed = cfg.voice.tts_speed, .pitch = cfg.voice.tts_pitch },
     });
+}
+
+// ---- voice (voice.zig): the board records, cl transcribes and speaks ----
+
+fn voiceStatus(err: anyerror) std.http.Status {
+    return switch (err) {
+        error.VoiceOff => .not_found,
+        error.BadInput => .unprocessable_entity,
+        error.TooBig => .payload_too_large,
+        else => .internal_server_error,
+    };
+}
+
+fn voiceMessage(err: anyerror) []const u8 {
+    return switch (err) {
+        error.VoiceOff => "voice is off: set voice.stt in ~/.config/cl/config",
+        error.BadInput => "didn't catch any words",
+        error.TooBig => "that recording is too long",
+        error.SpeechFailed => "the voice command failed",
+        error.OperatorFailed => "couldn't reach the operator; open Chat to check on it",
+        else => @errorName(err),
+    };
+}
+
+/// The error for the board, with the command's own reason when it failed:
+/// "voice.tts failed: sh: line 1: piper: command not found".
+fn voiceDetail(a: std.mem.Allocator, err: anyerror, setting: []const u8) ![]const u8 {
+    const why = voice.lastError();
+    if (err != error.SpeechFailed or why.len == 0) return voiceMessage(err);
+    return std.fmt.allocPrint(a, "{s} failed: {s}", .{ setting, why });
+}
+
+/// POST /api/voice/ask with a WAV: transcribe it and type it into the
+/// operator. `since` is the time to poll /api/voice/reply/<since> from.
+fn voiceAsk(ctx: Ctx, cfg: config.Config, a: std.mem.Allocator, req: *std.http.Server.Request) !void {
+    const len: usize = @intCast(req.head.content_length orelse 0);
+    if (len > voice.max_wav) return error.TooBig;
+    const wav = try a.alloc(u8, len);
+    const r = try req.readerExpectContinue(&.{});
+    try r.readSliceAll(wav);
+    if (cfg.voice.stt.len == 0) return error.VoiceOff;
+    const words = try voice.transcribe(ctx, a, cfg, wav);
+    const since = voice.nowMs(ctx);
+    const started = operator.sendInBackground(ctx, cfg, try voice.message(a, words)) catch return error.OperatorFailed;
+    return ok(req, a, .{ .text = words, .since = since, .started = started });
+}
+
+/// GET /api/voice/reply/<since>: the operator's `cl say` if it is newer than
+/// `since` (ms), its status, and the first sentence of its written reply
+/// (for when it answered without `cl say`). A long poll: it answers as soon
+/// as a fresh `cl say` lands (checked every 150 ms, so the board can start
+/// speaking right away) or the operator's status changes, else after 10 s.
+fn voiceReply(ctx: Ctx, cfg: config.Config, a: std.mem.Allocator, req: *std.http.Server.Request, since_s: []const u8) !void {
+    const since = std.fmt.parseInt(i64, since_s, 10) catch return error.BadInput;
+    const op = (try tmux.operator(ctx, a)) orelse return ok(req, a, .{ .status = "gone" });
+    const first = try operatorStatus(ctx, cfg, a, op);
+    var status = first.status;
+    var tick: usize = 0;
+    while (tick < 10_000 / 150) : (tick += 1) {
+        if (try voice.lastSaid(ctx, a, op.tmux_name)) |said| if (said.at > since) {
+            return ok(req, a, .{ .status = status, .said = said.text, .reply = "" });
+        };
+        if (tick > 0 and tick % 7 == 0) { // about once a second
+            const now = operatorStatus(ctx, cfg, a, op) catch break;
+            status = now.status;
+            if (!std.mem.eql(u8, status, first.status)) return ok(req, a, .{ .status = status, .said = null, .reply = try voice.firstSentence(a, now.reply) });
+        }
+        ctx.sleepMs(150);
+    }
+    const last = try operatorStatus(ctx, cfg, a, op);
+    return ok(req, a, .{ .status = last.status, .said = null, .reply = try voice.firstSentence(a, last.reply) });
+}
+
+fn operatorStatus(ctx: Ctx, cfg: config.Config, a: std.mem.Allocator, op: tmux.Session) !struct { status: []const u8, reply: []const u8 } {
+    const statuses = try claude.readStatuses(ctx, a, cfg);
+    return .{
+        .status = claude.statusFor(ctx, statuses, op).label(),
+        .reply = if (statuses.get(op.tmux_name)) |info| info.summary else "",
+    };
+}
+
+/// POST /api/voice/speak {text}: voice.tts's WAV of `text`.
+fn voiceSpeak(ctx: Ctx, cfg: config.Config, a: std.mem.Allocator, req: *std.http.Server.Request, text: []const u8) !void {
+    const t = std.mem.trim(u8, text, " \t\r\n");
+    if (t.len == 0 or t.len > voice.max_say) return error.BadInput;
+    const wav = try voice.speak(ctx, a, cfg, t);
+    try req.respond(wav, .{ .extra_headers = &.{
+        .{ .name = "content-type", .value = "audio/wav" },
+        .{ .name = "cache-control", .value = "no-store" },
+    } });
 }
 
 fn getTicket(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: *std.http.Server.Request, key: []const u8) !void {

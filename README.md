@@ -200,7 +200,13 @@ they survive restarting it. Tell it "note that ..." to add one.
 
 It runs in `~/.config/cl/operator/` with the profile from the `operator`
 setting. Its instructions come from the binary (`src/operator.zig`); put a
-`CLAUDE.md` in that directory to add your own.
+`CLAUDE.md` in that directory to add your own. They name the full path of the
+`cl` that started it, so it doesn't depend on `cl` being on the PATH its Bash
+tool gets from your shell.
+
+`operator.model = sonnet` (any `claude --model` value) runs the operator on
+another model than the profile's default: faster answers, voice ones
+included. It takes effect the next time the operator starts (`/exit` in Chat).
 
 ## Web
 
@@ -288,6 +294,132 @@ cl window install
 - Without `cl-window` (release binaries are static and don't include it),
   `cl window` opens a Chromium-family browser with `--app`, or else the default
   browser. Those keep Ctrl+W, Ctrl+T and Ctrl+N for themselves.
+
+## Voice
+
+A prototype: talk to the operator from the web board and hear a short
+answer. It is off unless `voice.stt` is set. Nothing about it is built into
+cl: whisper and Piper are programs it runs when the config names them, so
+installing cl needs neither, and there's no build flag. Unset, there is no
+mic button; set to something that isn't installed, the board shows the
+command's error ("voice.stt failed: sh: whisper-cli: command not found")
+when you use it.
+
+With it on, the board has a mic button next to Chat. Click it, speak, and
+click again (or hold **V**, outside text boxes, and let go; Esc cancels).
+`cl web` turns the recording into text with `voice.stt` and types it into the
+operator as `[voice] <what you said>`, the way Quick ticket does (starting
+the operator if it isn't running). The operator handles it as usual, and its
+instructions tell it to end with `cl say "<a sentence or two>"`, written to
+be heard. The board waits for that, shows it in a box at the bottom right
+(↻ says it again, × stops), and speaks it. If the operator finishes without
+`cl say`, the board speaks the first sentence of its written reply.
+
+```
+voice.stt = whisper-cli -m ~/.local/share/whisper/ggml-base.en.bin -nt -np -f
+voice.tts = ~/.local/bin/piper -m ~/.local/share/piper/en_US-lessac-medium.onnx -f
+```
+
+Both are shell commands, and cl adds a file as the last argument:
+
+- `voice.stt` gets a 16 kHz mono WAV file and prints the words. Without it
+  there is no mic button.
+- `voice.tts` gets the text on stdin and writes a WAV file. Or it's the URL
+  of a speech server that keeps its model loaded (below), which is quicker.
+  Without it the browser speaks with its own voice (`speechSynthesis`),
+  which in `cl window` and on Linux browsers is usually espeak, and robotic.
+- Give full paths for anything outside `/usr/bin`: `cl web` often runs
+  without `~/.local/bin` on PATH (where `uv tool install` puts `piper`). `~`
+  works, since the shell runs the command.
+- When either fails, the board shows the last line of the command's error
+  ("voice.tts failed: sh: line 1: piper: command not found"); all of it goes
+  to the server's log.
+
+Setup with whisper.cpp and Piper, both local, on Arch:
+
+```
+sudo pacman -S whisper-cpp                         # whisper-cli
+mkdir -p ~/.local/share/whisper ~/.local/share/piper
+curl -L -o ~/.local/share/whisper/ggml-base.en.bin \
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
+uv tool install piper-tts                          # ~/.local/bin/piper (Arch's `piper` package is something else)
+for f in en_US-lessac-medium.onnx en_US-lessac-medium.onnx.json; do
+  curl -L -o ~/.local/share/piper/$f \
+    https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/$f
+done
+```
+
+### Piper as a server (quicker answers)
+
+Run as a command, Piper loads its 63 MB model on every answer, about 2.5 s
+before it says anything. Its HTTP server loads it once. With `voice.tts` set
+to the server's URL, `cl web` POSTs each answer to it, and the board asks for
+each sentence separately and starts playing the first while the rest are
+made: about a second from the operator's `cl say` to sound. It needs Piper's
+`http` extra and something to keep it running, here a systemd user service:
+
+```
+uv tool install --force 'piper-tts[http]'
+mkdir -p ~/.config/systemd/user
+cat > ~/.config/systemd/user/piper-tts.service <<'EOF'
+[Unit]
+Description=Piper text to speech for cl
+
+[Service]
+WorkingDirectory=%h/.local/share/piper
+ExecStart=%h/.local/share/uv/tools/piper-tts/bin/python -m piper.http_server --host 127.0.0.1 --port 5005 --data-dir %h/.local/share/piper -m en_US-lessac-medium
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+EOF
+systemctl --user enable --now piper-tts
+```
+
+```
+voice.tts = http://127.0.0.1:5005/synthesize
+voice.tts_voice = en_GB-alba-medium     # optional: another voice in ~/.local/share/piper
+voice.tts_speed = 1.4                   # optional: speaking speed, 1 is normal
+voice.tts_pitch = 1.04                  # optional: a little higher (1.08 is about a semitone)
+```
+
+Piper has no pitch control, so `voice.tts_pitch` is the board playing each
+clip that much faster without keeping its pitch; cl asks Piper for speech
+that much slower to match, so `voice.tts_speed` still holds. Without a server
+(a `voice.tts` command, or the browser's voice) the browser's own rate and
+pitch are used where it can, and a command's speed is its own flags (Piper:
+`--length-scale 0.75`).
+
+Keep `--host 127.0.0.1`: Piper's default is every interface. Its page at
+http://127.0.0.1:5005/ tries the loaded voice. For others, download them
+(`~/.local/share/uv/tools/piper-tts/bin/python -m piper.download_voices
+--download-dir ~/.local/share/piper en_GB-alba-medium`; the list is at
+https://rhasspy.github.io/piper-samples/) and name one in `voice.tts_voice`
+(restart `cl web`), or make it the server's default with `-m` (restart the
+service). A voice takes a few seconds to load the first time it's used.
+
+On macOS, `brew install whisper-cpp` gives the same `whisper-cli`. Any other
+command that fits works too: a hosted speech API behind a small script, say.
+Then restart the server (`cl web stop`) and reload the board.
+
+- The browser allows the microphone only on HTTPS or `127.0.0.1`/`localhost`.
+  `cl window` and a browser on this machine work; a phone over
+  `http://<machine>:8421` gets "the browser only allows the mic on HTTPS".
+  `tailscale serve` can put HTTPS in front of `cl web` for that.
+- `cl window` allows the microphone for cl's own pages, and lets the answer
+  play without a click.
+- Speed, on CPU: whisper's `base.en` takes 2–4 s for a short request.
+  Piper as a command takes 3–4 s, mostly loading its model; as a server,
+  about 0.5 s for the first sentence. Adding `-ac 768` to
+  `voice.stt` makes whisper about a third faster but it then only hears the
+  first ~15 seconds; `tiny.en` is faster and less accurate.
+- Quiet recordings aren't sent: whisper turns silence into words like "you".
+- The operator runs the `cl` that started it (by full path), so its commands
+  match its instructions. Both are fixed when it starts: after upgrading cl,
+  `/exit` in Chat restarts it with the new ones the next time it's needed.
+- Where the time goes: whisper (2–4 s), the operator's turn, and Piper. For a
+  quicker turn, set `operator.model` (above); for quicker speech, run Piper
+  as a server. The board hears about `cl say` within ~150 ms (a long poll).
 
 ## Board
 

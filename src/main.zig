@@ -32,6 +32,7 @@ const usage =
     \\  cl operator               attach to the operator session (o in the chooser)
     \\  cl alert <text> | --clear  alert the human from this session (the operator's outside one):
     \\                            the chooser and the web board's Needs You show it
+    \\  cl say <text>             the operator's short spoken answer to a voice message (voice.*)
     \\  cl web                    serve the chooser to a browser (see web.* in the config)
     \\  cl web password | start | stop
     \\                            set the web password, or run the server in the background
@@ -52,6 +53,7 @@ const usage =
 ;
 
 const launch = @import("launch.zig");
+const voice = @import("voice.zig");
 pub const LaunchOptions = launch.Options;
 
 pub fn main(init: std.process.Init) !void {
@@ -87,6 +89,7 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, cmd, "operator")) return cmdOperator(ctx, cfg);
         if (std.mem.eql(u8, cmd, "board")) return cmdBoard(ctx, cfg, argv[1..]);
         if (std.mem.eql(u8, cmd, "alert")) return cmdAlert(ctx, argv[1..]);
+        if (std.mem.eql(u8, cmd, "say")) return cmdSay(ctx, argv[1..]);
         if (std.mem.eql(u8, cmd, "web")) return web.main(ctx, cfg, argv[1..]);
         if (std.mem.eql(u8, cmd, "window")) return window.main(ctx, cfg, argv[1..]);
         if (std.mem.eql(u8, cmd, "ticket") or std.mem.eql(u8, cmd, "t")) return ticket_cli.ticketMain(ctx, cfg, argv[1..]);
@@ -339,6 +342,15 @@ fn cmdAlert(ctx: Ctx, argv: []const []const u8) !void {
     try tmux.setAlert(ctx, target.tmux_name, text, ticket);
 }
 
+fn cmdSay(ctx: Ctx, argv: []const []const u8) !void {
+    if (argv.len != 1 or std.mem.trim(u8, argv[0], " \n").len == 0) fail("usage: cl say <text>", .{});
+    var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const op = (try tmux.operator(ctx, a)) orelse fail("the operator is not running", .{});
+    try voice.say(ctx, a, op.tmux_name, argv[0]);
+}
+
 /// With web.autostart, make sure `cl web` is running in the background.
 fn autostartWeb(ctx: Ctx, cfg: config.Config) void {
     web.start(ctx, cfg, false) catch {};
@@ -373,6 +385,7 @@ test {
     std.testing.refAllDecls(window);
     std.testing.refAllDecls(@import("web_board.zig"));
     std.testing.refAllDecls(operator);
+    std.testing.refAllDecls(voice);
     std.testing.refAllDecls(@import("after_merge.zig"));
     std.testing.refAllDecls(@import("park.zig"));
     std.testing.refAllDecls(@import("ticket_watch.zig"));
