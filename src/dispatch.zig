@@ -429,6 +429,9 @@ pub const Relocated = enum {
     mode,
     /// It went on in its new place.
     moved,
+    /// It wasn't under way but was queued (or beyond, its session gone):
+    /// it started in its own worktree there and then.
+    started,
     /// It waits in Queued: for the project's session (back in the queue),
     /// or for a worktree slot.
     waiting,
@@ -445,8 +448,57 @@ pub const Relocated = enum {
 /// wait in Queued: for the project's session, or for one of the project's
 /// worktree slots. Its change and bookmark stay the same. Claude is told it
 /// moved. Refused while its session is working or waiting on something.
+/// One switched to a worktree while not under way starts there now when it
+/// is queued or beyond (`startSwitched`), not on the dispatcher's next pass.
 pub fn relocate(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: board.Ticket, to: board.Mode) !Relocated {
     if (t.mode == to) return .mode;
+    const r = try relocateMode(ctx, cfg, db, a, t, to);
+    if (r != .mode or to != .worktree) return r;
+    return startSwitched(ctx, cfg, db, a, t.key);
+}
+
+/// A ticket just switched to a worktree that isn't under way: queued, or
+/// running, in review or testing with its session gone. It has nothing left
+/// to wait for (no shared session), so it starts in its own worktree now,
+/// within the project's slots; with all of them taken it waits in Queued
+/// for one. Backlog and planning stay put, as do killed and parked tickets.
+fn startSwitched(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, key: []const u8) !Relocated {
+    const t = try board.getTicket(db, a, key);
+    const view = try View.read(ctx, a, cfg);
+    const p = try board.getProject(db, a, t.project);
+    const started = t.tmux.len > 0 and (t.tmux[0] == '(' or view.alive(t.tmux));
+    switch (switchedStart(t, started, try runningWorktrees(db, a, view, p.name), p.slots)) {
+        .stay => return .mode,
+        .wait => {
+            if (t.stage != .queued) {
+                try board.moveTicket(ctx, db, t, .queued);
+                try board.clearFlagId(ctx, db, t.id, "ended");
+            }
+            return .waiting;
+        },
+        .start => {},
+    }
+    startIn(ctx, cfg, db, a, t, false, view, true) catch |err| switch (err) {
+        // The dispatcher got there first.
+        error.AlreadyStarted => return .started,
+        else => return err,
+    };
+    return .started;
+}
+
+/// What a ticket just switched to a worktree does: `started` when it has a
+/// live session (or one starting) already, `running` the project's worktree
+/// tickets in progress, out of its `slots`.
+fn switchedStart(t: board.Ticket, started: bool, running: i64, slots: i64) enum { stay, start, wait } {
+    switch (t.stage) {
+        .queued, .running, .review, .testing => {},
+        .backlog, .planning, .done => return .stay,
+    }
+    if (started or t.killed or t.park != null) return .stay;
+    return if (running >= slots) .wait else .start;
+}
+
+fn relocateMode(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: board.Ticket, to: board.Mode) !Relocated {
     if (t.tmux.len > 0 and t.tmux[0] == '(') return error.Busy;
     const view = try View.read(ctx, a, cfg);
     const p = try board.getProject(db, a, t.project);
@@ -1188,4 +1240,31 @@ test "a running ticket moved back to Queued is stopped, then started again where
     try std.testing.expectEqualStrings("", b.tmux);
     try board.move(ctx, db, a, kr, .queued);
     try std.testing.expectEqual(@as(usize, 2), (try waitingToStart(db, a)).len);
+}
+
+test "a ticket switched to a worktree starts now when queued or beyond" {
+    var t: board.Ticket = .{
+        .id = 1, .key = "QA-3", .project = "qa", .title = "Retry", .body = "", .stage = .queued,
+        .mode = .worktree, .plan = false, .skill = "", .target = "", .worktree = "", .branch = "", .profile = "",
+        .tmux = "", .session_id = "", .summary = "", .round = 1, .created = 0, .updated = 0, .parent = "", .children = 0,
+    };
+    try std.testing.expectEqual(.start, switchedStart(t, false, 0, 3));
+    // All the project's slots taken: it waits in Queued for one.
+    try std.testing.expectEqual(.wait, switchedStart(t, false, 3, 3));
+    // Already starting or under way: nothing to start.
+    try std.testing.expectEqual(.stay, switchedStart(t, true, 0, 3));
+    // Its session gone in Running, Review or Testing: it starts again there.
+    for ([_]board.Stage{ .running, .review, .testing }) |st| {
+        t.stage = st;
+        try std.testing.expectEqual(.start, switchedStart(t, false, 1, 3));
+    }
+    // Backlog and Planning only change mode.
+    for ([_]board.Stage{ .backlog, .planning, .done }) |st| {
+        t.stage = st;
+        try std.testing.expectEqual(.stay, switchedStart(t, false, 0, 3));
+    }
+    // A killed or parked one waits for you.
+    t.stage = .queued;
+    t.killed = true;
+    try std.testing.expectEqual(.stay, switchedStart(t, false, 0, 3));
 }

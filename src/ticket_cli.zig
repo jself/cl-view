@@ -255,6 +255,7 @@ fn relocate(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, ke
     return out(switch (r) {
         .mode => try std.fmt.allocPrint(a, "{s} runs {s} when it starts\n", .{ t.key, if (to == .worktree) "in a worktree of its own" else "in the queue" }),
         .moved => try std.fmt.allocPrint(a, "{s} moved to {s}{s}{s}\n", .{ t.key, after.tmux, if (after.worktree.len > 0) " at " else "", try ctx.shortenHomeIn(a, after.worktree) }),
+        .started => try std.fmt.allocPrint(a, "{s} started in a worktree of its own: {s} at {s}\n", .{ t.key, after.tmux, try ctx.shortenHomeIn(a, after.worktree) }),
         .waiting => try std.fmt.allocPrint(a, "{s} waits in Queued for {s}\n", .{ t.key, if (to == .worktree) "a worktree slot (the project's are all taken)" else "the project's session" }),
     });
 }

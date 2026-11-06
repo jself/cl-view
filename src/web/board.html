@@ -375,6 +375,14 @@ async function api(path, body) {
   if (!r.ok) throw new Error(j.error || r.statusText);
   return j;
 }
+// What a move between the queue and a worktree did (`dispatch.relocate`).
+function relocatedMsg(result, to) {
+  const wt = to === "worktree";
+  return result === "started" ? "Started in its own worktree"
+    : result === "waiting" ? (wt ? "All worktree slots are taken: it waits in Queued for one" : "Back in the queue: it waits for the project's session")
+    : result === "moved" ? (wt ? "Moved to its own worktree" : "Moved to the main folder")
+    : wt ? "It gets a worktree of its own when it starts" : "It runs in the queue when it starts";
+}
 async function act(key, action, body, msg) {
   try { const r = await api(`ticket/${encodeURIComponent(key)}/${action}`, body || {}); if (msg) toast(msg); await refresh(); return r; }
   catch (e) { toast(e.message, true); throw e; }
@@ -1404,9 +1412,7 @@ document.addEventListener("click", async (e) => {
   if (ds.move) return act(key, "move", { stage: ds.move }, "Moved");
   if (ds.relocate) {
     let r; try { r = await act(key, "relocate", { mode: ds.relocate }); } catch { return; }
-    toast(r.result === "waiting" ? (ds.relocate === "worktree" ? "All worktree slots are taken: it waits in Queued for one" : "Back in the queue: it waits for the project's session")
-      : r.result === "moved" ? (ds.relocate === "worktree" ? "Moved to its own worktree" : "Moved to the main folder")
-      : ds.relocate === "worktree" ? "It gets a worktree of its own when it starts" : "It runs in the queue when it starts");
+    toast(relocatedMsg(r.result, ds.relocate));
     return;
   }
   if (ds.pick !== undefined && ds.multi) {
@@ -1534,7 +1540,9 @@ document.addEventListener("submit", async (e) => {
   if (e.target.id === "parkForm") return submitPark(e.target);
   if (e.target.id === "editForm") {
     const f = Object.fromEntries(new FormData(e.target));
-    await act(state.open, "edit", { title: f.title, body: f.body, project: f.project, mode: f.mode, target: f.target, plan: f.plan === "1", skill: f.skill }, "Saved");
+    const was = state.detail?.ticket?.mode;
+    let r; try { r = await act(state.open, "edit", { title: f.title, body: f.body, project: f.project, mode: f.mode, target: f.target, plan: f.plan === "1", skill: f.skill }); } catch { return; }
+    toast(r?.result && was && was !== f.mode ? "Saved. " + relocatedMsg(r.result, f.mode) : "Saved");
     if (e.submitter?.value === "close") document.getElementById("ticketDlg").close();
   }
 });

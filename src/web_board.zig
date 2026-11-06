@@ -347,7 +347,10 @@ fn ticketAction(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator
             .profile = b.profile,
         });
         // A new mode moves the ticket (with its work, once started).
-        if (mode) |m| _ = try dispatch.relocate(ctx, cfg, db, a, try board.getTicket(db, a, key), m);
+        if (mode) |m| {
+            const r = try dispatch.relocate(ctx, cfg, db, a, try board.getTicket(db, a, key), m);
+            return ok(req, a, .{ .result = @tagName(r) });
+        }
     } else if (eql(u8, action, "relocate")) {
         const m = board.Mode.parse(b.mode orelse "") orelse return error.BadInput;
         const r = try dispatch.relocate(ctx, cfg, db, a, try board.getTicket(db, a, key), m);

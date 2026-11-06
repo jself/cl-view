@@ -363,8 +363,11 @@ A ticket runs one of two ways (`--queue` is the default, a project can set
   default).
 
 A ticket can switch ways at any time (`cl t relocate QA-1 worktree|queue`, or
-**Move to a worktree** / **Move to the queue** on the board). One that hasn't
-started only changes mode. One under way (jj only: it needs a change of its
+**Move to a worktree** / **Move to the queue** on the board, or the ticket's
+**Runs as** and `cl t edit QA-1 --worktree|--queue`). One that hasn't
+started only changes mode, except that one sent to a worktree from Queued
+starts there right away (it no longer waits for a shared session), as does
+one in Running, Review or Testing whose session is gone. One under way (jj only: it needs a change of its
 own) takes its change and its conversation along, once its session is idle.
 To a worktree: a `jj workspace` on its change, its transcript copied there
 (Claude keeps them by directory) and resumed, and the queue session gets a new
