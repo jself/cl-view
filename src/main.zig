@@ -360,4 +360,5 @@ test {
     std.testing.refAllDecls(operator);
     std.testing.refAllDecls(@import("after_merge.zig"));
     std.testing.refAllDecls(@import("park.zig"));
+    std.testing.refAllDecls(@import("ticket_watch.zig"));
 }

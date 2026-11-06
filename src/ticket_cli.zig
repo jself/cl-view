@@ -13,6 +13,7 @@ const actions = @import("actions.zig");
 const review = @import("review.zig");
 const after_merge = @import("after_merge.zig");
 const park = @import("park.zig");
+const ticket_watch = @import("ticket_watch.zig");
 
 pub const ticket_usage =
     \\usage: cl ticket <command>    (cl t for short)
@@ -33,6 +34,17 @@ pub const ticket_usage =
     \\                              and a hidden one until it raises a new flag (--hidden: those)
     \\                              list and needs leave out hidden projects' tickets (cl project
     \\                              hide) unless --hidden-projects, --project or --parent names them
+    \\  watch [<key>...] [--project <p,...>] [--change set,cleared,moved,new,needs,left]
+    \\      [--flag <kind,...>] [--stage <stage,...>] [--json]
+    \\                              print a line each time a ticket's flags or stage change,
+    \\                              until killed: <key> <project> set|cleared <flag> <title>,
+    \\                              moved <from>-><to>, or new <stage>; needs <flags> when it
+    \\                              lands in Needs You (or asks something new there), left
+    \\                              <flags> when it goes. --change needs: just Needs You.
+    \\                              The options narrow it
+    \\                              (lists are comma-separated; --flag filters flag lines,
+    \\                              --stage moved and new lines by the stage they go to).
+    \\                              Hidden projects' and hidden sessions' tickets stay quiet
     \\  hide <key> / unhide <key>   keep it out of the inbox (Needs You) without clearing its
     \\                              flags, or bring it back; a new flag brings it back too
     \\  show <key>                  details, flags, sub-tickets, comments and activity
@@ -119,7 +131,7 @@ pub const ticket_usage =
     \\                              done (the PR link becomes a comment) and closes the session
     \\  rm <key>                    (refused while it has sub-tickets)
     \\
-    \\  list, needs and show take --json. In a ticket's session ($CL_TICKET) the key
+    \\  list, needs, show and watch take --json. In a ticket's session ($CL_TICKET) the key
     \\  may be left out.
     \\
 ;
@@ -398,7 +410,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
     const cmd = argv[0];
     const args = try Args.parse(a, argv[1..], &.{
         "--body", "--target", "--stage", "--profile", "--project", "--flag", "--search", "--title", "--as", "--summary", "--test-plan", "--step", "--parent", "--skill", "--pr-url", "--before", "--after", "--tell",
-        "--reason", "--until", "--every", "--max", "--at",
+        "--reason", "--until", "--every", "--max", "--at", "--change",
     }, ticket_usage);
     const env_key = ctx.env.get("CL_TICKET");
     const db = openBoard(ctx, cfg);
@@ -452,6 +464,21 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         // key, stage, project, flags, parent, title
         for (ts) |t| try aw.writer.print("{s}\t{s}\t{s}\t{s}\t{s}\t{s}{s}{s}\n", .{ t.key, @tagName(t.stage), t.project, try flagList(a, t.flags), if (t.parent.len > 0) t.parent else "-", t.title, if (t.park != null) "\tparked: " else "", if (t.park) |p| p.reason else "" });
         return out(aw.writer.buffered());
+    }
+    if (std.mem.eql(u8, cmd, "watch")) {
+        args.only(&.{ "--json", "--project", "--change", "--flag", "--stage" }, ticket_usage);
+        var changes: std.ArrayList(ticket_watch.Kind) = .empty;
+        for (try ticket_watch.splitList(a, args.get("--change"))) |c|
+            try changes.append(a, std.meta.stringToEnum(ticket_watch.Kind, c) orelse fail("--change takes set, cleared, moved, new, needs, left (got {s})", .{c}));
+        const stages = try ticket_watch.splitList(a, args.get("--stage"));
+        for (stages) |st| _ = parseStage(st);
+        return ticket_watch.run(ctx, cfg, db, args.has("--json"), .{
+            .keys = pos,
+            .projects = try ticket_watch.splitList(a, args.get("--project")),
+            .changes = changes.items,
+            .flags = try ticket_watch.splitList(a, args.get("--flag")),
+            .stages = stages,
+        });
     }
     if (std.mem.eql(u8, cmd, "show")) {
         args.only(&.{"--json"}, ticket_usage);

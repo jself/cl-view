@@ -155,7 +155,8 @@ applies to `cl -r <id>`.
 `o` in the chooser (or `cl operator`, or **Chat** on the web board) attaches to the operator: a Claude session
 that manages the others for you through the `cl` CLI. Ask it to start sessions,
 say what everyone is doing, or keep an eye on things; it runs `cl watch` to hear
-about status changes. It is not started until you first press `o`, then keeps
+about status changes, and `cl ticket watch` to hear when a ticket needs feedback
+(see What needs you). It is not started until you first press `o`, then keeps
 running like any other session. It is hidden from the list and from `cl list`,
 `send` and `kill`; the header shows its status while it runs.
 
@@ -461,6 +462,46 @@ confirm. Dismiss is only offered on informational flags (didn't start,
 session ended, after-merge failed, woke from park, park expired, flags set by
 hand); a question, a permission prompt, a review, a test or a conflict waits
 on you, and clears when you act on it.
+
+`cl t watch` prints a line each time a ticket's flags or stage change, until
+killed (`--json` for one object per line, with the flag's details):
+
+```
+CL-37 cl-wrapper set question Add cl ticket watch
+CL-37 cl-wrapper cleared question Add cl ticket watch
+CL-37 cl-wrapper moved running->review Add cl ticket watch
+CL-90 cl-wrapper new backlog Fix the login page
+CL-37 cl-wrapper needs question,review Add cl ticket watch
+CL-37 cl-wrapper left question,review Add cl ticket watch
+```
+
+`needs` and `left` follow Needs you, decided the same way the board does it.
+`needs` comes when a ticket lands there, or asks something new while it's
+there, with the flags it asks about. `left` comes when it goes (answered,
+hidden, dismissed, parked, or Claude went back to work on it).
+
+Options narrow it, each a comma-separated list: ticket keys, `--project`,
+`--change set,cleared,moved,new,needs,left`, `--flag <kinds>` (lines about
+those flags only) and `--stage <stages>` (moved and new lines into those
+stages only). `cl t watch --change needs` follows Needs you, and
+`cl t watch --change needs --flag question,input --project qa` follows only
+qa's questions and permission prompts.
+
+It reads the board every two seconds, so it sees what the CLI, the web board
+and the dispatcher do alike. Tickets of hidden projects and of hidden
+sessions stay quiet; unhiding one doesn't replay what changed meanwhile, but
+its tickets now in Needs you get a `needs` line.
+
+The operator keeps it running, by default as `--change needs` (Needs you).
+It picks other options from what you've told it, and decides for itself what,
+if anything, to do with each line. By default it does nothing, since you see
+Needs you yourself. Tell it to keep a project moving and it handles what lands
+in Needs you for that project, within what you let it do (answer questions,
+approve, finish, restart; it asks once if you didn't say). It alerts you for
+the rest. It also answers the kinds of questions you've said it may handle,
+raises one `cl alert` for tickets or kinds of flag you asked it to follow, and
+alerts when something looks wrong that the board won't make obvious. What you
+tell it goes in its notes.
 
 ### Review and testing
 

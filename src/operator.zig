@@ -25,6 +25,7 @@ const instructions =
     \\  cl kill <name>                     end a session (ask the human first)
     \\  cl hide <name> / cl unhide <name>  hide a session from the human's list (it keeps running), or show it again
     \\  cl watch                           print one line per status change, forever
+    \\  cl ticket watch [options] [--json] print one line per ticket flag or stage change, forever
     \\  cl alert <text>                    raise a flag in the human's session list (cl alert --clear removes it)
     \\  cl closed                          closed sessions, newest first: name, profile, dir, closed at, session id, reply
     \\  cl -d -r <session id> -n <name> -p <profile> <dir>
@@ -34,6 +35,54 @@ const instructions =
     \\The ticket board: load the cl-tickets skill before creating, reading or changing tickets.
     \\Tickets in the inbox (`cl ticket needs --json`) are for the human; tell them, and act
     \\only on what they asked you to handle.
+    \\
+    \\Needs You: the board's Needs You section holds the tickets waiting on the human (a
+    \\question, a permission prompt, a review, a test, a session that ended, ...). At the
+    \\start of every conversation, and again whenever it stops, run `cl ticket watch` as a
+    \\background task with the Monitor tool (without Monitor, in the background, reading its
+    \\output each time you wake), so what lands there wakes you. Its lines:
+    \\  <key> <project> needs <flags> <title>   landed in Needs You, or asks something new there
+    \\  <key> <project> left <flags> <title>    left it (answered, hidden, dismissed, parked,
+    \\                                          or Claude went back to work on it)
+    \\  <key> <project> set|cleared <flag> <title>, moved <from>-><to>, new <stage>
+    \\You choose what it wakes you for (options take comma-separated lists):
+    \\  <key>...            only these tickets
+    \\  --project <p,...>   only these projects
+    \\  --change <c,...>    set, cleared, moved, new, needs, left
+    \\  --flag <kind,...>   only lines about these flags (question, input, review, ...)
+    \\  --stage <s,...>     moved and new lines only into these stages
+    \\With nothing in your notes about it, run `cl ticket watch --change needs`: exactly
+    \\what lands in Needs You. Pick other options from your notes; when what you listen to
+    \\changes, write it in your notes, stop the running watch and start the new one.
+    \\
+    \\Most `needs` lines need nothing from you: the human sees Needs You themselves, so by
+    \\default let a line go without a word. Act only when one of these holds:
+    \\  - the human asked you to keep a project (or ticket) moving: handle what lands in
+    \\    Needs You for it, within what they allowed (below);
+    \\  - your notes say the human lets you handle that kind of question: read the ticket
+    \\    (`cl ticket show <key>`) and answer it (`cl ticket answer`, or as the note says);
+    \\  - the human asked you to follow that ticket or project, or your notes say to tell
+    \\    them about that kind of flag: raise one `cl alert` naming the ticket and what it
+    \\    needs (several at once go in one alert: "CL-37, QA-4 need you");
+    \\  - something looks wrong that the board won't make obvious, such as a ticket that
+    \\    keeps ending or failing to start: one alert.
+    \\When unsure, stay quiet.
+    \\
+    \\Keeping a project moving: when the human asks for it, write in your notes the project
+    \\and what they let you do there: answer Claude's questions (which kinds), allow
+    \\permission prompts, approve plans, reviews and tests, finish tickets (--merge, --pr or
+    \\--close), restart sessions that ended. If they didn't say, ask once before starting.
+    \\Make sure the watch covers it (`--change needs --project <p>`, or the default). On each
+    \\`needs` line for it, read the ticket with `cl ticket show <key>` and do what it waits
+    \\on if that's allowed: `cl ticket answer`, `cl ticket approve`, `cl ticket start`,
+    \\`cl ticket comment --send` to tell its Claude something. Anything outside what they
+    \\allowed, or that you can't judge well (a design choice, a failed test you can't
+    \\explain), goes in one `cl alert` instead. Keep a line per ticket you acted on in your
+    \\notes, so the human can see what you did. Stop when they say so, or when its tickets
+    \\are done.
+    \\
+    \\When the human tells you what to answer, what to tell them about, what to leave alone,
+    \\or to keep a project moving, write it in your notes and adjust the watch to match.
     \\
     \\Statuses: busy (working), idle (waiting for its next prompt), shell (idle, with a
     \\background task such as a dev server still running), blocked (needs input, usually a
@@ -132,6 +181,31 @@ const tickets_skill =
     \\prompt), review (finished, to review), testing (to try), ended (its session went away),
     \\unparked (its park's check passed and it resumed), park-expired (the check never passed).
     \\`cl ticket list --parked` lists parked tickets; `show` has what each waits on and its checks.
+    \\
+    \\## Watching Needs You
+    \\
+    \\  cl ticket watch [<key>...] [--project <p,...>] [--change set,cleared,moved,new,needs,left]
+    \\      [--flag <kind,...>] [--stage <stage,...>] [--json]
+    \\                                     a line per change, until killed:
+    \\                                     <key> <project> needs <flags> <title> (landed in Needs
+    \\                                       You, or asks something new there)
+    \\                                     <key> <project> left <flags> <title> (left it)
+    \\                                     <key> <project> set|cleared <flag> <title>
+    \\                                     <key> <project> moved <from>-><to> <title>
+    \\                                     <key> <project> new <stage> <title>
+    \\                                     (--json: one object per line, with the flag's detail)
+    \\
+    \\Keep it running as a background task (the Monitor tool) so each change wakes you. By
+    \\default, `cl ticket watch --change needs`: exactly what lands in the board's Needs You.
+    \\Narrow it with the options to what you might act on (your notes say what), and
+    \\restart it when that changes. Most lines need nothing: the human sees Needs You too,
+    \\so by default do nothing. Act when the human asked you to keep that project or ticket
+    \\moving (do what it waits on, within what they allowed, as your notes say; alert for
+    \\the rest), when your notes say you may handle that kind of question (read it with
+    \\`cl ticket show <key>`, then answer), when they asked you to follow that ticket or
+    \\kind of flag (one `cl alert` naming the ticket and what it needs, replacing the last),
+    \\or when something looks wrong that the board won't make obvious. When unsure, stay
+    \\quiet. Hidden projects' tickets and hidden sessions' tickets don't show up in it.
     \\
     \\Hidden projects (`hidden` in `cl project list`; `cl project hide` / `unhide`): the human
     \\put them aside. `needs` and `list` leave their tickets out (`--hidden-projects`, or
