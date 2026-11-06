@@ -50,6 +50,7 @@ pub const flag_conflict = "conflict"; // merging it back conflicts
 pub const flag_after_merge = "after-merge"; // the project's after-merge command failed
 pub const flag_unparked = "unparked"; // its park's condition came true; it resumed
 pub const flag_park_expired = "park-expired"; // its park's check never passed in time
+pub const flag_idle = "idle"; // Claude ended its turn; nothing else asks, so it waits on you
 
 pub const Project = struct {
     name: []const u8,
@@ -1002,6 +1003,9 @@ fn moveId(ctx: Ctx, db: Db, id: i64, from: Stage, to: Stage) Error!void {
     try logEvent(ctx, db, id, "moved", std.fmt.bufPrint(&buf, "{s} -> {s}", .{ @tagName(from), @tagName(to) }) catch "");
     if (from == .review) try clearFlagId(ctx, db, id, flag_review);
     if (from == .testing) try clearFlagId(ctx, db, id, flag_testing);
+    // Moved, it is the move that says what's next (the dispatcher raises it
+    // again if it's still in progress and idle).
+    try setIdle(ctx, db, id, false);
     if (to == .testing) try setFlagId(ctx, db, id, flag_testing, "auto", "");
     // All but a failed after-merge run's: that comes after the merge, so it
     // stays until the next run (or the human) clears it.
@@ -1029,9 +1033,29 @@ pub fn setFlagId(ctx: Ctx, db: Db, id: i64, kind: []const u8, source: []const u8
         try db.exec("UPDATE flags SET hidden = (hidden AND detail = ?2), detail = ?2 WHERE id = ?1", .{ fid, detail });
         return;
     }
+    // Anything else it asks says more than "idle": that one goes.
+    if (!std.mem.eql(u8, kind, flag_idle)) try setIdle(ctx, db, id, false);
     try db.exec("INSERT INTO flags (ticket, kind, source, detail, at) VALUES (?1, ?2, ?3, ?4, ?5)", .{ id, kind, source, detail, now(ctx) });
     try touch(ctx, db, id);
     try logEvent(ctx, db, id, "flagged", kind);
+}
+
+/// What the `idle` flag says (one text, so a hidden one stays hidden).
+pub const idle_detail = "Claude ended its turn and is waiting for you";
+
+/// Raise or clear the `idle` flag (the dispatcher keeps it in step with the
+/// session: signals.syncIdle). Raised only when the ticket has no other
+/// flag; it comes and goes with every turn, so it is left out of the
+/// activity log.
+pub fn setIdle(ctx: Ctx, db: Db, id: i64, on: bool) Error!void {
+    if (!on) {
+        try db.exec("UPDATE flags SET cleared = ?3 WHERE ticket = ?1 AND kind = ?2 AND cleared IS NULL", .{ id, flag_idle, now(ctx) });
+        if (db.changes() > 0) try touch(ctx, db, id);
+        return;
+    }
+    if ((try db.int("SELECT 1 FROM flags WHERE ticket = ?1 AND cleared IS NULL", .{id})) != null) return;
+    try db.exec("INSERT INTO flags (ticket, kind, source, detail, at) VALUES (?1, ?2, 'auto', ?3, ?4)", .{ id, flag_idle, idle_detail, now(ctx) });
+    try touch(ctx, db, id);
 }
 
 pub fn clearFlag(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, kind: []const u8) Error!void {
@@ -1049,11 +1073,13 @@ pub fn clearFlagId(ctx: Ctx, db: Db, id: i64, kind: []const u8) Error!void {
 
 /// Flags that wait on the human to do something with the ticket: Claude is
 /// blocked on a question or a permission prompt, or the ticket's next step is
-/// theirs (review it, test it, sort out a conflict). Answering or acting
+/// theirs (review it, test it, sort out a conflict), or Claude is idle and
+/// waits for its next prompt (dismissing that would only raise it again).
+/// Answering or acting
 /// clears them, so the board doesn't offer to dismiss them; Hide is for "not
 /// now". `cl ticket unflag` still clears any flag.
 pub fn waitingFlag(kind: []const u8) bool {
-    for ([_][]const u8{ flag_question, flag_input, flag_review, flag_testing, flag_conflict }) |k| {
+    for ([_][]const u8{ flag_question, flag_input, flag_review, flag_testing, flag_conflict, flag_idle }) |k| {
         if (std.mem.eql(u8, kind, k)) return true;
     }
     return false;
@@ -1098,6 +1124,7 @@ pub fn sessionKilled(ctx: Ctx, db: Db, a: std.mem.Allocator, tmux_name: []const 
     for (ids.items) |id| {
         try db.exec("UPDATE tickets SET tmux = '', killed = 1 WHERE id = ?1", .{id});
         for ([_][]const u8{ flag_question, flag_input, "ended" }) |k| try clearFlagId(ctx, db, id, k);
+        try setIdle(ctx, db, id, false);
         try logEvent(ctx, db, id, "killed", tmux_name);
         try touch(ctx, db, id);
     }
@@ -1141,6 +1168,7 @@ pub fn addComment(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, autho
     if (sent and std.mem.eql(u8, author, "you")) {
         try clearFlagId(ctx, db, t.id, flag_question);
         try clearFlagId(ctx, db, t.id, flag_input);
+        try setIdle(ctx, db, t.id, false);
     }
     return r;
 }
@@ -1695,4 +1723,70 @@ test "dismissing a flag clears it for good, but never a waiting one" {
     try setFlag(ctx, db, a, k, "start-failed", "auto", "SessionFailed");
     const f = (try getTicket(db, a, k)).flags;
     for (f) |x| if (std.mem.eql(u8, x.kind, "start-failed")) try testing.expect(!x.hidden);
+}
+
+test "an idle session raises idle only when nothing else asks, and it goes when anything happens" {
+    const ctx = testCtx();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try Db.open(":memory:");
+    defer db.close();
+    try migrate(db);
+    try addProject(db, .{ .name = "qa", .dir = "/x/qa" });
+    const k = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Idle", .stage = .running });
+    const id = (try getTicket(db, a, k)).id;
+    const kinds = struct {
+        fn of(d: Db, al: std.mem.Allocator, key: []const u8) ![]const u8 {
+            var out: std.ArrayList(u8) = .empty;
+            for ((try getTicket(d, al, key)).flags) |f| try out.print(al, "{s}{s}", .{ if (out.items.len > 0) "," else "", f.kind });
+            return out.items;
+        }
+    }.of;
+
+    try setIdle(ctx, db, id, true);
+    try testing.expectEqualStrings("idle", try kinds(db, a, k));
+    try testing.expectEqual(@as(usize, 1), (try listTickets(db, a, .{ .needs = true })).len);
+    const busy: []const []const u8 = &.{"cl_qa"};
+    try db.exec("UPDATE tickets SET tmux = 'cl_qa' WHERE id = ?1", .{id});
+    try testing.expectEqual(@as(usize, 0), (try listTickets(db, a, .{ .needs = true, .busy = busy })).len);
+    try setIdle(ctx, db, id, false);
+    try testing.expectEqualStrings("", try kinds(db, a, k));
+
+    // Hidden, it stays hidden while it stays idle; the next idle turn brings it back.
+    try setIdle(ctx, db, id, true);
+    _ = try hideNeeds(ctx, db, a, k, true);
+    try setIdle(ctx, db, id, true);
+    try testing.expectEqual(@as(usize, 0), (try listTickets(db, a, .{ .needs = true })).len);
+    try setIdle(ctx, db, id, false);
+    try setIdle(ctx, db, id, true);
+    try testing.expectEqual(@as(usize, 1), (try listTickets(db, a, .{ .needs = true })).len);
+
+    // Something sent to the session settles it.
+    _ = try addComment(ctx, db, a, k, "you", "go on", true);
+    try testing.expectEqualStrings("", try kinds(db, a, k));
+
+    // Another flag replaces it, and while one is up idle isn't raised.
+    try setIdle(ctx, db, id, true);
+    try setFlag(ctx, db, a, k, flag_question, "auto", "{}");
+    try testing.expectEqualStrings("question", try kinds(db, a, k));
+    try setIdle(ctx, db, id, true);
+    try testing.expectEqualStrings("question", try kinds(db, a, k));
+    try clearFlag(ctx, db, a, k, flag_question);
+
+    // Done (it moves to Review), a kill, or a move clear it too.
+    try setIdle(ctx, db, id, true);
+    try done(ctx, db, a, k, "did it");
+    try testing.expectEqualStrings("review", try kinds(db, a, k));
+    try move(ctx, db, a, k, .running);
+    try setIdle(ctx, db, id, true);
+    try sessionKilled(ctx, db, a, "cl_qa");
+    try testing.expectEqualStrings("", try kinds(db, a, k));
+    try setIdle(ctx, db, id, true);
+    try move(ctx, db, a, k, .backlog);
+    try testing.expectEqualStrings("", try kinds(db, a, k));
+
+    // It comes and goes every turn: not in the activity log. Never dismissed (it would only come back).
+    try testing.expect(waitingFlag(flag_idle));
+    try testing.expectEqual(@as(?i64, null), try db.int("SELECT 1 FROM events WHERE ticket = ?1 AND detail = 'idle'", .{id}));
 }

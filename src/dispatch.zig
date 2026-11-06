@@ -816,7 +816,9 @@ pub fn tick(ctx: Ctx, cfg: config.Config, db: board.Db) !usize {
     var cur_it = current.valueIterator();
     while (cur_it.next()) |t| {
         const s = view.find(t.tmux) orelse continue;
-        signals.sync(ctx, db, a, t.*, view.statuses.get(t.tmux), claude.statusFor(ctx, view.statuses, s)) catch {};
+        const status = claude.statusFor(ctx, view.statuses, s);
+        signals.sync(ctx, db, a, t.*, view.statuses.get(t.tmux), status) catch {};
+        signals.syncIdle(ctx, db, t.*, status, s.hidden) catch {};
     }
 
     // Out of Planning (approved, or moved): its planning session goes, before

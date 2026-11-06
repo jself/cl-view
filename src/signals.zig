@@ -388,6 +388,20 @@ pub fn sync(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, info:
     }
 }
 
+/// Keep the ticket's `idle` flag in step with its session: raised while
+/// Claude sits at its prompt with its turn over and the ticket asks nothing
+/// else (board.setIdle checks that), cleared once it works or waits on
+/// something again. `shell` isn't idle: the background task wakes Claude
+/// when it finishes. A hidden session (`cl hide`) raises nothing. Starting
+/// and unknown say nothing either way, so the flag stays as it is.
+pub fn syncIdle(ctx: Ctx, db: board.Db, t: board.Ticket, status: claude.Status, hidden: bool) !void {
+    switch (status) {
+        .idle => try board.setIdle(ctx, db, t.id, !hidden),
+        .starting, .unknown => {},
+        else => try board.setIdle(ctx, db, t.id, false),
+    }
+}
+
 /// Clear a flag the board set itself, leaving one you set by hand.
 fn clearAuto(ctx: Ctx, db: board.Db, id: i64, kind: []const u8) !void {
     if ((try db.int("SELECT 1 FROM flags WHERE ticket = ?1 AND kind = ?2 AND cleared IS NULL AND source = 'auto'", .{ id, kind })) == null) return;

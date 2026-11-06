@@ -179,7 +179,8 @@ const tickets_skill =
     \\Stages: backlog, planning, queued, running, review, testing, done. Flags say what a
     \\ticket needs from the human: question (Claude asked something), input (a permission
     \\prompt), review (finished, to review), testing (to try), ended (its session went away),
-    \\unparked (its park's check passed and it resumed), park-expired (the check never passed).
+    \\idle (Claude ended its turn with nothing else pending; it waits for a prompt), unparked
+    \\(its park's check passed and it resumed), park-expired (the check never passed).
     \\`cl ticket list --parked` lists parked tickets; `show` has what each waits on and its checks.
     \\
     \\## Watching Needs You

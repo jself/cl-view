@@ -77,6 +77,8 @@
   .ask .what { font-size: calc(12.5 * var(--u)); color: var(--dim); line-height: 1.45; overflow-wrap: anywhere;
                display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
   .ask .acts { display: flex; flex-wrap: wrap; gap: calc(6 * var(--u)); margin-top: auto; }
+  .ask[data-ask] { cursor: pointer; } .ask[data-ask] .acts { cursor: default; }
+  .ask[data-ask]:hover { border-color: #3a3c42; }
 
   nav#filters { display: flex; flex-wrap: wrap; align-items: center; gap: calc(8 * var(--u)); padding: calc(12 * var(--u)) calc(16 * var(--u)); }
   nav#filters select { min-height: calc(34 * var(--u)); }
@@ -367,7 +369,7 @@
 "use strict";
 const STAGES = ["backlog", "planning", "queued", "running", "review", "testing", "done"];
 const STAGE_NAME = { backlog: "Backlog", planning: "Planning", queued: "Queued", running: "Running", review: "Review", testing: "Testing", done: "Done" };
-const FLAG_NAME = { input: "Needs input", question: "Question", review: "Ready for review", testing: "Needs testing", ended: "Session ended", "start-failed": "Didn't start", conflict: "Conflicts", "after-merge": "After-merge failed", unparked: "Woke from park", "park-expired": "Park expired" };
+const FLAG_NAME = { input: "Needs input", question: "Question", review: "Ready for review", testing: "Needs testing", ended: "Session ended", "start-failed": "Didn't start", conflict: "Conflicts", "after-merge": "After-merge failed", unparked: "Woke from park", "park-expired": "Park expired", idle: "Idle" };
 const STATUS_NAME = { busy: "Working", waiting: "Waiting on you", blocked: "Waiting on you", idle: "Idle", shell: "Idle · background task", starting: "Starting", gone: "Session ended", killed: "Killed · restart it", parked: "Parked", unknown: "Unknown" };
 
 const store = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch { return null; } };
@@ -436,6 +438,7 @@ function askText(t, f) {
   if (f.kind === "input") return d ? `${d.tool || "Permission"}: ${d.summary || "wants permission"}` : (f.detail || "Waiting on a prompt");
   if (f.kind === "review") return (d === null && f.detail === "plan") || f.detail === "plan" ? "The plan is ready for approval" : (t.summary || "Claude says it's done");
   if (f.kind === "testing") return "Ready to try";
+  if (f.kind === "idle") return "Claude ended its turn and nothing else is pending: it waits for your next prompt";
   if (f.kind === "start-failed") return `Its session didn't start (${f.detail || "no reason given"}). `
     + (retries(t) ? "The dispatcher keeps trying by itself and clears this once it starts; nothing to do unless it keeps failing" : "Start it again from the ticket");
   if (f.kind === "conflict") return "Merging it back conflicts in: " + f.detail.split("\n").map((l) => l.trim().split(/\s+/)[0]).join(", ");
@@ -448,6 +451,7 @@ function askLine(t, f, quick) {
   if (f.kind === "question") return quick ? askText(t, f) : d?.questions?.length > 1 ? `Needs ${d.questions.length} answers` : "Needs an answer";
   if (f.kind === "input") return d?.tool ? `Wants permission: ${d.tool}` : "Waiting on a prompt";
   if (f.kind === "review") return f.detail === "plan" ? "Plan ready for approval" : "Ready for review";
+  if (f.kind === "idle") return "Idle: waiting for you";
   if (f.kind === "conflict") { const n = f.detail.split("\n").filter((l) => l.trim()).length; return `Merge conflicts in ${n} file${n === 1 ? "" : "s"}`; }
   if (f.kind === "after-merge") return "After-merge command failed: " + f.detail.split("\n")[0];
   if (f.kind === "start-failed") return `${f.detail || "Didn't start"} · ` + (retries(t) ? "the dispatcher will retry" : "start it again");
@@ -455,9 +459,10 @@ function askLine(t, f, quick) {
 }
 // Dismiss clears a flag for good ("seen it, it's dealt with"); it comes back only if the same
 // thing happens again. Not offered on flags that wait on you (board.zig waitingFlag): Claude
-// blocked on a question or prompt, or the ticket's next step (review, test, conflict). Acting
-// on those clears them; Hide is for "not now".
-const WAITING = ["question", "input", "review", "testing", "conflict"];
+// blocked on a question or prompt, the ticket's next step (review, test, conflict), or Claude
+// idle at its prompt (the dispatcher would only raise that again). Acting on those clears
+// them; Hide is for "not now".
+const WAITING = ["question", "input", "review", "testing", "conflict", "idle"];
 const dismissable = (f) => !WAITING.includes(f.kind);
 const DISMISS_TIP = "Remove this alert for good. The ticket itself doesn't change; the alert comes back only if the same thing happens again";
 // A failed start of a queued (or planning) ticket is retried by the dispatcher.
@@ -474,7 +479,9 @@ const until = (t) => { if (!t) return ""; const d = t - (state.data?.now || Date
   return d <= 0 ? "now" : "in " + (d < 3600 ? Math.max(1, Math.round(d / 60)) + "m" : d < 86400 ? Math.round(d / 3600) + "h" : Math.round(d / 86400) + "d"); };
 const parkTitle = (p) => p.until ? `Checks every ${dur(p.every)}${p.checked ? `; last ${ago(p.checked)} ago: ${p.result}` : "; not checked yet"}; next ${until(p.next)}; gives up ${until(p.deadline)}` : "Nothing checks it: Resume brings it back";
 const parkPill = (t) => t.park ? `<span class="pill f-parked" title="${esc(parkTitle(t.park))}"><span>Parked: ${esc(t.park.reason)}</span></span>` : "";
-const pills = (t) => t.flags.length || t.finishing || t.custom_close || t.park ? `<span class="pills">${parkPill(t)}${customPill(t)}${finishPill(t)}${t.flags.map((f) => `<span class="pill ${flagClass(f.kind)}">${esc(flagLabel(f))}</span>`).join("")}</span>` : "";
+// The idle flag isn't repeated on the card: its status already says Idle.
+const cardFlags = (t) => t.flags.filter((f) => f.kind !== "idle");
+const pills = (t) => cardFlags(t).length || t.finishing || t.custom_close || t.park ? `<span class="pills">${parkPill(t)}${customPill(t)}${finishPill(t)}${cardFlags(t).map((f) => `<span class="pill ${flagClass(f.kind)}">${esc(flagLabel(f))}</span>`).join("")}</span>` : "";
 // "(starting)" is the dispatcher's claim while it opens the session.
 // A Backlog or Queued ticket whose session is gone hasn't ended: it's waiting to start.
 // A killed one waits for you to restart it.
@@ -598,13 +605,15 @@ function renderNeeds() {
       : f.kind === "review" ? `<button type="button" class="btn primary" data-open="${esc(t.key)}" data-tab="review">Review</button>`
       : f.kind === "testing" ? `<button type="button" class="btn primary" data-open="${esc(t.key)}" data-tab="test">Test it</button>`
       : f.kind === "after-merge" ? `<button type="button" class="btn primary" data-open="${esc(t.key)}" data-tab="after-merge">See the log</button>`
+      : f.kind === "idle" ? `<button type="button" class="btn primary" data-open="${esc(t.key)}" data-tab="session">Open session</button>`
       : `<button type="button" class="btn primary" data-open="${esc(t.key)}" data-tab="needs">Open</button>`;
     const shell = t.tmux && r.status && r.status !== "gone" ? `<a class="btn" href="${shellHref(t)}">Shell</a>` : "";
     // Hiding keeps the flags (the card still shows them); a new flag brings it back.
     const hide = isHidden ? `<button type="button" class="btn" data-unhide="${esc(t.key)}" title="Put it back in Needs you">Unhide</button>`
       : `<button type="button" class="btn" data-hide="${esc(t.key)}" title="Take it out of Needs you until it raises a new flag; its card keeps the flag">Hide</button>`;
     const dismiss = dismissable(f) ? `<button type="button" class="btn" data-dismiss="${esc(t.key)}" data-kind="${esc(f.kind)}" title="${DISMISS_TIP}">Dismiss</button>` : "";
-    return `<div class="ask${isHidden ? " hidden" : ""}"><div class="pills"><span class="pill ${flagClass(f.kind)}">${esc(flagLabel(f))}</span>${isHidden ? `<span class="pill">Hidden</span>` : ""}<span class="mono muted" style="font-size:calc(11.5 * var(--u))">${esc(t.key)} · ${ago(f.at)}</span></div>
+    // Its text (not its buttons) opens the ticket, as its card does.
+    return `<div class="ask${isHidden ? " hidden" : ""}" data-ask="${esc(t.key)}"><div class="pills"><span class="pill ${flagClass(f.kind)}">${esc(flagLabel(f))}</span>${isHidden ? `<span class="pill">Hidden</span>` : ""}<span class="mono muted" style="font-size:calc(11.5 * var(--u))">${esc(t.key)} · ${ago(f.at)}</span></div>
       <div style="font-weight:500">${esc(t.title)}</div><div class="what" title="${esc(askText(t, f))}">${esc(askLine(t, f, quick))}</div>
       ${quick ? `<div class="acts">${quick}</div>` : ""}<div class="acts">${main}${shell}${hide}${dismiss}</div></div>`;
   }).join(""));
@@ -1467,7 +1476,14 @@ document.addEventListener("click", async (e) => {
     try { const r = await act(k, "unpark", {}); toast(unparkMsg(k, r.resumed)); } catch {} return; }
   const sh = e.target.closest("[data-shell]");
   if (sh) { e.preventDefault(); if (e.ctrlKey || e.metaKey) window.open(sh.dataset.shell); else location.href = sh.dataset.shell; return; }
-  const el = e.target.closest("button, a, tr.row"); if (!el) return;
+  const el = e.target.closest("button, a, tr.row");
+  if (!el) {
+    // A Needs you item's text opens its ticket like its card; its buttons (and the
+    // space between them) don't, nor does selecting its text.
+    const ask = e.target.closest("[data-ask]");
+    if (ask && !e.target.closest(".acts") && !String(getSelection())) openTicket(ask.dataset.ask);
+    return;
+  }
   const ds = el.dataset;
   if (ds.view) { state.view = ds.view; store("cl-view", ds.view); render(); return; }
   if (el.id === "addProjBtn") return openProject(null);
