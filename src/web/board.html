@@ -163,18 +163,21 @@
   .parkbox code { font: calc(12 * var(--u)) var(--mono); overflow-wrap: anywhere; }
 
   /* Lanes: a grid of panels, a row per project and a column per stage. The
-     stage headers stick to the top and the project names to the left. Each
-     grid cell pads its panel by half a gap rather than using grid gaps, so the
-     stuck cells' background covers the cards that scroll under them. */
-  .lanes { --lane: calc(160 * var(--u)); --stage: minmax(calc(230 * var(--u)), 1fr); --hg: calc(6 * var(--u));
+     stage headers stick to the top and the project names to the left, and in
+     a lane taller than the window its name sticks under the headers (at --hd,
+     the header row's fixed height). Each grid cell pads its panel by half a gap
+     rather than using grid gaps, so the stuck cells' background covers the
+     cards that scroll under them. */
+  .lanes { --lane: calc(160 * var(--u)); --stage: minmax(calc(230 * var(--u)), 1fr); --hg: calc(6 * var(--u)); --hh: calc(40 * var(--u)); --hd: calc(var(--hh) + var(--hg));
            flex: 1 1 auto; min-height: 0; overflow: auto; display: grid; grid-template-columns: var(--lane) repeat(var(--n), var(--stage)); align-content: start;
            scroll-snap-type: x mandatory; scroll-padding-left: var(--lane); overscroll-behavior-x: contain; }
   .lanes > div { padding: var(--hg); display: flex; flex-direction: column; min-width: 0; }
   .lanes .lhd { position: sticky; top: 0; z-index: 2; background: var(--bg); padding-top: 0; scroll-snap-align: start; }
   .lanes .lhd.corner { left: 0; z-index: 3; scroll-snap-align: none; }
-  .lanes .lhd h2 { background: var(--panel); border: 1px solid #222428; border-radius: calc(12 * var(--u)); padding: calc(10 * var(--u)) calc(14 * var(--u)); }
+  .lanes .lhd h2 { box-sizing: border-box; height: var(--hh); background: var(--panel); border: 1px solid #222428; border-radius: calc(12 * var(--u)); padding: 0 calc(14 * var(--u)); }
   .lanes .lane { position: sticky; left: 0; z-index: 1; background: var(--bg); }
-  .lanes .lane > div { flex: 1; background: var(--panel); display: flex; flex-direction: column; gap: calc(6 * var(--u)); padding: calc(10 * var(--u)); border-radius: calc(12 * var(--u)); border: 1px solid #222428; }
+  .lanes .lane > div { flex: 1; background: var(--panel); padding: calc(10 * var(--u)); border-radius: calc(12 * var(--u)); border: 1px solid #222428; }
+  .lanes .lt { position: sticky; top: calc(var(--hd) + calc(10 * var(--u))); display: flex; flex-direction: column; gap: calc(6 * var(--u)); background: var(--panel); }
   .lanes .lane strong { overflow-wrap: anywhere; }
   .lanes .cell { flex: 1; background: var(--panel); border: 1px solid #222428; border-radius: calc(12 * var(--u)); padding: calc(10 * var(--u));
                  display: flex; flex-direction: column; gap: calc(8 * var(--u)); min-height: calc(60 * var(--u)); }
@@ -649,7 +652,7 @@ function lanesHtml(rows) {
   return `<div class="lanes" style="--n:${columns().length}"><div class="lhd corner"></div>${columns().map((s) => `<div class="lhd"><h2>${STAGE_NAME[s]}<span class="n">${count(s)}</span></h2></div>`).join("")}
     ${lanes.map(([p, mine]) => {
       const running = mine.filter((r) => r.ticket.stage === "running" && r.status && r.status !== "gone").length;
-      return `<div class="lane"><div><strong>${esc(p.name)}</strong><span class="mono muted" style="font-size:calc(11.5 * var(--u))">${p.mode === "worktree" ? `${running} of ${p.slots} running` : "queue"}</span><button type="button" class="add" data-new-project="${esc(p.name)}" aria-label="New ticket in ${esc(p.name)}">+</button></div></div>
+      return `<div class="lane"><div><div class="lt"><strong>${esc(p.name)}</strong><span class="mono muted" style="font-size:calc(11.5 * var(--u))">${p.mode === "worktree" ? `${running} of ${p.slots} running` : "queue"}</span><button type="button" class="add" data-new-project="${esc(p.name)}" aria-label="New ticket in ${esc(p.name)}">+</button></div></div></div>
         ${columns().map((s) => `<div><div class="cell" data-drop="${s}" data-project="${esc(p.name)}">${inColumn(mine, s).map((r) => cardHtml(r, true)).join("")}</div></div>`).join("")}`; }).join("")}
   </div>`;
 }
