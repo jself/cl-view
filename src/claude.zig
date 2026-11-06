@@ -456,8 +456,8 @@ test trustYesSelected {
 }
 
 /// Wait (up to 60 s) for the prompt, then type `message` and press Enter.
-/// With `accept_trust`, answer the folder-trust dialog with yes (for
-/// worktrees cl made from a repo you put on the board).
+/// With `accept_trust`, answer the folder-trust dialog with yes (for a
+/// project you put on the board, or a worktree cl made from it).
 pub fn sendInitialMessage(ctx: Ctx, tmux_name: []const u8, message: []const u8, accept_trust: bool) !void {
     try waitForPrompt(ctx, tmux_name, accept_trust);
     ctx.sleepMs(300);

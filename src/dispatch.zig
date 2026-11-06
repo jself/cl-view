@@ -204,9 +204,11 @@ fn freshConversation(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allo
     try db.exec("UPDATE tickets SET tmux = '' WHERE tmux = ?1 AND id != ?2 AND stage = 'done'", .{ s.tmux_name, t.id });
 }
 
-/// A new Claude session for the ticket in `dir`, told about it first; with
-/// `resume_id`, it picks the ticket's earlier conversation back up.
-fn newSession(ctx: Ctx, cfg: config.Config, a: std.mem.Allocator, t: board.Ticket, dir: []const u8, name: []const u8, text: []const u8, session_id: *[36]u8, in_worktree: bool, resume_id: ?[]const u8) ![]const u8 {
+/// A new Claude session for the ticket in `dir` (the project's folder or a
+/// worktree of it), told about it first; with `resume_id`, it picks the
+/// ticket's earlier conversation back up. A project on the board is one the
+/// human trusts, so Claude's folder-trust dialog there gets a yes.
+fn newSession(ctx: Ctx, cfg: config.Config, a: std.mem.Allocator, t: board.Ticket, dir: []const u8, name: []const u8, text: []const u8, session_id: *[36]u8, resume_id: ?[]const u8) ![]const u8 {
     if (resume_id) |r| @memcpy(session_id, r[0..36]);
     const extra = try claudeArgs(ctx, cfg, a, t, resume_id orelse claude.uuid4(ctx, session_id), resume_id != null);
     return launch.create(ctx, cfg, .{
@@ -217,7 +219,7 @@ fn newSession(ctx: Ctx, cfg: config.Config, a: std.mem.Allocator, t: board.Ticke
         .detach = true,
         .extra = extra,
         .env = try ticketEnv(a, t),
-        .accept_trust = in_worktree and cfg.board.trust_worktrees,
+        .accept_trust = cfg.board.trust_projects,
     }) catch error.SessionFailed;
 }
 
@@ -594,7 +596,7 @@ fn startIn(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: 
     var sid: [36]u8 = undefined;
     switch (t.mode) {
         .worktree => {
-            const name = try newSession(ctx, cfg, a, t, wt.path, try std.ascii.allocLowerString(a, t.key), text, &sid, true, resume_id);
+            const name = try newSession(ctx, cfg, a, t, wt.path, try std.ascii.allocLowerString(a, t.key), text, &sid, resume_id);
             try board.setSession(ctx, db, t.id, name, &sid, wt.path, wt.branch);
         },
         .queue => if (open_here) {
@@ -613,7 +615,7 @@ fn startIn(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: 
             try board.setSession(ctx, db, t.id, target, &sid, "", "");
         } else {
             // No session yet: start the project's, named after it.
-            const name = try newSession(ctx, cfg, a, t, p.dir, std.fs.path.basename(p.dir), text, &sid, false, resume_id);
+            const name = try newSession(ctx, cfg, a, t, p.dir, std.fs.path.basename(p.dir), text, &sid, resume_id);
             try board.setSession(ctx, db, t.id, name, &sid, "", "");
         },
     }

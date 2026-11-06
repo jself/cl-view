@@ -275,7 +275,7 @@ both do the same things. The design notes are in `docs/board-plan.md`.
 board.dir = ~/.local/state/cl
 board.worktrees = ~/.local/share/cl/worktrees
 board.dispatch = true            # cl web starts queued tickets
-board.trust_worktrees = true     # say yes to Claude's folder-trust dialog in new worktrees
+board.trust_projects = true      # say yes to Claude's folder-trust dialog in project folders and worktrees
 ```
 
 Every ticket belongs to a project, which gives it a key prefix:

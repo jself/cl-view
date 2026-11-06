@@ -13,7 +13,8 @@
 //!   board.dir = ~/.local/state/cl       (where board.db lives)
 //!   board.worktrees = ~/.local/share/cl/worktrees
 //!   board.dispatch = true                (cl web starts queued tickets)
-//!   board.trust_worktrees = true         (yes to Claude's folder-trust dialog in ticket worktrees)
+//!   board.trust_projects = true          (yes to Claude's folder-trust dialog in project folders and
+//!                                          ticket worktrees; board.trust_worktrees is the old name)
 //!
 //!   gutter.path = ~/bin/gutter           (gutter for reviews; "" looks it up on PATH)
 //!
@@ -92,8 +93,9 @@ pub const Board = struct {
     worktrees: []const u8 = "",
     /// `cl web` starts queued tickets (the dispatcher).
     dispatch: bool = true,
-    /// Say yes to Claude's folder-trust dialog in new ticket worktrees.
-    trust_worktrees: bool = true,
+    /// Say yes to Claude's folder-trust dialog when the dispatcher starts a
+    /// session in a project's folder or a ticket worktree.
+    trust_projects: bool = true,
 };
 
 pub const Gutter = struct {
@@ -159,8 +161,8 @@ fn loadFile(ctx: Ctx) !Config {
             board.dir = try expandHomePerm(ctx, val);
         } else if (std.mem.eql(u8, key, "board.worktrees")) {
             board.worktrees = try expandHomePerm(ctx, val);
-        } else if (std.mem.eql(u8, key, "board.trust_worktrees")) {
-            board.trust_worktrees = !(std.mem.eql(u8, val, "false") or std.mem.eql(u8, val, "no") or std.mem.eql(u8, val, "off"));
+        } else if (std.mem.eql(u8, key, "board.trust_projects") or std.mem.eql(u8, key, "board.trust_worktrees")) {
+            board.trust_projects = !(std.mem.eql(u8, val, "false") or std.mem.eql(u8, val, "no") or std.mem.eql(u8, val, "off"));
         } else if (std.mem.eql(u8, key, "board.dispatch")) {
             board.dispatch = !(std.mem.eql(u8, val, "false") or std.mem.eql(u8, val, "no") or std.mem.eql(u8, val, "off"));
         } else if (std.mem.eql(u8, key, "gutter.path")) {
