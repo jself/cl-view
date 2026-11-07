@@ -44,6 +44,9 @@ pub const Seen = struct {
     parked: bool = false,
     /// Claude is working on it now (Needs You leaves it out until it stops).
     working: bool = false,
+    /// Its work is on a branch or jj change of its own that Merge can land:
+    /// no custom close asked for, and not finishing already.
+    mergeable: bool = false,
     flags: []const SeenFlag,
 
     /// In Needs You, as the board decides it: a flag the human hasn't hidden
@@ -138,7 +141,8 @@ pub fn snapshot(db: board.Db, a: std.mem.Allocator, sessions: Sessions) ![]Seen 
         \\  EXISTS (SELECT 1 FROM projects p WHERE p.name = t.project AND p.hidden != 0),
         \\  f.id, f.kind, f.detail, f.hidden,
         \\  EXISTS (SELECT 1 FROM parks k WHERE k.ticket = t.id),
-        \\  instr(t.autoreview, ?1) > 0
+        \\  instr(t.autoreview, ?1) > 0,
+        \\  (t.branch != '' OR t.change_id != '') AND t.custom_close = '' AND t.finishing = ''
         \\FROM tickets t LEFT JOIN flags f ON f.ticket = t.id AND f.cleared IS NULL
         \\ORDER BY t.id, f.id
     , .{board.reviewing_json});
@@ -164,6 +168,7 @@ pub fn snapshot(db: board.Db, a: std.mem.Allocator, sessions: Sessions) ![]Seen 
                 .project_hidden = project_hidden,
                 .parked = st.int(11) != 0,
                 .working = working,
+                .mergeable = st.int(13) != 0,
                 .flags = &.{},
             });
         }

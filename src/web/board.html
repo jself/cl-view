@@ -272,6 +272,10 @@
   dialog { padding: 0; border: 1px solid var(--line); border-radius: calc(16 * var(--u)); background: #17181b; color: var(--fg);
            width: min(calc(900 * var(--u)), calc(100vw - calc(24 * var(--u)))); max-height: calc(100dvh - calc(40 * var(--u))); }
   dialog::backdrop { background: rgba(5, 5, 6, .66); }
+  /* The compact view (a tapped notification): the item alone, the board out of sight behind it. */
+  @media (min-width: 641px) { #ticketDlg.focus { width: min(calc(640 * var(--u)), calc(100vw - calc(24 * var(--u)))); } }
+  #ticketDlg.focus::backdrop { background: var(--bg); }
+  .dlg .focusdone { display: flex; flex-direction: column; gap: calc(8 * var(--u)); padding: calc(12 * var(--u)); border: 1px solid var(--line); border-radius: calc(10 * var(--u)); background: var(--card); }
   .dlg { padding: calc(18 * var(--u)) calc(20 * var(--u)) calc(20 * var(--u)); display: flex; flex-direction: column; gap: calc(12 * var(--u)); }
   .dlg .head { display: flex; flex-wrap: wrap; align-items: center; gap: calc(10 * var(--u)); }
   .dlg h1 { margin: 0; font-size: calc(21 * var(--u)); font-weight: 600; overflow-wrap: anywhere; }
@@ -606,7 +610,9 @@ async function sendAnswer(key, answers, btn) {
   try { await act(key, "answer", { answers }, "Claude got your answer"); }
   catch { btn.disabled = false; btn.innerHTML = was; return; }
   finally { state.sending = false; }
-  if (state.open === key) document.getElementById("ticketDlg").close();
+  // The compact view stays, to say it's done; the popup has done its job.
+  if (state.open === key && state.focus) loadDetail(key);
+  else if (state.open === key) document.getElementById("ticketDlg").close();
 }
 
 const flagDetail = (f) => { try { return JSON.parse(f.detail); } catch { return null; } };
@@ -1089,7 +1095,8 @@ async function removeProject(name) {
 // ---- ticket popup ----
 // The terminal page shows the ticket's title above the session.
 function shellHref(t) { return `/?attach=${encodeURIComponent(t.tmux)}&ticket=${encodeURIComponent(t.key)}`; }
-async function openTicket(key, tab) {
+async function openTicket(key, tab, focus) {
+  setFocus(!!focus);
   state.open = key; state.tab = tab || null; state.editing = null; state.edit = {}; state.tailPinned = true; tail.text = null; state.picks = {}; state.other = {}; state.checks = {};
   document.getElementById("ticketBody").innerHTML = `<p class="muted">Loading ${esc(key)}…</p>`;
   const dlg = document.getElementById("ticketDlg"); if (!dlg.open) dlg.showModal();
@@ -1241,6 +1248,7 @@ function setRunFollow(k, follow) {
   for (const b of document.querySelectorAll("[data-run-bottom]")) if (b.dataset.runBottom === k) b.hidden = follow;
 }
 function renderDetailInner() {
+  if (state.focus) return renderFocus();
   const d = state.detail; const t = d.ticket; const tabs = tabsFor(d);
   if (!state.tab || !tabs.some(([k]) => k === state.tab)) state.tab = tabs[0][0];
   const liveSession = t.tmux && d.status && d.status !== "gone";
@@ -1288,6 +1296,46 @@ function renderDetailInner() {
     ${acts.length ? `<div class="actions">${acts.join("")}</div>` : ""}${parkBox(t)}${depBox(d)}
     <div class="tabs" role="tablist">${tabs.map(([k, l]) => `<button type="button" role="tab" class="${state.tab === k ? "on" : ""}" aria-selected="${state.tab === k}" data-tab="${k}">${esc(l)}</button>`).join("")}</div>
     <div id="tabBody">${state.tab === tabs[0][0] && (t.body || "").trim() ? `<div class="desc">${descHtml(t.body)}</div>` : ""}${tabHtml(d)}</div>`;
+}
+// ---- the compact view ----
+// A tapped notification opens just its item (/board?open=CL-3&tab=plan&focus=1):
+// the tab that answers it (a question with its options, the plan with Approve
+// and a box for feedback, the review with Merge), without the rest of the
+// ticket or the board. Full ticket shows the rest; closing it shows the board.
+function setFocus(on) {
+  state.focus = on;
+  document.getElementById("ticketDlg").classList.toggle("focus", on);
+}
+// The tab each flag is answered on (push.zig tabFor; the Needs you card's main button).
+const flagTab = (f) => f.kind === "review" ? (f.detail === "plan" ? "plan" : "review") : f.kind === "testing" ? "test"
+  : f.kind === "after-merge" ? "after-merge" : f.kind === "merge-failed" || f.kind === "unmerged" ? "landing" : f.kind === "idle" ? "session"
+  : f.kind === "question" || f.kind === "input" ? "needs" : "";
+function renderFocus() {
+  const d = state.detail; const t = d.ticket; const tabs = tabsFor(d);
+  const asking = t.flags.filter((f) => asksStill(t, f) && !t.park);
+  // The flag the notification was about (by its tab), else whatever else still asks.
+  const f = asking.find((x) => flagTab(x) === state.tab) || asking[0] || null;
+  if (f && !state.tab) state.tab = flagTab(f);
+  const tab = tabs.some(([k]) => k === state.tab) ? state.tab : "";
+  const waiting = f && !(f.kind === "review" && f.detail === "plan" && !planReady(t));
+  const others = state.data ? state.data.tickets.filter((r) => needsMe(r) && r.ticket.key !== t.key && projectShown(r.ticket.project)).length + shownAlerts().length : 0;
+  const into = d.main_branch || "trunk";
+  const merge = f && (f.kind === "testing" || (f.kind === "review" && f.detail !== "plan")) && (t.stage === "review" || t.stage === "testing") && (t.branch || t.change) && !t.custom_close && !t.finishing
+    ? `<button type="button" class="btn primary" data-merge-now="1" title="Move it to Done, merging its work into ${esc(into)} first">Merge into ${esc(into)}</button>` : "";
+  // The After merge and Not merged tabs have their own Dismiss.
+  const dismiss = f && dismissable(f) && !["after-merge", "landing"].includes(tab) ? `<button type="button" class="btn" data-unflag="${esc(f.kind)}" title="${DISMISS_TIP}">Dismiss</button>` : "";
+  const done = waiting ? "" : `<div class="focusdone"><strong>${t.finishing ? "It's finishing: " + (t.finishing === "merge" ? "its work is being merged" : "Claude is on it") : "Nothing here waits on you now."}</strong>
+    <span class="muted">${others ? `${others} other item${others > 1 ? "s" : ""} in Needs you.` : "Needs you is empty."}</span>
+    <div class="actions"><button type="button" class="btn primary" id="focusBoard">Open the board</button></div></div>`;
+  // The tab's own content says what's asked; the rest get the flag's words.
+  const say = f && waiting && !["needs", "plan", "review"].includes(tab) ? `<div>${esc(askText(t, f))}</div>` : "";
+  document.getElementById("ticketBody").innerHTML = `
+    <div class="head"><span class="mono muted">${esc(t.key)} · ${esc(t.project)}</span>${f ? `<span class="pills"><span class="pill ${flagClass(f.kind)}">${esc(flagLabel(f))}</span></span>` : ""}
+      <span class="hctl"><button type="button" class="btn" id="focusFull" title="The whole ticket: its other tabs, stage and actions">Full ticket</button>
+      <button type="button" class="xclose" id="closeDlg" title="Close, to the board" aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button></span></div>
+    <h1>${esc(t.title)}</h1>
+    ${done}${say}${merge || dismiss ? `<div class="actions">${merge}${dismiss}</div>` : ""}
+    ${tab ? `<div id="tabBody">${tabHtml(d)}</div>` : ""}`;
 }
 // Blocked by: what it waits on (links you add here or with `cl ticket edit
 // --after`, any project, and the sub-ticket before it), and what waits on it.
@@ -2053,7 +2101,8 @@ async function onClick(e) {
   if (el.id === "reloadBtn") return location.reload();
   if (el.id === "closeQuick") return document.getElementById("quickDlg").close();
   if (el.id === "closePark") return document.getElementById("parkDlg").close();
-  if (el.id === "closeDlg") { document.getElementById("ticketDlg").close(); return; }
+  if (el.id === "closeDlg" || el.id === "focusBoard") { document.getElementById("ticketDlg").close(); return; }
+  if (el.id === "focusFull") { setFocus(false); renderDetail(); return; }
   if (ds.finish === "tell") return finishTell();
   if (ds.finish !== undefined) { const dlg = document.getElementById("finishDlg"); dlg.dataset.then = document.getElementById("finishThen")?.value.trim() || ""; dlg.close(ds.finish); return; }
   if (el.id === "spinOff" || el.id === "spinCancel") { document.getElementById("subsDlg").close(el.id === "spinOff" ? "spin" : ""); return; }
@@ -2476,7 +2525,7 @@ async function onSubmit(e) {
   }
 }
 document.addEventListener("submit", (e) => { e.preventDefault(); busyWhile(e.submitter || e.target.querySelector("[type=submit]"), onSubmit(e)); });
-document.getElementById("ticketDlg").addEventListener("close", () => { state.open = null; state.detail = null; state.moreOpen = false; });
+document.getElementById("ticketDlg").addEventListener("close", () => { state.open = null; state.detail = null; state.moreOpen = false; setFocus(false); });
 // The ticket's ⋯ menu: kept in state so a redraw leaves it as it was. Escape closes it (not the dialog), and the arrows walk it.
 function setMore(open, focus = true) {
   state.moreOpen = open;
@@ -2525,7 +2574,11 @@ async function pushSend(sub, explicit) {
 }
 async function pushInit() {
   if (!pushable()) return;
-  navigator.serviceWorker.addEventListener("message", (e) => { if (e.data?.type === "open" && e.data.key) openTicket(e.data.key, e.data.tab || null); });
+  navigator.serviceWorker.addEventListener("message", (e) => {
+    if (e.data?.type === "open" && e.data.key) openTicket(e.data.key, e.data.tab || null, e.data.focus);
+    // A notification's button did something: show it.
+    if (e.data?.type === "refresh") refresh();
+  });
   try {
     push.reg = await navigator.serviceWorker.register("/sw.js");
     const sub = await push.reg.pushManager.getSubscription();
@@ -2666,11 +2719,12 @@ async function restorePlace() {
   if (place.tailPinned !== false) { tail.term?.scrollToBottom(); setPinned(true); }
 }
 
-// A tapped notification opens the board on its ticket (/board?open=CL-3&tab=plan).
+// A tapped notification opens the board on its item (/board?open=CL-3&tab=plan&focus=1:
+// the compact view, see renderFocus).
 const deepLink = new URLSearchParams(location.search);
 if (deepLink.get("open")) {
   history.replaceState(null, "", "/board");
-  refresh().then(() => openTicket(deepLink.get("open"), deepLink.get("tab") || null));
+  refresh().then(() => openTicket(deepLink.get("open"), deepLink.get("tab") || null, deepLink.get("focus") === "1"));
 } else restorePlace();
 pushInit();
 // In a background tab, every 30 s: enough to keep the title's count current.

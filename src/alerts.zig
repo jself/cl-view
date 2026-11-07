@@ -63,12 +63,39 @@ pub fn list(ctx: Ctx, db: board.Db, a: std.mem.Allocator, hidden_projects: bool)
 /// Dismiss the alert of the session `tmux_name` (a cl session); false if it
 /// had none (already cleared, or the session is gone).
 pub fn dismiss(ctx: Ctx, a: std.mem.Allocator, tmux_name: []const u8) !bool {
-    for (try tmux.listAll(ctx, a)) |s| if (std.mem.eql(u8, s.tmux_name, tmux_name)) {
-        if (s.alert.len == 0) return false;
-        try tmux.clearAlert(ctx, s.tmux_name);
-        return true;
+    return dismissAt(ctx, a, tmux_name, null);
+}
+
+/// `dismiss`, only if the alert pending is the one raised at `at` (null: any).
+/// One raised since replaced it (a session holds one), and stays: false.
+pub fn dismissAt(ctx: Ctx, a: std.mem.Allocator, tmux_name: []const u8, at: ?i64) !bool {
+    const s = pending(try tmux.listAll(ctx, a), tmux_name, at) orelse return false;
+    try tmux.clearAlert(ctx, s.tmux_name);
+    return true;
+}
+
+/// The session `tmux_name` among `sessions`, if it has an alert pending (and,
+/// given `at`, the one raised then).
+pub fn pending(sessions: []const tmux.Session, tmux_name: []const u8, at: ?i64) ?tmux.Session {
+    for (sessions) |s| if (std.mem.eql(u8, s.tmux_name, tmux_name)) {
+        if (s.alert.len == 0) return null;
+        if (at) |t| if (s.alert_at != t) return null;
+        return s;
     };
-    return false;
+    return null;
+}
+
+test "pending: only the alert asked about, not one raised since" {
+    const base: tmux.Session = .{ .tmux_name = "cl_a_1", .name = "a", .dir = "", .profile = "", .created = 0, .pane_title = "", .pane_dead = false, .activity = 0, .role = "", .alert = "look", .alert_at = 100 };
+    var none = base;
+    none.tmux_name = "cl_b_2";
+    none.alert = "";
+    const ss = [_]tmux.Session{ base, none };
+    try std.testing.expect(pending(&ss, "cl_a_1", 100) != null);
+    try std.testing.expect(pending(&ss, "cl_a_1", null) != null);
+    try std.testing.expect(pending(&ss, "cl_a_1", 99) == null);
+    try std.testing.expect(pending(&ss, "cl_b_2", null) == null);
+    try std.testing.expect(pending(&ss, "cl_gone", null) == null);
 }
 
 /// The text as one line: the session listing (tmux.list_format) is tab- and

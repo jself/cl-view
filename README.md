@@ -391,8 +391,10 @@ microphone for voice (below).
 The phone (or any browser on the HTTPS address) can get a notification when
 something lands in Needs You: a question or permission prompt, a plan or
 work ready for you, work that didn't land, a parked ticket waking, Claude
-idle, or a `cl alert`. Tapping it opens the board on that ticket, at the tab
-that answers it. On the board, Projects → **Notifications** → **Turn on for
+idle, or a `cl alert`. Tapping it opens a compact view of just that item:
+a question with its options, the plan with Approve plan and a box for
+feedback, the review with Merge (Full ticket shows the rest, and closing it
+shows the board). On the board, Projects → **Notifications** → **Turn on for
 this device**, and allow them. On an iPhone this works only in the app added
 to the home screen (iOS 16.4 or later), not in Safari.
 
@@ -401,6 +403,14 @@ to the home screen (iOS 16.4 or later), not in Safari.
   stays removed until you press Turn on on that device again); picks
   which kinds notify; and sets quiet hours (in each device's own time).
   What comes up in quiet hours waits in Needs You without a notification.
+- On Android the notification also has buttons that act there and then,
+  signed in as the board is on that phone: a question's options (a single
+  question with one answer) or a permission prompt's, **Approve plan**,
+  **Merge** (work in Review or Testing with a branch or change of its own),
+  or **Dismiss** (an alert, or a flag that doesn't wait on you). It says
+  what it's doing at once, then what happened; an item dealt with since
+  (on the board, or by Claude moving on) is left alone and says so. Chrome
+  shows two buttons; iOS shows none, so there the compact view is the way.
 - Each thing notifies once, when it is new: a flag that leaves Needs You
   while Claude works on it and comes back doesn't notify again. What lands
   while `cl web` restarts (after a merge, say) still notifies once it is

@@ -10,7 +10,9 @@
 //! VAPID (RFC 8292) to say it's us, the payload encrypted for the device
 //! (RFC 8291, aes128gcm). Push services: FCM for Chrome on Android, Apple's
 //! for an iPhone (only for the app added to the home screen), Mozilla's for
-//! Firefox. Tapping a notification opens the board on its ticket.
+//! Firefox. Tapping a notification opens the board on just that item (its
+//! compact view); on Android it also has buttons that act on it there and
+//! then (`act`): answer, approve the plan, merge, dismiss.
 //!
 //! The VAPID key pair is made on first use and kept in the board database;
 //! a new one would make every device subscribe again.
@@ -20,6 +22,7 @@ const config = @import("config.zig");
 const board = @import("board.zig");
 const alerts = @import("alerts.zig");
 const ticket_watch = @import("ticket_watch.zig");
+const actions = @import("actions.zig");
 
 const P256 = std.crypto.ecc.P256;
 const Ecdsa = std.crypto.sign.ecdsa.EcdsaP256Sha256;
@@ -104,7 +107,77 @@ pub const Item = struct {
     seq: i64 = 0,
     /// The ticket's tab that answers it (the board's ticket popup).
     tab: []const u8 = "needs",
+    /// The buttons on its notification (Android shows them; iOS doesn't).
+    actions: []const Action = &.{},
+    /// A question or prompt: which one (`askHash` of what it asked). A
+    /// newer one can take over the same flag row, so an answer carries this
+    /// and `act` refuses it once the flag asks something else.
+    ask: []const u8 = "",
 };
+
+/// What a question or permission flag asks, as a short hash of its detail.
+pub fn askHash(a: std.mem.Allocator, detail: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(a, "{x:0>16}", .{std.hash.Wyhash.hash(0, detail)});
+}
+
+/// A button on a notification: `action` is what the service worker posts
+/// back to /api/needs/act (see `act`), `title` its label.
+pub const Action = struct {
+    action: []const u8,
+    title: []const u8,
+};
+
+const dismiss_only = [_]Action{.{ .action = "dismiss", .title = "Dismiss" }};
+
+/// The one-tap answers to a flag, as its Needs You card offers them: a lone
+/// single-choice question's options, a permission prompt's first two, Approve
+/// plan, Merge (a review or test of work Merge can land), or Dismiss (a flag
+/// that doesn't wait on the human). The service worker shows as many as the
+/// phone takes (two on Chrome for Android), in this order.
+fn actionsFor(a: std.mem.Allocator, t: ticket_watch.Seen, f: ticket_watch.SeenFlag) ![]const Action {
+    const eql = std.mem.eql;
+    var out: std.ArrayList(Action) = .empty;
+    if (eql(u8, f.kind, board.flag_question) or eql(u8, f.kind, board.flag_input)) {
+        const parsed = std.json.parseFromSliceLeaky(std.json.Value, a, f.detail, .{}) catch return out.items;
+        if (parsed != .object) return out.items;
+        if (eql(u8, f.kind, board.flag_question)) {
+            const qs = parsed.object.get("questions") orelse return out.items;
+            if (qs != .array or qs.array.items.len != 1 or qs.array.items[0] != .object) return out.items;
+            const q = qs.array.items[0].object;
+            if (q.get("multiSelect")) |m| if (m == .bool and m.bool) return out.items;
+            const opts = q.get("options") orelse return out.items;
+            if (opts != .array) return out.items;
+            for (opts.array.items, 1..) |o, n| {
+                if (n > 3) break;
+                const label = if (o == .object) o.object.get("label") orelse continue else continue;
+                if (label != .string) continue;
+                try out.append(a, .{ .action = try std.fmt.allocPrint(a, "answer:{d}", .{n}), .title = label.string });
+            }
+        } else {
+            const opts = parsed.object.get("options") orelse return out.items;
+            if (opts != .array) return out.items;
+            for (opts.array.items) |o| {
+                if (out.items.len == 2) break;
+                if (o != .object) continue;
+                const n = o.object.get("n") orelse continue;
+                const label = o.object.get("label") orelse continue;
+                if (n != .integer or label != .string) continue;
+                try out.append(a, .{ .action = try std.fmt.allocPrint(a, "answer:{d}", .{n.integer}), .title = label.string });
+            }
+        }
+        return out.items;
+    }
+    if (eql(u8, f.kind, board.flag_review) and t.stage == .planning) {
+        if (eql(u8, f.detail, "plan")) try out.append(a, .{ .action = "approve", .title = "Approve plan" });
+        return out.items;
+    }
+    if (eql(u8, f.kind, board.flag_review) or eql(u8, f.kind, board.flag_testing)) {
+        if (t.mergeable and (t.stage == .review or t.stage == .testing)) try out.append(a, .{ .action = "merge", .title = "Merge" });
+        return out.items;
+    }
+    if (!board.waitingFlag(f.kind)) return &dismiss_only;
+    return out.items;
+}
 
 /// What is in Needs You now, as `Item`s: each ticket's asking flags, then alerts.
 pub fn items(a: std.mem.Allocator, tickets: []const ticket_watch.Seen, al: []const alerts.Alert) ![]Item {
@@ -120,6 +193,8 @@ pub fn items(a: std.mem.Allocator, tickets: []const ticket_watch.Seen, al: []con
             .body = if (detail.len > 0) try std.fmt.allocPrint(a, "{s}\n{s}", .{ detail, t.title }) else t.title,
             .tab = tabFor(f.kind, std.mem.eql(u8, f.detail, "plan")),
             .seq = f.id,
+            .actions = try actionsFor(a, t, f),
+            .ask = if (Group.ofFlag(f.kind) == .ask) try askHash(a, f.detail) else "",
         });
     };
     for (al) |x| try out.append(a, .{
@@ -133,6 +208,7 @@ pub fn items(a: std.mem.Allocator, tickets: []const ticket_watch.Seen, al: []con
             try std.fmt.allocPrint(a, "Alert from {s}", .{if (x.operator) "the operator" else x.from}),
         .body = x.text,
         .seq = x.at,
+        .actions = &dismiss_only,
     });
     return out.items;
 }
@@ -210,10 +286,13 @@ fn tabFor(kind: []const u8, detail_plan: bool) []const u8 {
 }
 
 /// The message the service worker shows (src/web/sw.js), as JSON. `url`
-/// opens the board on the ticket and its tab; `item` and `kind` are there
-/// for actions on the notification.
+/// opens the board's compact view of the item (`focus`: the ticket's tab that
+/// answers it, alone); `item` and `actions` are what its buttons send to
+/// /api/needs/act.
 pub fn payload(a: std.mem.Allocator, it: Item, at: i64) ![]const u8 {
-    const url = if (it.key.len > 0)
+    const url = if (it.key.len > 0 and it.group != .alert)
+        try std.fmt.allocPrint(a, "/board?open={s}&tab={s}&focus=1", .{ it.key, it.tab })
+    else if (it.key.len > 0)
         try std.fmt.allocPrint(a, "/board?open={s}&tab={s}", .{ it.key, it.tab })
     else
         "/board";
@@ -227,8 +306,72 @@ pub fn payload(a: std.mem.Allocator, it: Item, at: i64) ![]const u8 {
         .key = it.key,
         .kind = it.kind,
         .item = it.id,
+        .actions = it.actions,
+        .ask = it.ask,
         .at = at,
     }, .{})});
+}
+
+// ---- acting from a notification ----
+
+/// What a notification's button did, said back on the phone.
+pub const Acted = struct { message: []const u8 };
+
+/// Do what a notification's button says (`Action.action`) to the item it
+/// was about (`Item.id`), as the board's own buttons would. The item is
+/// looked up again first: one dealt with since (on the board, by another
+/// device, or Claude moving on) is error.Handled, so an old notification
+/// never answers a newer question. An answer also carries `ask` (`Item.ask`):
+/// a newer question in the same flag row asks something else, and is Handled
+/// too. So is an alert replaced by a newer one from the same session.
+pub fn act(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, item: []const u8, action: []const u8, ask: []const u8) !Acted {
+    const eql = std.mem.eql;
+    if (item.len < 2) return error.BadInput;
+    if (item[0] == 'a') {
+        if (!eql(u8, action, "dismiss")) return error.BadAction;
+        const i = std.mem.lastIndexOfScalar(u8, item, '@') orelse return error.BadInput;
+        const at = std.fmt.parseInt(i64, item[i + 1 ..], 10) catch return error.BadInput;
+        if (!try alerts.dismissAt(ctx, a, item[1..i], at)) return error.Handled;
+        return .{ .message = "Alert dismissed" };
+    }
+    if (item[0] != 'f') return error.BadInput;
+    const id = std.fmt.parseInt(i64, item[1..], 10) catch return error.BadInput;
+    var st = try db.query("SELECT t.key, f.kind, f.detail, f.cleared IS NULL FROM flags f JOIN tickets t ON t.id = f.ticket WHERE f.id = ?1", .{id});
+    defer st.finalize();
+    if (!try st.step()) return error.Handled;
+    if (st.int(3) == 0) return error.Handled;
+    const key = try st.dupe(a, 0);
+    const kind = try st.dupe(a, 1);
+    const detail = try st.dupe(a, 2);
+    const t = try board.getTicket(db, a, key);
+    if (eql(u8, action, "approve")) {
+        if (!eql(u8, kind, board.flag_review) or !eql(u8, detail, "plan") or t.stage != .planning) return error.BadAction;
+        _ = try actions.approve(ctx, db, a, key, false, .close);
+        return .{ .message = try std.fmt.allocPrint(a, "{s}: plan approved; a new session builds it", .{key}) };
+    }
+    if (eql(u8, action, "merge")) {
+        if (!eql(u8, kind, board.flag_review) and !eql(u8, kind, board.flag_testing)) return error.BadAction;
+        if (t.stage != .review and t.stage != .testing) return error.BadAction;
+        if (t.finishing.len > 0) return error.Handled;
+        if (t.branch.len == 0 and t.change.len == 0) return error.BadAction;
+        if (t.custom_close.len > 0) return error.CustomClose;
+        try actions.move(ctx, cfg, db, a, key, .done, false, .merge);
+        return .{ .message = try std.fmt.allocPrint(a, "{s}: merging it; it goes to Done once it lands", .{key}) };
+    }
+    if (std.mem.startsWith(u8, action, "answer:")) {
+        if (!eql(u8, kind, board.flag_question) and !eql(u8, kind, board.flag_input)) return error.BadAction;
+        const n = action["answer:".len..];
+        _ = std.fmt.parseInt(u8, n, 10) catch return error.BadAction;
+        if (!eql(u8, ask, try askHash(a, detail))) return error.Handled;
+        try actions.answer(ctx, cfg, db, a, key, &.{n});
+        return .{ .message = try std.fmt.allocPrint(a, "{s}: Claude got your answer", .{key}) };
+    }
+    if (eql(u8, action, "dismiss")) {
+        if (board.waitingFlag(kind)) return error.WaitingFlag;
+        if (!try board.dismissFlag(ctx, db, a, key, kind)) return error.Handled;
+        return .{ .message = try std.fmt.allocPrint(a, "{s}: dismissed", .{key}) };
+    }
+    return error.BadAction;
 }
 
 // ---- settings and devices ----
@@ -953,7 +1096,7 @@ test "items and pick: what notifies, as Needs You has it" {
 
     // The message: the board opens on the ticket's tab.
     const m = try std.json.parseFromSliceLeaky(struct { url: []const u8, tag: []const u8, item: []const u8 }, a, try payload(a, its[2], 5), .{ .ignore_unknown_fields = true });
-    try testing.expectEqualStrings("/board?open=CL-2&tab=plan", m.url);
+    try testing.expectEqualStrings("/board?open=CL-2&tab=plan&focus=1", m.url);
     try testing.expectEqualStrings("CL-2", m.tag);
     const am = try std.json.parseFromSliceLeaky(struct { url: []const u8, tag: []const u8 }, a, try payload(a, its[3], 5), .{ .ignore_unknown_fields = true });
     try testing.expectEqualStrings("/board", am.url);
@@ -1074,4 +1217,127 @@ test "plan: devices that are off or in quiet hours get nothing" {
     try testing.expectEqual(@as(usize, 1), sends[0].to.len);
     try testing.expectEqual(@as(i64, 1), sends[0].to[0].id);
     try testing.expectEqual(@as(usize, 0), (try plan(a, &.{q}, s, &.{ off, night }, noon)).len);
+}
+
+test "actionsFor: the buttons each kind of item gets" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const t: ticket_watch.Seen = .{ .id = 1, .key = "CL-1", .project = "p", .title = "T", .stage = .running, .hidden = false, .flags = &.{} };
+    const names = struct {
+        fn of(a2: std.mem.Allocator, acts: []const Action) ![]const u8 {
+            var out: std.ArrayList(u8) = .empty;
+            for (acts) |x| try out.print(a2, "{s}={s};", .{ x.action, x.title });
+            return out.items;
+        }
+    }.of;
+    // A lone single-choice question: its first three options.
+    const q = try actionsFor(a, t, .{ .id = 1, .kind = "question", .detail = "{\"questions\":[{\"question\":\"Port?\",\"options\":[{\"label\":\"8080\"},{\"label\":\"9090\"},{\"label\":\"Either\"},{\"label\":\"None\"}]}]}" });
+    try testing.expectEqualStrings("answer:1=8080;answer:2=9090;answer:3=Either;", try names(a, q));
+    // Two questions, or a multi-select one: the compact view answers those.
+    try testing.expectEqual(@as(usize, 0), (try actionsFor(a, t, .{ .id = 1, .kind = "question", .detail = "{\"questions\":[{\"question\":\"A?\",\"options\":[{\"label\":\"x\"}]},{\"question\":\"B?\"}]}" })).len);
+    try testing.expectEqual(@as(usize, 0), (try actionsFor(a, t, .{ .id = 1, .kind = "question", .detail = "{\"questions\":[{\"question\":\"A?\",\"multiSelect\":true,\"options\":[{\"label\":\"x\"}]}]}" })).len);
+    // A permission prompt: its first two options, by their numbers.
+    const p = try actionsFor(a, t, .{ .id = 1, .kind = "input", .detail = "{\"tool\":\"Bash\",\"options\":[{\"n\":1,\"label\":\"Yes\"},{\"n\":2,\"label\":\"Yes, always\"},{\"n\":3,\"label\":\"No\"}]}" });
+    try testing.expectEqualStrings("answer:1=Yes;answer:2=Yes, always;", try names(a, p));
+    // A plan ready: Approve plan.
+    var planning = t;
+    planning.stage = .planning;
+    try testing.expectEqualStrings("approve=Approve plan;", try names(a, try actionsFor(a, planning, .{ .id = 1, .kind = "review", .detail = "plan" })));
+    // Review or test: Merge, only for work Merge can land.
+    var rev = t;
+    rev.stage = .review;
+    try testing.expectEqual(@as(usize, 0), (try actionsFor(a, rev, .{ .id = 1, .kind = "review", .detail = "" })).len);
+    rev.mergeable = true;
+    try testing.expectEqualStrings("merge=Merge;", try names(a, try actionsFor(a, rev, .{ .id = 1, .kind = "review", .detail = "" })));
+    rev.stage = .testing;
+    try testing.expectEqualStrings("merge=Merge;", try names(a, try actionsFor(a, rev, .{ .id = 1, .kind = "testing", .detail = "" })));
+    // What doesn't wait on you: Dismiss. What does (idle, a conflict): nothing.
+    try testing.expectEqualStrings("dismiss=Dismiss;", try names(a, try actionsFor(a, t, .{ .id = 1, .kind = "after-merge", .detail = "boom" })));
+    try testing.expectEqual(@as(usize, 0), (try actionsFor(a, t, .{ .id = 1, .kind = "idle", .detail = "" })).len);
+    try testing.expectEqual(@as(usize, 0), (try actionsFor(a, t, .{ .id = 1, .kind = "conflict", .detail = "a.zig" })).len);
+
+    // The payload carries them for the service worker.
+    const its = try items(a, &.{.{ .id = 1, .key = "CL-1", .project = "p", .title = "T", .stage = .planning, .hidden = false, .flags = &.{.{ .id = 4, .kind = "review", .detail = "plan" }} }}, &.{});
+    const m = try std.json.parseFromSliceLeaky(struct { item: []const u8, actions: []const Action }, a, try payload(a, its[0], 5), .{ .ignore_unknown_fields = true });
+    try testing.expectEqualStrings("f4", m.item);
+    try testing.expectEqualStrings("approve", m.actions[0].action);
+    // A question's carries which question it is.
+    const qs = try items(a, &.{.{ .id = 1, .key = "CL-1", .project = "p", .title = "T", .stage = .running, .hidden = false, .flags = &.{.{ .id = 5, .kind = "question", .detail = "{}" }} }}, &.{});
+    const qm = try std.json.parseFromSliceLeaky(struct { ask: []const u8 }, a, try payload(a, qs[0], 5), .{ .ignore_unknown_fields = true });
+    try testing.expectEqualStrings(try askHash(a, "{}"), qm.ask);
+}
+
+test "act: a notification's button does what the board's would, once" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env: std.process.Environ.Map = .init(a);
+    const ctx: Ctx = .{ .io = testing.io, .gpa = testing.allocator, .perm = a, .env = &env, .home = "/tmp", .tmux_blocked = true };
+    const cfg: config.Config = .{ .profiles = &.{}, .default = "", .operator = "" };
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "qa", .dir = "/x" });
+    const flagItem = struct {
+        fn of(a2: std.mem.Allocator, db2: board.Db, key: []const u8, kind: []const u8) ![]const u8 {
+            const id = (try db2.int("SELECT f.id FROM flags f JOIN tickets t ON t.id = f.ticket WHERE t.key = ?1 AND f.kind = ?2 AND f.cleared IS NULL", .{ key, kind })) orelse return error.NoFlag;
+            return std.fmt.allocPrint(a2, "f{d}", .{id});
+        }
+    }.of;
+
+    // Approve plan: to Queued; the same button again finds it dealt with.
+    const k = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Plan it", .stage = .planning });
+    try board.setFlag(ctx, db, a, k, "review", "auto", "plan");
+    const plan_item = try flagItem(a, db, k, "review");
+    try testing.expectError(error.BadAction, act(ctx, cfg, db, a, plan_item, "merge", ""));
+    try testing.expectError(error.BadAction, act(ctx, cfg, db, a, plan_item, "answer:1", ""));
+    _ = try act(ctx, cfg, db, a, plan_item, "approve", "");
+    try testing.expectEqual(board.Stage.queued, (try board.getTicket(db, a, k)).stage);
+    try testing.expectError(error.Handled, act(ctx, cfg, db, a, plan_item, "approve", ""));
+
+    // Dismiss: only what doesn't wait on you; then it's gone.
+    try board.setFlag(ctx, db, a, k, "after-merge", "auto", "make failed");
+    const am = try flagItem(a, db, k, "after-merge");
+    _ = try act(ctx, cfg, db, a, am, "dismiss", "");
+    try testing.expectError(error.Handled, act(ctx, cfg, db, a, am, "dismiss", ""));
+    try board.setFlag(ctx, db, a, k, "conflict", "auto", "a.zig");
+    try testing.expectError(error.WaitingFlag, act(ctx, cfg, db, a, try flagItem(a, db, k, "conflict"), "dismiss", ""));
+
+    // Merge: not for work with no branch of its own.
+    const r = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Review it", .stage = .review });
+    try board.setFlag(ctx, db, a, r, "review", "auto", "");
+    try testing.expectError(error.BadAction, act(ctx, cfg, db, a, try flagItem(a, db, r, "review"), "merge", ""));
+
+    // Merge: past act's checks to the move itself (a git branch with no
+    // session to merge it in); not while finishing, nor with a custom close.
+    try db.exec("UPDATE tickets SET branch = 'r' WHERE key = ?1", .{r});
+    const rev = try flagItem(a, db, r, "review");
+    try testing.expectError(error.NoSession, act(ctx, cfg, db, a, rev, "merge", ""));
+    try db.exec("UPDATE tickets SET custom_close = 'leave it' WHERE key = ?1", .{r});
+    try testing.expectError(error.CustomClose, act(ctx, cfg, db, a, rev, "merge", ""));
+    try db.exec("UPDATE tickets SET custom_close = '', finishing = 'merge' WHERE key = ?1", .{r});
+    try testing.expectError(error.Handled, act(ctx, cfg, db, a, rev, "merge", ""));
+
+    // Answers: only to the question the notification showed. A newer one in
+    // the same flag row (its detail replaced) is Handled.
+    const q = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Ask", .stage = .running });
+    const first = "{\"questions\":[{\"question\":\"Port?\"}]}";
+    try board.setFlag(ctx, db, a, q, "question", "auto", first);
+    const qi = try flagItem(a, db, q, "question");
+    try testing.expectError(error.BadAction, act(ctx, cfg, db, a, qi, "answer:x", try askHash(a, first)));
+    try testing.expectError(error.WaitingFlag, act(ctx, cfg, db, a, qi, "dismiss", try askHash(a, first)));
+    // The right question: on to the session (none here).
+    try testing.expectError(error.NoSession, act(ctx, cfg, db, a, qi, "answer:1", try askHash(a, first)));
+    try testing.expectError(error.Handled, act(ctx, cfg, db, a, qi, "answer:1", ""));
+    try board.setFlag(ctx, db, a, q, "question", "auto", "{\"questions\":[{\"question\":\"Delete it?\"}]}");
+    try testing.expectEqualStrings(qi, try flagItem(a, db, q, "question"));
+    try testing.expectError(error.Handled, act(ctx, cfg, db, a, qi, "answer:1", try askHash(a, first)));
+
+    // Alerts: only Dismiss, and only a well-formed id.
+    try testing.expectError(error.BadAction, act(ctx, cfg, db, a, "acl_x@5", "approve", ""));
+    try testing.expectError(error.BadInput, act(ctx, cfg, db, a, "acl_x@soon", "dismiss", ""));
+
+    try testing.expectError(error.BadInput, act(ctx, cfg, db, a, "fx", "dismiss", ""));
+    try testing.expectError(error.Handled, act(ctx, cfg, db, a, "f9999", "dismiss", ""));
 }

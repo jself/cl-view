@@ -16,6 +16,7 @@
 //!                                       autoreview-stop autoreview-send autoreview-gutter
 //!                                       autoreview-edit plan
 //!   POST /api/flags/dismiss             dismiss one kind of flag on several tickets
+//!   POST /api/needs/act                 a notification's button: {item, action} (push.act)
 //!   POST /api/alert/<tmux>/dismiss      clear a session's alert (cl alert)
 //!   POST /api/project                   add a project
 //!   POST /api/project/<name>/<action>   set rm hide unhide after-merge
@@ -156,6 +157,8 @@ pub fn handle(ctx: Ctx, cfg: config.Config, req: *std.http.Server.Request, path:
             error.NoSuchBranch => .{ .bad_request, "the project's repo has no branch or bookmark by that name (create it first)" },
             error.WaitingFlag => .{ .bad_request, "that flag is waiting on you (a question, a prompt, a review, a test or a conflict); answer it or act on the ticket instead" },
             error.NothingAsked => .{ .conflict, "nothing is waiting for an answer" },
+            error.Handled => .{ .conflict, "that's been dealt with already" },
+            error.BadAction => .{ .bad_request, "that button doesn't fit where it stands now; open it on the board" },
             error.BadAnswer => .{ .bad_request, "one answer per question: an option number or your own words (several numbers for a multi-select one)" },
             error.GutterFailed => .{ .internal_server_error, "gutter didn't start" },
             error.GutterMissing => .{ .conflict, review.not_installed },
@@ -214,6 +217,12 @@ const Body = struct {
     text: ?[]const u8 = null,
     send: ?bool = null,
     kind: ?[]const u8 = null,
+    /// needs/act: the notification's item (push.Item.id) and its button
+    /// (push.Action.action).
+    item: ?[]const u8 = null,
+    action: ?[]const u8 = null,
+    /// needs/act answering: which question it answers (push.Item.ask).
+    ask: ?[]const u8 = null,
     /// flags/dismiss: the tickets whose `kind` flag goes.
     keys: ?[]const []const u8 = null,
     detail: ?[]const u8 = null,
@@ -361,6 +370,11 @@ fn route(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: 
         }
         try ticketAction(ctx, cfg, db, a, req, name, action, b);
         return;
+    }
+    // A button on a push notification (src/web/sw.js), sent by the
+    // service worker with the board's own login cookie.
+    if (std.mem.eql(u8, what, "needs") and std.mem.eql(u8, name, "act")) {
+        return ok(req, a, try push.act(ctx, cfg, db, a, b.item orelse return error.BadInput, b.action orelse return error.BadInput, b.ask orelse ""));
     }
     // Dismiss all of one kind in Needs You: the keys the board showed, so a
     // flag raised since isn't cleared unseen.
