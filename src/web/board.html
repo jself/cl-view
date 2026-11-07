@@ -457,6 +457,32 @@
   }
   /* The smallest phones: "Quick" and "New" alone, so the four actions fit on one row. */
   @media (max-width: 420px) { header .acts .long { display: none; } }
+  /* ---- the keyboard (see "keyboard" in the script) ---- */
+  /* The cursor of h/j/k/l and the arrows: a card, a list row or a Needs you item. */
+  .card:focus-visible, tr.row:focus-visible, .ask:focus-visible { outline: calc(2 * var(--u)) solid #8fbcff; outline-offset: calc(2 * var(--u)); }
+  tr.row:focus-visible { outline-offset: calc(-2 * var(--u)); }
+  .card, tr.row, .ask { scroll-margin: calc(52 * var(--u)) calc(12 * var(--u)) calc(12 * var(--u)); }
+  /* S's labels: over everything, dialogs included (a popover is in the top layer, above the modal under it). */
+  #hints { position: fixed; inset: 0; width: 100vw; height: 100vh; max-width: none; max-height: none; margin: 0; padding: 0; border: 0; background: none; overflow: hidden; pointer-events: none; }
+  #hints span { position: absolute; transform: translate(calc(-4 * var(--u)), calc(-4 * var(--u))); padding: 0 calc(4 * var(--u)); border-radius: calc(4 * var(--u));
+    background: #facc15; color: #111; font: 700 calc(12 * var(--u))/1.5 var(--mono); text-transform: uppercase; box-shadow: 0 1px 4px rgba(0,0,0,.6); white-space: nowrap; }
+  #hints span b { color: #8a6d00; font-weight: 700; }
+  /* Ctrl+K */
+  #palDlg { width: min(calc(640 * var(--u)), calc(100vw - calc(24 * var(--u)))); margin-top: 12vh; }
+  #palDlg .pin { display: flex; align-items: center; gap: calc(8 * var(--u)); padding: calc(10 * var(--u)) calc(14 * var(--u)); border-bottom: 1px solid var(--line); }
+  #palDlg .pin .chip { font: calc(12 * var(--u)) var(--mono); background: var(--other-bg); border-radius: calc(5 * var(--u)); padding: calc(2 * var(--u)) calc(6 * var(--u)); white-space: nowrap; }
+  #palDlg input { flex: 1; min-width: 0; background: none; border: 0; outline: none; color: var(--fg); font: calc(16 * var(--u)) var(--sans); padding: calc(4 * var(--u)) 0; }
+  #palList { list-style: none; margin: 0; padding: calc(6 * var(--u)); max-height: 56vh; overflow-y: auto; }
+  #palList li { display: flex; align-items: baseline; gap: calc(10 * var(--u)); padding: calc(7 * var(--u)) calc(10 * var(--u)); border-radius: calc(7 * var(--u)); cursor: pointer; }
+  #palList li.on { background: #24324a; }
+  #palList li .k { font: calc(12 * var(--u)) var(--mono); color: var(--muted); flex: none; min-width: calc(64 * var(--u)); }
+  #palList li .l { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #palList li .n { font-size: calc(12 * var(--u)); color: var(--muted); flex: none; white-space: nowrap; }
+  #palList li.done .l { color: var(--muted); }
+  #palDlg .foot { padding: calc(7 * var(--u)) calc(14 * var(--u)); border-top: 1px solid var(--line); font-size: calc(12 * var(--u)); color: var(--muted); }
+  kbd { font: calc(11.5 * var(--u)) var(--mono); background: var(--other-bg); border: 1px solid var(--line); border-radius: calc(4 * var(--u)); padding: 0 calc(5 * var(--u)); }
+  #keysDlg table { border-collapse: collapse; width: 100%; } #keysDlg td { padding: calc(5 * var(--u)) calc(8 * var(--u)); vertical-align: top; border-top: 1px solid var(--line2); }
+  #keysDlg td:first-child { white-space: nowrap; }
 </style>
 </head>
 <body>
@@ -530,6 +556,23 @@
 <dialog id="pauseDlg" aria-label="Pause" style="width:min(calc(520 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="pauseBody"></div></dialog>
 <dialog id="pushDlg" aria-label="Notifications" style="width:min(calc(560 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="pushBody"></div></dialog>
 <dialog id="killDlg" aria-label="Kill the session" style="width:min(calc(480 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="killBody"></div></dialog>
+<div id="hints" popover="manual" aria-hidden="true"></div>
+<dialog id="palDlg" aria-label="Go to a ticket or command"><div class="pin"><span class="chip" id="palChip" hidden></span><input id="palIn" autocomplete="off" spellcheck="false" aria-label="Search"></div>
+  <ul id="palList" role="listbox"></ul>
+  <div class="foot" id="palFoot"></div></dialog>
+<dialog id="keysDlg" aria-label="Keyboard shortcuts" style="width:min(calc(560 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg">
+  <div class="head"><h1 style="flex:1">Keyboard</h1><button type="button" class="btn" id="closeKeys">Close</button></div>
+  <table>
+    <tr><td><kbd>s</kbd></td><td>Label every button, card, tab and box on screen (in a dialog, the dialog's); type a label to click it. <kbd>Esc</kbd> gives up.</td></tr>
+    <tr><td><kbd>Ctrl</kbd>+<kbd>K</kbd></td><td>Go to a ticket (by key or title) or run a command. <kbd>Tab</kbd> on a ticket lists what you can do with it; <kbd>Shift</kbd>+<kbd>Tab</kbd> goes back.</td></tr>
+    <tr><td><kbd>/</kbd></td><td>Search the tickets shown; <kbd>Enter</kbd> goes to the first card, <kbd>Esc</kbd> leaves the box and keeps the search.</td></tr>
+    <tr><td><kbd>h</kbd> <kbd>j</kbd> <kbd>k</kbd> <kbd>l</kbd>, arrows</td><td>Move between cards (and Needs you, and the list's rows); <kbd>Enter</kbd> opens one. <kbd>g</kbd> / <kbd>G</kbd> go to the top and bottom of the column.</td></tr>
+    <tr><td><kbd>q</kbd> / <kbd>n</kbd></td><td>Quick ticket / New ticket.</td></tr>
+    <tr><td><kbd>o</kbd></td><td>The operator chat. Hold <kbd>v</kbd> to talk to it (with voice on).</td></tr>
+    <tr><td><kbd>Esc</kbd></td><td>Leave a text box (it keeps what you typed); again, close the dialog.</td></tr>
+    <tr><td><kbd>?</kbd></td><td>This list.</td></tr>
+  </table>
+  <p class="muted">Single keys don't fire while you type in a box, and of these only <kbd>s</kbd>, <kbd>Ctrl</kbd>+<kbd>K</kbd> and <kbd>?</kbd> work with a dialog open. Dialogs have their own: <kbd>Ctrl</kbd>+<kbd>Enter</kbd> creates the ticket in New ticket, and in a ticket's Test tab, <kbd>p</kbd> <kbd>f</kbd> <kbd>n</kbd> <kbd>c</kbd> walk the test plan.</p></div></dialog>
 <div id="toast" role="status" popover="manual"></div>
 <div id="voiceBar" hidden role="status"><div class="txt"><div class="heard" id="voiceHeard"></div><div id="voiceText"></div></div><button type="button" id="voiceReplay" title="Say it again" aria-label="Say it again" hidden>&#8635;</button><button type="button" id="voiceClose" title="Stop and close" aria-label="Stop and close">&times;</button></div>
 
@@ -772,6 +815,7 @@ async function refresh() {
   try { state.data = await api("board"); } catch (e) { if (e.message !== "log in") toast(e.message, true); return; }
   checkBuild(state.data.build);
   document.getElementById("micBtn").hidden = !state.data.voice?.on;
+  if (hint.on) return; // S's labels point at what is drawn now
   if (!drag) render();
   if (state.open) loadDetail(state.open, true);
   if (!document.hidden) pushTidy();
@@ -821,13 +865,14 @@ function render() {
   // The filters are about tickets; the Projects view lists every project.
   document.getElementById("filters").hidden = state.view === "projects";
   if (state.view === "projects" || !d.projects.length) document.body.classList.remove("fit");
-  if (state.view === "projects") { setHtml(main, projectsHtml()); return; }
+  if (state.view === "projects") { setHtml(main, projectsHtml()); navKeep(); return; }
   if (!d.projects.length) {
     setHtml(main, `<p class="empty">No projects yet. Add one with <span class="mono">cl project add &lt;name&gt; &lt;dir&gt;</span>, or with New ticket.</p>`); return;
   }
   const rows = visible();
   document.body.classList.toggle("fit", state.view === "board" || state.view === "lanes");
   setHtml(main, state.view === "lanes" ? lanesHtml(rows) : state.view === "list" ? listHtml(rows) : boardHtml(rows));
+  navKeep();
 }
 
 // Paused projects, in every view (hidden ones too: a pause holds their tickets all the same).
@@ -929,7 +974,7 @@ function renderNeeds() {
       : `<button type="button" class="btn" data-hide="${esc(t.key)}" title="Take it out of Needs you until it raises a new flag; its card keeps the flag">Hide</button>`;
     const dismiss = dismissable(f) ? `<button type="button" class="btn" data-dismiss="${esc(t.key)}" data-kind="${esc(f.kind)}" title="${DISMISS_TIP}">Dismiss</button>` : "";
     // Its text (not its buttons) opens the ticket, as its card does.
-    return `<div class="ask${isHidden ? " hidden" : ""}" data-ask="${esc(t.key)}"><div class="pills"><span class="pill ${flagClass(f.kind)}">${esc(flagLabel(f))}</span>${isHidden ? `<span class="pill">Hidden</span>` : ""}${f.kind === "review" || f.kind === "testing" ? reviewNote(t) : ""}<span class="mono muted" style="font-size:calc(11.5 * var(--u))">${esc(t.key)} · ${ago(f.at)}</span></div>
+    return `<div class="ask${isHidden ? " hidden" : ""}" tabindex="-1" data-ask="${esc(t.key)}"><div class="pills"><span class="pill ${flagClass(f.kind)}">${esc(flagLabel(f))}</span>${isHidden ? `<span class="pill">Hidden</span>` : ""}${f.kind === "review" || f.kind === "testing" ? reviewNote(t) : ""}<span class="mono muted" style="font-size:calc(11.5 * var(--u))">${esc(t.key)} · ${ago(f.at)}</span></div>
       <div style="font-weight:500">${esc(t.title)}</div><div class="what" title="${esc(askText(t, f))}">${esc(askLine(t, f, quick))}</div>
       ${quick ? `<div class="acts">${quick}</div>` : ""}<div class="acts">${main}${shell}${hide}${dismiss}</div></div>`;
   }).join(""));
@@ -1000,7 +1045,7 @@ function lanesHtml(rows) {
 function listHtml(rows) {
   if (!rows.length) return `<p class="empty">Nothing matches.</p>`;
   return `<div class="list"><table><thead><tr><th>Key</th><th>Ticket</th><th>Stage</th><th>Session</th><th>Flags</th><th>Workspace</th><th>Updated</th></tr></thead><tbody>
-    ${rows.map((r) => { const t = r.ticket; return `<tr class="row" data-open="${esc(t.key)}"><td class="mono muted" style="white-space:nowrap">${esc(t.key)} ${shellIcon(r, true)}</td>
+    ${rows.map((r) => { const t = r.ticket; return `<tr class="row" tabindex="-1" data-open="${esc(t.key)}"><td class="mono muted" style="white-space:nowrap">${esc(t.key)} ${shellIcon(r, true)}</td>
       <td><div style="font-weight:500">${esc(t.title)}</div><div class="muted" style="font-size:calc(12 * var(--u))">${esc(t.project)}${t.parent ? " · sub-ticket of " + esc(t.parent) : ""}</div></td>
       <td>${STAGE_NAME[t.stage]}</td><td>${statusHtml(r)}</td><td>${pills(t)}</td><td class="mono" style="font-size:calc(12 * var(--u))">${esc(where(t))}</td><td class="muted">${ago(t.updated)}</td></tr>`; }).join("")}
   </tbody></table></div>`;
@@ -1026,7 +1071,7 @@ function projectsHtml() {
   if (!ps.length) return head + `<p class="empty">No projects yet.</p>`;
   return head + `<div class="list"><table><thead><tr><th>Project</th><th>Directory</th><th>Prefix</th><th>Mode</th><th>Slots</th><th>Profile</th><th>Open tickets</th><th></th></tr></thead><tbody>
     ${ps.map((p) => { const c = projectCounts(p.name); const n = esc(p.name);
-      return `<tr class="row${p.hidden ? " dim" : ""}" data-proj-edit="${n}">
+      return `<tr class="row${p.hidden ? " dim" : ""}" tabindex="-1" data-proj-edit="${n}">
         <td><strong>${n}</strong>${p.paused ? ` <span class="pill f-paused">Paused</span>` : ""}${p.hidden ? ` <span class="pill">Hidden</span>` : ""}</td>
         <td class="mono" style="font-size:calc(12 * var(--u));overflow-wrap:anywhere">${esc(p.dir)}</td>
         <td class="mono">${esc(p.prefix)}</td><td>${MODE_NAME[p.mode] || esc(p.mode)}</td>
@@ -1206,6 +1251,8 @@ function drawTail() {
 // Claude handed in a plan (cl ticket done --plan) that can be approved. Sending
 // feedback keeps it so: Claude may only answer, not hand in a new one.
 const planReady = (t) => t.stage === "planning" && ((t.plan_md || "").trim() || t.flags.some((f) => f.kind === "review"));
+// The ticket's approve button (the ticket view's bar, Ctrl+K's actions): its label, or "" for none.
+const approveLabel = (t) => planReady(t) ? "Approve plan" : t.stage === "review" ? "Approve, to testing" : t.stage === "testing" && !t.finishing ? "Tested, done" : "";
 function tabsFor(d) {
   const t = d.ticket; const tabs = [];
   if (t.flags.some((f) => f.kind === "question" || f.kind === "input")) tabs.push(["needs", "Needs you"]);
@@ -1260,7 +1307,7 @@ function renderDetailInner() {
   const d = state.detail; const t = d.ticket; const tabs = tabsFor(d);
   if (!state.tab || !tabs.some(([k]) => k === state.tab)) state.tab = tabs[0][0];
   const liveSession = t.tmux && d.status && d.status !== "gone";
-  const approve = planReady(t) ? "Approve plan" : t.stage === "review" ? "Approve, to testing" : t.stage === "testing" && !t.finishing ? "Tested, done" : "";
+  const approve = approveLabel(t);
   // The bar holds the ticket's next steps; Open shell is the icon by its status, and the rest are in the ⋯ menu.
   const acts = [];
   // Ran before (killed, or its session ended): a fresh session, resuming its conversation where Claude still has it.
@@ -2697,6 +2744,321 @@ document.getElementById("pushDlg").addEventListener("click", (e) => {
     await openPush();
   })());
 });
+
+// ---- the keyboard ----
+// Single keys work outside text boxes (Esc leaves one, keeping what's in it):
+// S labels whatever can be clicked on screen, or in the dialog on top, and
+// typing a label clicks it; h/j/k/l and the arrows move a cursor over the
+// cards; / searches; q and n make tickets; ? lists them all. Ctrl+K, from
+// anywhere, finds a ticket or a command, and Tab on a ticket lists what can be
+// done with it. (O, V and the Test tab's P/F/N/C are further up.)
+const textBox = (t) => !!(t && (t.isContentEditable || t.closest?.("input, textarea, select")) && !t.closest?.(".xterm"));
+const plainKey = (e) => !(e.ctrlKey || e.metaKey || e.altKey || e.isComposing);
+// The dialog on top: the open one shown last (the markup's order says nothing about that).
+let dialogsShown = 0;
+const showModal = HTMLDialogElement.prototype.showModal;
+HTMLDialogElement.prototype.showModal = function () { showModal.call(this); this.dataset.shown = ++dialogsShown; };
+const topDialog = () => [...document.querySelectorAll("dialog[open]")].sort((a, b) => (+a.dataset.shown || 0) - (+b.dataset.shown || 0)).pop() || null;
+// Esc in a text box leaves it, rather than closing its dialog; the next Esc does that.
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape" || e.isComposing || !textBox(e.target) || e.target.id === "palIn") return;
+  if (voice.want || voice.rec) return;
+  e.preventDefault(); e.target.blur();
+}, true);
+
+// -- S: labels to click with --
+// Leap's label letters: the home row and its neighbors first.
+const HINT_KEYS = "sfnjklhodweimbuyvrgtaqpcxz";
+const hint = { on: false, typed: "", items: [] };
+const HINT_SEL = "a[href], button, [role=button], [role=tab], [role=menuitem], select, textarea, input:not([type=hidden]), tr.row, [data-ask], [data-shell], label.switch, summary";
+function hintLabels(n) {
+  // Prefix-free: when there are too many, a single letter turns into a family of two.
+  const out = [...HINT_KEYS]; let i = 0;
+  while (out.length - i < n) { const p = out[i++]; for (const c of HINT_KEYS) out.push(p + c); }
+  return out.slice(i, i + n);
+}
+function hintable(el) {
+  if (el.disabled || (el.closest(".switch") && !el.matches("label.switch"))) return false;
+  const r = el.getBoundingClientRect();
+  if (r.width < 2 || r.height < 2 || r.bottom < 0 || r.right < 0 || r.top > innerHeight || r.left > innerWidth) return false;
+  // On screen and not under something else (a sticky header, a column scrolled past, the dialog's backdrop).
+  const pts = [[r.left + r.width / 2, r.top + r.height / 2], [r.left + 4, r.top + 4], [r.right - 4, r.top + 4], [r.left + 4, r.bottom - 4]];
+  return pts.some(([x, y]) => { if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) return false; const hit = document.elementFromPoint(x, y); return hit && (el === hit || el.contains(hit)); });
+}
+function hintStart() {
+  const scope = topDialog() || document.body;
+  const els = [...scope.querySelectorAll(HINT_SEL)].filter(hintable);
+  if (!els.length) return toast("Nothing to click here", true);
+  const rects = els.map((el) => el.getBoundingClientRect());
+  const order = els.map((_, i) => i).sort((a, b) => Math.round(rects[a].top / 8) - Math.round(rects[b].top / 8) || rects[a].left - rects[b].left);
+  const labels = hintLabels(els.length);
+  hint.items = order.map((i, n) => ({ el: els[i], r: rects[i], label: labels[n] }));
+  hint.on = true; hint.typed = "";
+  hintDraw();
+  const box = document.getElementById("hints"); if (box.matches(":popover-open")) box.hidePopover(); box.showPopover();
+}
+function hintDraw() {
+  document.getElementById("hints").innerHTML = hint.items.filter((h) => h.label.startsWith(hint.typed))
+    .map((h) => `<span style="left:${Math.max(4, h.r.left)}px;top:${Math.max(4, h.r.top)}px"><b>${hint.typed}</b>${h.label.slice(hint.typed.length)}</span>`).join("");
+}
+function hintStop() {
+  hint.on = false; hint.items = [];
+  const box = document.getElementById("hints"); box.innerHTML = ""; if (box.matches(":popover-open")) box.hidePopover();
+}
+function hintHit(el) {
+  if (el.matches("label.switch")) { el.querySelector("input")?.click(); return; }
+  if (el.matches("select")) { el.focus(); try { el.showPicker(); } catch {} return; }
+  if (el.matches("textarea, input:not([type=checkbox], [type=radio], [type=button], [type=submit])")) {
+    el.focus();
+    if (el.id === "search") el.select(); else try { el.setSelectionRange(el.value.length, el.value.length); } catch {} // not every input type has a caret
+    return;
+  }
+  if (el.matches(NAV_SEL)) el.focus({ preventScroll: true });
+  el.click();
+}
+document.addEventListener("keydown", (e) => {
+  if (!hint.on) return;
+  e.preventDefault(); e.stopImmediatePropagation();
+  if (e.repeat) return; // S held down: its repeats aren't a label
+  if (e.key === "Backspace") { hint.typed = hint.typed.slice(0, -1); hintDraw(); return; }
+  const k = e.key.toLowerCase();
+  if (k.length !== 1 || !HINT_KEYS.includes(k) || !plainKey(e)) { hintStop(); refresh(); return; }
+  const left = hint.items.filter((h) => h.label.startsWith(hint.typed + k));
+  if (!left.length) return; // a typo: keep the labels up
+  hint.typed += k;
+  const done = left.find((h) => h.label === hint.typed);
+  if (!done) { hintDraw(); return; }
+  hintStop();
+  if (done.el.isConnected) hintHit(done.el);
+}, true);
+addEventListener("resize", () => { if (hint.on) hintStop(); });
+document.addEventListener("scroll", () => { if (hint.on) hintStop(); }, true);
+document.addEventListener("pointerdown", () => { if (hint.on) hintStop(); }, true);
+
+// -- h/j/k/l: a cursor over the cards --
+// The cursor is the focused card (or list row, or Needs you item), so Enter
+// opens it. A redraw puts it back on the same ticket, wherever that went.
+const NAV_SEL = "#needsStrip [data-ask], #main [data-open], #main tr.row";
+const navId = (el) => el.dataset.ask ? ["ask", el.dataset.ask] : el.dataset.open ? ["open", el.dataset.open] : ["projEdit", el.dataset.projEdit];
+function navFind([k, v]) {
+  return [...document.querySelectorAll(NAV_SEL)].find((el) => el.dataset[k] === v) || null;
+}
+document.addEventListener("focusin", (e) => { if (e.target.matches?.(NAV_SEL)) state.cursor = navId(e.target); });
+document.addEventListener("pointerdown", (e) => { if (!e.target.closest?.(NAV_SEL + ", dialog")) state.cursor = null; }, true);
+function navKeep() {
+  const a = document.activeElement;
+  if (!state.cursor || topDialog() || !(a === document.body || a?.matches?.(NAV_SEL))) return;
+  const el = navFind(state.cursor);
+  if (el && el !== a) el.focus({ preventScroll: true });
+}
+document.getElementById("ticketDlg").addEventListener("close", () => setTimeout(navKeep));
+function navItems() { return [...document.querySelectorAll(NAV_SEL)].filter((el) => { const r = el.getBoundingClientRect(); return r.width && r.height; }); }
+function navGo(el) { if (!el) return; el.focus({ preventScroll: true }); el.scrollIntoView({ block: "nearest", inline: "nearest" }); }
+function navMove(dir) {
+  const items = navItems(); if (!items.length) return;
+  const cur = document.activeElement;
+  if (!items.includes(cur)) {
+    // No cursor yet: back where it was, else the first card of the view.
+    const was = state.cursor && navFind(state.cursor);
+    return navGo(was && items.includes(was) ? was : items.find((el) => el.closest("#main")) || items[0]);
+  }
+  const a = cur.getBoundingClientRect();
+  if (dir === "first" || dir === "last") {
+    // The top or bottom of its column (of the list).
+    const col = items.filter((el) => { const r = el.getBoundingClientRect(); return el.closest("#main") === cur.closest("#main") && r.left < a.right - 1 && r.right > a.left + 1; });
+    return navGo(dir === "first" ? col[0] : col.at(-1));
+  } const ac = [(a.left + a.right) / 2, (a.top + a.bottom) / 2];
+  const vert = dir === "up" || dir === "down", sign = dir === "down" || dir === "right" ? 1 : -1;
+  const cands = items.filter((el) => el !== cur).map((el) => { const r = el.getBoundingClientRect();
+    return { el, r, dx: (r.left + r.right) / 2 - ac[0], dy: (r.top + r.bottom) / 2 - ac[1] }; });
+  let pick = null;
+  if (vert) {
+    const ahead = cands.filter((c) => c.dy * sign > 1);
+    // The same column (they overlap side to side), the nearest one; at its end, on into the other part
+    // of the page (Needs you above the cards), never sideways into another column.
+    const col = ahead.filter((c) => c.r.left < a.right - 1 && c.r.right > a.left + 1);
+    const pool = col.length ? col : ahead.filter((c) => c.el.closest("#main") !== cur.closest("#main"));
+    pick = pool.sort((p, q) => (col.length ? Math.abs(p.dy) - Math.abs(q.dy) : Math.abs(p.dy) + 2 * Math.abs(p.dx) - Math.abs(q.dy) - 2 * Math.abs(q.dx)))[0];
+  } else {
+    // The next column over (in the same part of the page), then the card in it nearest in height.
+    const ahead = cands.filter((c) => c.dx * sign > a.width / 2 && c.el.closest("#main") === cur.closest("#main"));
+    if (ahead.length) {
+      const near = Math.min(...ahead.map((c) => Math.abs(c.dx)));
+      pick = ahead.filter((c) => Math.abs(c.dx) < near + 8).sort((p, q) => Math.abs(p.dy) - Math.abs(q.dy))[0];
+    }
+  }
+  if (pick) navGo(pick.el);
+}
+const NAV_KEYS = { h: "left", j: "down", k: "up", l: "right", ArrowLeft: "left", ArrowDown: "down", ArrowUp: "up", ArrowRight: "right", g: "first", G: "last", Home: "first", End: "last" };
+document.addEventListener("keydown", (e) => {
+  if (e.defaultPrevented || !plainKey(e) || textBox(e.target)) return;
+  // These work in a dialog too.
+  if (e.key === "s" && !e.shiftKey) { e.preventDefault(); hintStart(); return; }
+  if (e.key === "?") { e.preventDefault(); if (!document.getElementById("keysDlg").open) document.getElementById("keysDlg").showModal(); return; }
+  if (topDialog()) return;
+  if (e.key === "Enter" && e.target.matches?.("tr.row, [data-ask]")) { e.preventDefault(); e.target.click(); return; }
+  if (e.key === "/") { e.preventDefault(); searchFocus(); return; }
+  if (e.key === "q") { e.preventDefault(); openQuick(); return; }
+  if (e.key === "n") { e.preventDefault(); openNew(null); return; }
+  const dir = NAV_KEYS[e.key];
+  if (dir && !(e.key.startsWith("Arrow") && e.shiftKey)) { e.preventDefault(); navMove(dir); }
+});
+function searchFocus() {
+  if (state.view === "projects") { state.view = store("cl-view-tickets") || "board"; render(); }
+  const box = document.getElementById("search"); box.focus(); box.select();
+}
+document.getElementById("search").addEventListener("keydown", (e) => {
+  if (e.key !== "Enter" || e.isComposing) return;
+  e.preventDefault(); const first = navItems().find((el) => el.closest("#main")); if (first) navGo(first); else e.target.blur();
+});
+document.addEventListener("click", (e) => { const v = e.target.closest?.("[data-view]")?.dataset.view; if (v && v !== "projects") store("cl-view-tickets", v); }, true);
+document.getElementById("closeKeys").addEventListener("click", () => document.getElementById("keysDlg").close());
+
+// -- Ctrl+K: go to a ticket, run a command --
+const pal = { mode: "root", key: null, q: "", rootQ: "", sel: 0, items: [] };
+// How well q matches text: every word of q in it (earlier, and at a word's start, is better),
+// else q's letters in order. -1: no match.
+function matchScore(q, text) {
+  q = q.trim().toLowerCase(); if (!q) return 0;
+  const s = text.toLowerCase(); let score = 0;
+  for (const w of q.split(/\s+/)) {
+    const i = s.indexOf(w);
+    if (i >= 0) { score += 100 - Math.min(i, 60) + (i === 0 || /\W/.test(s[i - 1]) ? 40 : 0); continue; }
+    let j = 0, gaps = 0, last = -1;
+    for (const c of w) { const at = s.indexOf(c, last + 1); if (at < 0) return -1; if (last >= 0) gaps += at - last - 1; last = at; j++; }
+    score += Math.max(1, 30 - gaps);
+  }
+  return score;
+}
+function palCommands() {
+  const view = (v, l) => ({ label: `${l} view`, note: state.view === v ? "shown" : "", run: () => { state.view = v; store("cl-view", v); if (v !== "projects") store("cl-view-tickets", v); render(); } });
+  const sw = (id, l) => { const on = document.getElementById(id).checked; return { label: `${on ? "Hide" : "Show"} ${l}`, run: () => document.getElementById(id).click() }; };
+  return [
+    { label: "New ticket", hint: "n", run: () => openNew(null) },
+    { label: "Quick ticket", hint: "q", run: () => openQuick() },
+    { label: "Chat with the operator", hint: "o", run: () => document.getElementById("chatBtn").click() },
+    { label: "Search tickets", hint: "/", run: searchFocus },
+    view("board", "Board"), view("lanes", "Lanes"), view("list", "List"), view("projects", "Projects"),
+    sw("doneSw", "done tickets"), sw("parkedSw", "parked tickets"), sw("subsSw", "sub-tickets"),
+    { label: state.needsOpen ? "Collapse Needs you" : "Expand Needs you", run: () => document.getElementById("needsToggle").click() },
+    { label: "Notifications", run: () => openPush() },
+    { label: "Terminal", run: () => { location.href = "/"; } },
+    { label: "Keyboard shortcuts", hint: "?", run: () => document.getElementById("keysDlg").showModal() },
+  ].map((c) => ({ ...c, kind: "cmd" }));
+}
+function palTickets() {
+  const rows = [...(state.data?.tickets || [])];
+  rows.sort((a, b) => (needsMe(b) - needsMe(a)) || ((a.ticket.stage === "done") - (b.ticket.stage === "done")) || b.ticket.updated - a.ticket.updated);
+  return rows.map((r) => { const t = r.ticket;
+    return { kind: "ticket", key: t.key, label: t.title, done: t.stage === "done", text: `${t.key} ${t.title}`,
+      note: [t.project, STAGE_NAME[t.stage], needsMe(r) ? "needs you" : r.status === "busy" ? "working" : ""].filter(Boolean).join(" · "),
+      run: () => openTicket(t.key) }; });
+}
+function palActions(key) {
+  const row = state.data?.tickets.find((r) => r.ticket.key === key); if (!row) return [];
+  const t = row.ticket; const live = liveRow(row); const out = [];
+  const a = (label, run, note) => out.push({ kind: "act", label, note: note || "", run });
+  const open = (tab) => () => openTicket(key, tab);
+  a("Open", open(null));
+  const flagTabs = [...new Set(t.flags.map(flagTab).filter(Boolean))];
+  for (const [tab, l] of [["needs", "Needs you"], ["plan", "Plan"], ["review", "Review"], ["test", "Test"], ["landing", "Not merged"], ["after-merge", "After merge"]])
+    if (flagTabs.includes(tab) || (tab === "plan" && t.stage === "planning") || (tab === "review" && t.stage === "review") || (tab === "test" && t.stage === "testing")) a(`Open: ${l}`, open(tab));
+  for (const [tab, l] of [["session", "Session"], ["comments", "Comments"], ["activity", "Activity"], ["details", "Details"]]) a(`Open: ${l}`, open(tab));
+  if (live) a("Open shell", () => { location.href = shellHref(t); }, "the session's terminal");
+  if (t.park) a("Resume now", async () => { try { const r = await act(key, "unpark", {}); toast(unparkMsg(key, r.resumed)); } catch {} }, "end the park");
+  else if (!live && t.stage !== "done" && !t.umbrella) a(t.killed || t.tmux || t.session_id ? "Restart" : "Start now", () => act(key, "start", {}, t.killed || t.session_id ? "Restarted" : "Started").catch(() => {}));
+  if (approveLabel(t))
+    a(approveLabel(t), async () => {
+      if (t.stage === "testing") { const extra = await doneExtras(key); if (!extra) return; return act(key, "approve", extra, finishMsg(key, extra) || "Done").catch(() => {}); }
+      return act(key, "approve", {}, "Approved").catch(() => {});
+    });
+  for (const s of STAGES) if (s !== t.stage) a(`Move to ${STAGE_NAME[s]}`, () => moveTo(key, s));
+  if (needsMe(row)) a("Hide from Needs you", () => act(key, "hide", {}, `${key} hidden from Needs you; a new flag brings it back`).catch(() => {}));
+  if (!t.park && t.stage !== "done" && !t.umbrella) a("Park…", async () => { await openTicket(key); if (state.detail && state.open === key) openPark(state.detail); });
+  if (live) a("Kill…", async () => { await openTicket(key); const d = state.detail; if (!d || state.open !== key || !await confirmKill(d)) return;
+    try { await act(key, "kill", {}, `Killed ${d.ticket.tmux}; Restart brings it back`); } catch {} }, "end its session");
+  a("New sub-ticket", () => openNew(key));
+  a("Copy key", () => navigator.clipboard?.writeText(key).then(() => toast(`Copied ${key}`), () => toast("Couldn't copy", true)));
+  return out;
+}
+function palOpen() {
+  hintStop();
+  const dlg = document.getElementById("palDlg");
+  pal.mode = "root"; pal.key = null; pal.sel = 0;
+  const box = document.getElementById("palIn"); box.value = "";
+  if (!dlg.open) dlg.showModal();
+  palRender(); box.focus();
+}
+function palRender() {
+  const box = document.getElementById("palIn"); const q = box.value;
+  const chip = document.getElementById("palChip");
+  chip.hidden = pal.mode !== "ticket"; chip.textContent = pal.key || "";
+  box.placeholder = pal.mode === "ticket" ? "What to do with it" : "Go to a ticket (key or title), or a command";
+  let items;
+  if (pal.mode === "ticket") items = palActions(pal.key).map((x) => ({ ...x, score: matchScore(q, x.label) })).filter((x) => x.score >= 0);
+  else {
+    const tk = palTickets(), cmd = palCommands();
+    if (!q.trim()) items = [...tk.slice(0, 8), ...cmd];
+    else {
+      const qq = q.trim().toLowerCase();
+      // A key typed whole (or its number) first; done tickets after open ones that match as well.
+      const tkScore = (x) => { const k = x.key.toLowerCase(); if (k === qq || k.endsWith("-" + qq)) return 1e4; if (k.startsWith(qq)) return 5000;
+        const m = matchScore(q, x.text); return m < 0 ? -1 : m + (x.done ? 0 : 25); };
+      items = [...tk.map((x) => ({ ...x, score: tkScore(x) })), ...cmd.map((x) => { const m = matchScore(q, x.label); return { ...x, score: m < 0 ? -1 : m + 35 }; })]
+        .filter((x) => x.score >= 0);
+      items.sort((a, b) => b.score - a.score);
+    }
+  }
+  pal.items = items.slice(0, 60); pal.sel = Math.min(pal.sel, Math.max(0, pal.items.length - 1));
+  document.getElementById("palList").innerHTML = pal.items.length ? pal.items.map((x, i) => `<li role="option" data-pal="${i}" class="${i === pal.sel ? "on" : ""}${x.done ? " done" : ""}" aria-selected="${i === pal.sel}">`
+    + (x.kind === "ticket" ? `<span class="k">${esc(x.key)}</span>` : "") + `<span class="l">${esc(x.label)}</span>`
+    + (x.note ? `<span class="n">${esc(x.note)}</span>` : "") + (x.hint ? `<kbd>${esc(x.hint)}</kbd>` : "") + `</li>`).join("")
+    : `<li class="n" style="cursor:default">Nothing matches</li>`;
+  document.getElementById("palList").querySelector("li.on")?.scrollIntoView({ block: "nearest" });
+  document.getElementById("palFoot").innerHTML = pal.mode === "ticket"
+    ? `<kbd>Enter</kbd> do it · <kbd>Shift</kbd>+<kbd>Tab</kbd> or <kbd>Backspace</kbd> back to everything · <kbd>Esc</kbd> close`
+    : `<kbd>Enter</kbd> open · <kbd>Tab</kbd> what you can do with the ticket · <kbd>↑</kbd><kbd>↓</kbd> choose · <kbd>Esc</kbd> close`;
+}
+function palRun(i) {
+  const x = pal.items[i]; if (!x) return;
+  document.getElementById("palDlg").close();
+  Promise.resolve(x.run()).catch((err) => toast(err.message, true));
+}
+function palInto(i) {
+  const x = pal.items[i]; if (x?.kind !== "ticket") return false;
+  pal.rootQ = document.getElementById("palIn").value; pal.mode = "ticket"; pal.key = x.key; pal.sel = 0;
+  document.getElementById("palIn").value = ""; palRender(); return true;
+}
+function palBack() {
+  if (pal.mode !== "ticket") return false;
+  pal.mode = "root"; pal.key = null; pal.sel = 0;
+  const box = document.getElementById("palIn"); box.value = pal.rootQ; palRender(); return true;
+}
+document.addEventListener("keydown", (e) => {
+  if (!(e.key === "k" || e.key === "K") || !(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey || e.isComposing) return;
+  e.preventDefault();
+  if (document.getElementById("palDlg").open) { document.getElementById("palDlg").close(); return; }
+  palOpen();
+}, true);
+document.getElementById("palIn").addEventListener("input", () => { pal.sel = 0; palRender(); });
+document.getElementById("palIn").addEventListener("keydown", (e) => {
+  if (e.isComposing) return;
+  const n = pal.items.length; const box = e.target;
+  const step = (d) => { e.preventDefault(); if (n) { pal.sel = (pal.sel + d + n) % n; palRender(); } };
+  if (e.key === "ArrowDown" || (e.ctrlKey && e.key === "n")) return step(1);
+  if (e.key === "ArrowUp" || (e.ctrlKey && e.key === "p")) return step(-1);
+  if (e.key === "Enter") { e.preventDefault(); palRun(pal.sel); return; }
+  if (e.key === "Tab" && e.shiftKey) { e.preventDefault(); palBack(); return; }
+  if (e.key === "Tab" || (e.key === "ArrowRight" && box.selectionStart === box.value.length)) { if (palInto(pal.sel) || e.key === "Tab") e.preventDefault(); return; }
+  if ((e.key === "Backspace" && !box.value) || (e.key === "ArrowLeft" && box.selectionStart === 0 && pal.mode === "ticket")) { if (palBack()) e.preventDefault(); return; }
+});
+document.getElementById("palList").addEventListener("click", (e) => { const li = e.target.closest("[data-pal]"); if (li) palRun(+li.dataset.pal); });
+document.getElementById("palList").addEventListener("pointermove", (e) => {
+  const li = e.target.closest("[data-pal]"); if (!li || +li.dataset.pal === pal.sel) return;
+  pal.sel = +li.dataset.pal;
+  for (const el of e.currentTarget.children) { const on = el === li; el.classList.toggle("on", on); el.setAttribute("aria-selected", on); }
+});
+document.getElementById("palDlg").addEventListener("click", (e) => { if (e.target === e.currentTarget) e.currentTarget.close(); });
 
 // ---- where you were ----
 // Leaving the board (Shell, Chat, Terminal, a reload) saves this tab's place:

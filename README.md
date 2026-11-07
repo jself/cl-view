@@ -281,6 +281,16 @@ web.font_size = 16              # text size of the board and terminal pages, in 
   remembers its own.
 - On the board, O (outside a text box, with no dialog open) opens the
   operator chat, like the Chat button.
+- The board works from the keyboard (? lists the keys). S labels everything
+  on screen that can be clicked (buttons, cards, tabs, boxes; in a dialog,
+  the dialog's), and typing a label clicks it. Ctrl+K finds a ticket by key
+  or title, or a command; Tab on a ticket lists what you can do with it
+  (open a tab, start, approve, move, park, kill...). / searches, h/j/k/l
+  and the arrows move between cards (g/G: top and bottom of the column) and
+  Enter opens one, Q makes a quick ticket and N a new one. Single keys don't
+  fire in a text box: Esc leaves the box, keeping what you typed, and the
+  next Esc closes its dialog. Of these keys, only S, Ctrl+K and ? work
+  with a dialog open; the dialogs have keys of their own (below).
 - In the New ticket dialog, Ctrl+Enter (Cmd+Enter on a Mac) creates the
   ticket from any field, the description box included.
 - In a ticket's test plan walk-through (its Test tab), P and F pass or fail
