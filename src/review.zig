@@ -540,16 +540,29 @@ fn killExact(ctx: Ctx, a: std.mem.Allocator, name: []const u8) !void {
 /// Stop step `n`'s command, or (null) every one the ticket started.
 pub fn stopLaunch(ctx: Ctx, a: std.mem.Allocator, key: []const u8, n: ?usize) !void {
     if (n) |i| return killExact(ctx, a, try runName(a, key, i));
-    const prefix = try std.fmt.allocPrint(a, "{s}_s", .{try sessionName(a, "clrun_", key)});
+    return stopLaunchesBut(ctx, a, key, null);
+}
+
+/// Stop every command the ticket started but the one in session `spare`:
+/// the session this process runs in (a test server finishing its own
+/// ticket), which would end it halfway. The main server's sweep stops that
+/// one a minute later.
+pub fn stopLaunchesBut(ctx: Ctx, a: std.mem.Allocator, key: []const u8, spare: ?[]const u8) !void {
+    const base = try sessionName(a, "clrun_", key);
+    const prefix = try std.fmt.allocPrint(a, "{s}_s", .{base});
     const names = tmux.run(ctx, &.{ "list-sessions", "-F", "#{session_name}" }) catch return;
     defer ctx.gpa.free(names);
     var it = std.mem.tokenizeScalar(u8, names, '\n');
     while (it.next()) |name| {
+        if (spare) |s| if (std.mem.eql(u8, s, name)) continue;
+        // Before steps, a ticket had one: clrun_<key>.
+        if (std.mem.eql(u8, name, base)) {
+            try killExact(ctx, a, name);
+            continue;
+        }
         const rest = if (std.mem.startsWith(u8, name, prefix)) name[prefix.len..] else continue;
         if (rest.len > 0 and std.fmt.parseInt(usize, rest, 10) catch null != null) try killExact(ctx, a, name);
     }
-    // Before steps, a ticket had one: clrun_<key>.
-    try killExact(ctx, a, try sessionName(a, "clrun_", key));
 }
 
 /// The launch sessions (clrun_<key>_s<n>, or an old clrun_<key>) of

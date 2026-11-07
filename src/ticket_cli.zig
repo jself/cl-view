@@ -681,7 +681,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         args.only(&.{}, ticket_usage);
         if (pos.len != 1) fail("usage: cl ticket rm <key>", .{});
         const t = board.getTicket(db, a, pos[0]) catch |e| boardFail(db, e, "ticket");
-        board.removeTicket(db, a, t.key) catch |e| switch (e) {
+        actions.remove(ctx, db, a, t.key) catch |e| switch (e) {
             error.Exists => fail("{s} has sub-tickets; remove them first", .{pos[0]}),
             else => boardFail(db, e, "ticket"),
         };

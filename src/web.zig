@@ -9,6 +9,7 @@ const tmux = @import("tmux.zig");
 const pty = @import("pty.zig");
 const dispatch = @import("dispatch.zig");
 const review = @import("review.zig");
+const actions = @import("actions.zig");
 const web_board = @import("web_board.zig");
 const board = @import("board.zig");
 const worktree = @import("worktree.zig");
@@ -125,8 +126,9 @@ fn replaceOld(ctx: Ctx, cfg: config.Config, port: u16) void {
 /// its test plan's launches (clrun_<key>_s<n>) are stopped, and so is any
 /// second `cl web` (a test server) running from its worktree or planning
 /// workspace, by its build or its directory, that its Claude started by
-/// hand. Finishing a ticket stops its launches already; this catches what
-/// that missed.
+/// hand. A Done ticket's session still alive is closed too
+/// (`actions.closeLeftSessions`). Finishing a ticket does all this already;
+/// this catches what that missed.
 fn sweepLoop(ctx: Ctx, cfg: config.Config) void {
     while (true) {
         ctx.sleepMs(60_000);
@@ -142,6 +144,9 @@ fn sweepTests(ctx: Ctx, cfg: config.Config) !void {
     defer db.close();
     var live: std.ArrayList(board.Ticket) = .empty;
     for (try board.listTickets(db, a, .{})) |t| if (t.stage != .done) try live.append(a, t);
+
+    for (try actions.closeLeftSessions(ctx, db, a)) |name|
+        logf("sweep: closed {s}, the session of a ticket in Done", .{name});
 
     var keys: std.ArrayList([]const u8) = .empty;
     for (live.items) |t| try keys.append(a, t.key);

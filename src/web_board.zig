@@ -500,7 +500,7 @@ fn ticketAction(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator
         try actions.press(ctx, db, a, key, std.meta.stringToEnum(actions.Key, b.key orelse "") orelse return error.BadInput);
     } else if (eql(u8, action, "rm")) {
         const t = try board.getTicket(db, a, key);
-        try board.removeTicket(db, a, t.key);
+        try actions.remove(ctx, db, a, t.key);
         images.removeTicket(ctx, a, cfg, t.key);
     } else if (eql(u8, action, "cleanup")) {
         const t = try board.getTicket(db, a, key);

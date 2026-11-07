@@ -495,17 +495,25 @@ pub fn clearAlert(ctx: Ctx, tmux_name: []const u8) !void {
 /// another server could name an unrelated pane on this one.
 pub fn callerSession(ctx: Ctx, arena: std.mem.Allocator) !?Session {
     _ = ctx.env.get("CL_SESSION") orelse return null;
+    const tmux_name = ownSession(ctx, arena) orelse return null;
+    for (try listAll(ctx, arena)) |s| if (std.mem.eql(u8, s.tmux_name, tmux_name)) return s;
+    return null;
+}
+
+/// The name of the tmux session on cl's server this process runs in, any
+/// session (a test launch's too), or null outside one. As in
+/// `callerSession`, TMUX must name the server the pane is on.
+pub fn ownSession(ctx: Ctx, a: std.mem.Allocator) ?[]const u8 {
+    if (ctx.tmux_blocked) return null;
     const pane = ctx.env.get("TMUX_PANE") orelse return null;
     const tmux_env = ctx.env.get("TMUX") orelse return null;
     const out = run(ctx, &.{ "display-message", "-p", "-t", pane, "#{socket_path}\t#{session_name}" }) catch return null;
     defer ctx.gpa.free(out);
     const tab = std.mem.indexOfScalar(u8, out, '\t') orelse return null;
     const sock = out[0..tab];
-    const tmux_name = std.mem.trimEnd(u8, out[tab + 1 ..], "\n");
     const env_sock = tmux_env[0 .. std.mem.indexOfScalar(u8, tmux_env, ',') orelse tmux_env.len];
     if (!std.mem.eql(u8, sock, env_sock)) return null;
-    for (try listAll(ctx, arena)) |s| if (std.mem.eql(u8, s.tmux_name, tmux_name)) return s;
-    return null;
+    return a.dupe(u8, std.mem.trimEnd(u8, out[tab + 1 ..], "\n")) catch null;
 }
 
 /// Hide a session from the chooser (it keeps running), or show it again.

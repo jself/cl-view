@@ -154,7 +154,7 @@ fn stopFor(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, key
     const t = try board.getTicket(db, a, key);
     const s = try sessionToStop(db, t, if (liveSession(ctx, t)) |_| true else false) orelse return false;
     review.stopGutter(ctx, a, key) catch {};
-    review.stopLaunch(ctx, a, key, null) catch {};
+    review.stopLaunchesBut(ctx, a, key, tmux.ownSession(ctx, a)) catch {};
     _ = try endSession(ctx, cfg, db, a, t, s, stage);
     return true;
 }
@@ -400,18 +400,80 @@ pub fn finishingWhat(how: []const u8) []const u8 {
 }
 
 /// A finished ticket lets go of its session, so the project's queue (or a
-/// worktree slot) is free for the next ticket: its gutter and test launch
+/// worktree slot) is free for the next ticket: its gutter and test launches
 /// stop, and the tmux session is killed unless another unfinished ticket is
 /// still using it. A worktree stays until `cleanup`.
+///
+/// What this runs in goes last or not at all: the ticket's own session
+/// (`cl ticket done --close`) is killed after the rest, and a launch of the
+/// ticket (a test server whose board finished it) is left for the main
+/// server's sweep. Killed first, either would end this before it got to the
+/// ticket's session, which then ran on unseen.
 fn closeSession(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8) !void {
-    review.stopGutter(ctx, a, key) catch {};
-    review.stopLaunch(ctx, a, key, null) catch {};
     const t = try board.getTicket(db, a, key);
-    const s = liveSession(ctx, t) orelse return;
-    if ((try db.int("SELECT 1 FROM tickets WHERE tmux = ?1 AND id != ?2 AND stage != 'done'", .{ s, t.id })) != null) return;
-    // Logged first: `cl ticket done --close` runs in the session it kills.
+    const me = tmux.ownSession(ctx, a);
+    const s = try sessionToClose(ctx, db, t);
+    const mine = if (s) |x| if (me) |m| std.mem.eql(u8, x, m) else false else false;
+    if (s) |x| if (!mine) try killTicketSession(ctx, db, t, x);
+    review.stopGutter(ctx, a, key) catch {};
+    review.stopLaunchesBut(ctx, a, key, me) catch {};
+    if (mine) try killTicketSession(ctx, db, t, s.?);
+}
+
+/// The live session a Done (or deleted) ticket leaves behind, unless
+/// another unfinished ticket is using it.
+fn sessionToClose(ctx: Ctx, db: board.Db, t: board.Ticket) !?[]const u8 {
+    const s = liveSession(ctx, t) orelse return null;
+    if ((try db.int("SELECT 1 FROM tickets WHERE tmux = ?1 AND id != ?2 AND stage != 'done'", .{ s, t.id })) != null) return null;
+    return s;
+}
+
+fn killTicketSession(ctx: Ctx, db: board.Db, t: board.Ticket, s: []const u8) !void {
+    // Logged first: it may be the session this runs in.
     try board.logEvent(ctx, db, t.id, "session closed", s);
     try tmux.kill(ctx, s);
+}
+
+/// Delete a ticket. Its session, gutter and test launches go with it, as
+/// they do when it goes to Done: nothing on the board points at them
+/// anymore. error.Exists while it has sub-tickets.
+pub fn remove(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8) !void {
+    const t = try board.getTicket(db, a, key);
+    const me = tmux.ownSession(ctx, a);
+    const s = try sessionToClose(ctx, db, t);
+    try board.removeTicket(db, a, t.key);
+    const mine = if (s) |x| if (me) |m| std.mem.eql(u8, x, m) else false else false;
+    if (s) |x| if (!mine) tmux.kill(ctx, x) catch {};
+    review.stopGutter(ctx, a, t.key) catch {};
+    review.stopLaunchesBut(ctx, a, t.key, me) catch {};
+    if (mine) tmux.kill(ctx, s.?) catch {};
+}
+
+/// The main server's sweep: a Done ticket whose session is still alive
+/// (going to Done should have closed it, but whatever did it was cut off,
+/// say a `cl web` restarted mid-request) has it closed now. Not while a
+/// ticket is starting: its session may not be on the board yet. The
+/// sessions closed.
+pub fn closeLeftSessions(ctx: Ctx, db: board.Db, a: std.mem.Allocator) ![]const []const u8 {
+    if ((try db.int("SELECT 1 FROM tickets WHERE tmux LIKE '(%'", .{})) != null) return &.{};
+    const names = tmux.run(ctx, &.{ "list-sessions", "-F", "#{session_name}" }) catch return &.{};
+    defer ctx.gpa.free(names);
+    var live: std.StringHashMapUnmanaged(void) = .empty;
+    var it = std.mem.tokenizeScalar(u8, names, '\n');
+    while (it.next()) |n| try live.put(a, try a.dupe(u8, n), {});
+    var out: std.ArrayList([]const u8) = .empty;
+    for (try board.listTickets(db, a, .{ .stage = .done })) |t| {
+        if (!live.contains(t.tmux)) continue;
+        const s = try sessionToClose(ctx, db, t) orelse continue;
+        // Already taken by an earlier Done ticket with the same session.
+        for (out.items) |o| {
+            if (std.mem.eql(u8, o, s)) break;
+        } else {
+            try killTicketSession(ctx, db, t, s);
+            try out.append(a, s);
+        }
+    }
+    return out.items;
 }
 
 /// Approve. An approved plan goes to Queued: the dispatcher closes the
@@ -949,4 +1011,109 @@ test "work that doesn't land is flagged in Needs You until it does: conflicts, c
     try board.setChange(db, (try board.getTicket(db, a, three)).id, (try board.getTicket(db, a, one)).change, "");
     try move(ctx, cfg, db, a, three, .done, false, .close);
     try std.testing.expect(!try inNeeds(db, a, three));
+}
+
+test "going to Done closes the ticket's session, even when a test server of its own (or its own session) is what moved it" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const probe = std.process.run(gpa, io, .{ .argv = &.{ "tmux", "-V" } }) catch return error.SkipZigTest;
+    gpa.free(probe.stdout);
+    gpa.free(probe.stderr);
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    // A tmux server of the test's own, named on every call; never the real one.
+    var rnd: [8]u8 = undefined;
+    io.random(&rnd);
+    const sock = try std.fmt.allocPrint(a, "/tmp/cl-test-tmux-{x}", .{rnd});
+    defer std.Io.Dir.deleteFileAbsolute(io, sock) catch {};
+    defer if (std.process.run(gpa, io, .{ .argv = &.{ "tmux", "-S", sock, "kill-server" } })) |r| {
+        gpa.free(r.stdout);
+        gpa.free(r.stderr);
+    } else |_| {};
+    var env: std.process.Environ.Map = .init(gpa);
+    defer env.deinit();
+    const ctx: Ctx = .{ .io = io, .gpa = gpa, .perm = a, .env = &env, .home = "/tmp", .tmux_socket = sock };
+    const T = struct {
+        fn start(c: Ctx, name: []const u8) !void {
+            const out = try tmux.run(c, &.{ "new-session", "-d", "-s", name, "sleep", "600" });
+            c.gpa.free(out);
+        }
+        fn alive(c: Ctx, name: []const u8) bool {
+            return tmux.hasSession(c, std.fmt.allocPrint(c.perm, "={s}", .{name}) catch unreachable);
+        }
+        /// This process "runs in" `name`: TMUX and TMUX_PANE as tmux sets them.
+        fn runIn(c: Ctx, name: []const u8) !void {
+            const pane = try tmux.run(c, &.{ "display-message", "-p", "-t", name, "#{pane_id}" });
+            defer c.gpa.free(pane);
+            try c.env.put("TMUX", try std.fmt.allocPrint(c.perm, "{s},1,0", .{c.tmux_socket.?}));
+            try c.env.put("TMUX_PANE", std.mem.trimEnd(u8, pane, "\n"));
+        }
+        fn ticket(c: Ctx, d: board.Db, al: std.mem.Allocator, title: []const u8, session: []const u8) ![]const u8 {
+            const k = try board.createTicket(c, d, al, .{ .project = "qa", .title = title, .stage = .review });
+            try board.setSession(c, d, (try board.getTicket(d, al, k)).id, session, "", "", "");
+            return k;
+        }
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "qa", .dir = dir, .after_merge_claude = "none" });
+    const cfg: config.Config = .{ .profiles = &.{}, .default = "", .operator = "" };
+
+    // QA-1 has a test server running (its launch) and the human finishes it
+    // from that server's board: its session closes, and so does gutter; the
+    // launch running this is left for the sweep, or this would end halfway.
+    const one = try T.ticket(ctx, db, a, "One", "cl_qa-1_aa");
+    try T.start(ctx, "cl_qa-1_aa");
+    try T.start(ctx, "clg_qa-1");
+    try T.start(ctx, "clrun_qa-1_s1");
+    try T.start(ctx, "clrun_qa-1_s2");
+    try T.runIn(ctx, "clrun_qa-1_s1");
+    try move(ctx, cfg, db, a, one, .done, false, .close);
+    try std.testing.expect(!T.alive(ctx, "cl_qa-1_aa"));
+    try std.testing.expect(!T.alive(ctx, "clg_qa-1"));
+    try std.testing.expect(!T.alive(ctx, "clrun_qa-1_s2"));
+    try std.testing.expect(T.alive(ctx, "clrun_qa-1_s1"));
+
+    // QA-2 finishes from its own session (`cl ticket done --close`): its
+    // launches stop before the session goes.
+    const two = try T.ticket(ctx, db, a, "Two", "cl_qa-2_bb");
+    try T.start(ctx, "cl_qa-2_bb");
+    try T.start(ctx, "clrun_qa-2_s1");
+    try T.runIn(ctx, "cl_qa-2_bb");
+    try move(ctx, cfg, db, a, two, .done, false, .close);
+    try std.testing.expect(!T.alive(ctx, "clrun_qa-2_s1"));
+    try std.testing.expect(!T.alive(ctx, "cl_qa-2_bb"));
+    _ = env.swapRemove("TMUX");
+    _ = env.swapRemove("TMUX_PANE");
+
+    // Whatever moved QA-3 to Done was cut off before it closed the session:
+    // the sweep closes it. Not QA-4's: QA-5, not done, is using it.
+    const three = try T.ticket(ctx, db, a, "Three", "cl_qa-3_cc");
+    try T.start(ctx, "cl_qa-3_cc");
+    try board.move(ctx, db, a, three, .done);
+    const four = try T.ticket(ctx, db, a, "Four", "cl_qa_shared");
+    _ = try T.ticket(ctx, db, a, "Five", "cl_qa_shared");
+    try T.start(ctx, "cl_qa_shared");
+    try board.move(ctx, db, a, four, .done);
+    const closed = try closeLeftSessions(ctx, db, a);
+    try std.testing.expectEqual(@as(usize, 1), closed.len);
+    try std.testing.expectEqualStrings("cl_qa-3_cc", closed[0]);
+    try std.testing.expect(!T.alive(ctx, "cl_qa-3_cc"));
+    try std.testing.expect(T.alive(ctx, "cl_qa_shared"));
+    try std.testing.expectEqual(@as(usize, 0), (try closeLeftSessions(ctx, db, a)).len);
+
+    // A deleted ticket's session and launches go with it.
+    const six = try T.ticket(ctx, db, a, "Six", "cl_qa-6_dd");
+    try T.start(ctx, "cl_qa-6_dd");
+    try T.start(ctx, "clrun_qa-6_s1");
+    try remove(ctx, db, a, six);
+    try std.testing.expect(!T.alive(ctx, "cl_qa-6_dd"));
+    try std.testing.expect(!T.alive(ctx, "clrun_qa-6_s1"));
+    try std.testing.expectError(error.NotFound, board.getTicket(db, a, six));
 }

@@ -763,7 +763,13 @@ worktrees root are left alone.
 
 ### Finishing
 
-Done closes the ticket's session. For a ticket with a branch of its own
+Done closes the ticket's session, whichever way it gets there (and so does
+deleting a ticket). Finished from the board of its own test server, that
+server's launch is left running until the minute sweep below stops it, so the
+request isn't cut off before the session is closed. Once a minute the main
+`cl web` also closes any Done ticket's session still alive that no unfinished
+ticket uses, should whatever moved it have been stopped halfway (say, `cl web`
+restarted by an after-merge command). For a ticket with a branch of its own
 (a jj change, or a git worktree's branch) you choose what happens to the branch first: the board asks
 when a card is dropped on Done (or Done is picked, or it is approved out of
 testing), and the CLI takes a flag:
@@ -792,7 +798,9 @@ PR link becomes a comment, and then the session closes.
 A jj change is merged by cl itself: it rebases the change onto trunk and,
 with no conflicts, moves trunk to it and drops the bookmark (a change with no
 edits is dropped instead). A checkout left on the merged change gets a new one
-on top, and one with nothing of its own moves up to trunk. When the checkout's
+on top, and one with nothing of its own moves up to trunk. The ticket's
+worktree is brought up to date first (`jj workspace update-stale`), so it
+ends up on trunk with the merged files and nothing pending. When the checkout's
 files changed and the session is still there, Claude is asked to restart what
 runs from it before Done. Conflicts are recorded by jj in the change and put on
 the ticket as a `conflict` flag listing the files; trunk stays put, and Claude

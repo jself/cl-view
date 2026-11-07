@@ -471,7 +471,13 @@ pub fn mergeChange(ctx: Ctx, a: std.mem.Allocator, dir: []const u8, work_dir: []
 /// a new change on top (or its edits would rewrite trunk), and one with
 /// nothing of its own moves up to trunk so it has the merged code. A working
 /// copy with work of its own stays where it is. True when it moved.
+///
+/// A ticket's workspace is stale first: the merge rewrote its change from
+/// the project's checkout. It is brought up to date (the files on disk too),
+/// or jj refuses to look at it and it would keep the pre-merge files, as if
+/// work were left there.
 pub fn catchUp(ctx: Ctx, a: std.mem.Allocator, dir: []const u8, trunk: []const u8) bool {
+    _ = run(ctx, a, &.{ "jj", "-R", dir, "workspace", "update-stale" }) catch {};
     const t = sym(a, trunk) catch return false;
     const revs = std.fmt.allocPrint(a, "@ & (::{0s} | ((empty() & description(exact:\"\") & (::{0s})+) ~ {0s}+))", .{t}) catch return false;
     const hit = changes(ctx, a, dir, revs) catch return false;
@@ -662,6 +668,27 @@ test "a change per ticket: switch, merge back, conflicts" {
     try std.testing.expectEqualStrings("1 change on t-6-moves isn't in master", unmergedWork(ctx, a, repo, six.id, six.bookmark, trunk).?);
     try std.testing.expect(unmergedWork(ctx, a, repo, five.id, "", trunk) == null);
     try std.testing.expect(unmergedWork(ctx, a, repo, four.id, "", trunk) == null);
+
+    // A ticket merged from its workspace: the merge leaves the workspace
+    // stale, and catching up brings it to master with the merged files on
+    // disk and nothing of its own left.
+    const seven = try newChange(ctx, a, repo, trunk, "T-7: in a workspace", "t-7-ws");
+    const wt7 = try createOn(ctx, a, cfg, repo, "demo", "T-7", "ws", seven.id, seven.bookmark, trunk);
+    var wdir7 = try std.Io.Dir.cwd().openDir(ctx.io, wt7.path, .{});
+    defer wdir7.close(ctx.io);
+    try wdir7.writeFile(ctx.io, .{ .sub_path = "e.txt", .data = "seven\n" });
+    // Master moves on meanwhile, so the merge rebases T-7.
+    _ = catchUp(ctx, a, repo, trunk);
+    const eight = try newChange(ctx, a, repo, trunk, "T-8: first", "t-8-first");
+    try tmp.dir.writeFile(ctx.io, .{ .sub_path = "f.txt", .data = "eight\n" });
+    try std.testing.expect((try mergeChange(ctx, a, repo, "", eight.id, eight.bookmark, trunk)).merged);
+    try std.testing.expect((try mergeChange(ctx, a, repo, wt7.path, seven.id, seven.bookmark, trunk)).merged);
+    try std.testing.expect(catchUp(ctx, a, wt7.path, trunk));
+    try std.testing.expectEqualStrings("", try run(ctx, a, &.{ "jj", "-R", wt7.path, "diff", "--summary" }));
+    try std.testing.expect(!std.mem.eql(u8, seven.id, try workingChange(ctx, a, wt7.path)));
+    try std.testing.expectEqualStrings("seven\n", read(ctx, wdir7, a, "e.txt"));
+    try std.testing.expectEqualStrings("eight\n", read(ctx, wdir7, a, "f.txt"));
+    try std.testing.expectEqualStrings("seven\n", try run(ctx, a, &.{ "git", "-C", repo, "show", "master:e.txt" }));
 
     // cl's own files stay out of changes.
     excludeClFiles(ctx, a, repo);
