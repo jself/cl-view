@@ -1050,6 +1050,16 @@ fn getTicket(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, r
     // gutter may have been opened elsewhere (cl t gutter): relay it too.
     const gutter_port = try review.gutterPort(ctx, a, t.key);
     if (gutter_port) |p| web.relayGutter(ctx, cfg, t.key, p);
+    // Opened from another machine (`?relay=1`, the phone): the plan's local
+    // apps get relays it can reach (web.relayPlan); the board rewrites links to them.
+    var relay_buf: [8]u8 = undefined;
+    const want_relays = std.mem.eql(u8, web.queryValue(req.head.target, "relay", &relay_buf) orelse "", "1");
+    var relays: std.ArrayList(struct { host: []const u8, port: u16 }) = .empty;
+    if (plan != null and want_relays) for (try review.localOrigins(a, plan.?)) |o| {
+        if (web.relayPlan(ctx, t.key, o.host, o.addr)) |port| try relays.append(a, .{ .host = o.host, .port = port });
+    };
+    var ip_buf: [64]u8 = undefined;
+    const relay_ip = if (relays.items.len > 0) web.relayIp(ctx, &ip_buf) orelse "" else "";
     var subs: std.ArrayList(TicketRow) = .empty;
     for (try board.listTickets(db, a, .{ .parent = t.key })) |c| try subs.append(a, .{ .ticket = c, .status = ss.map.get(c.tmux) orelse "" });
     try ok(req, a, .{
@@ -1068,6 +1078,10 @@ fn getTicket(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, r
         .launches = if (plan) |p| try review.launchStates(ctx, a, t.key, p) else &.{},
         .ready = if (plan) |p| try review.waitStates(ctx, a, p) else &.{},
         .gutter_port = gutter_port,
+        .relays = relays.items,
+        // Where they listen: the tailscale IP (the board uses its own host name
+        // instead when that is a tailnet one).
+        .relay_ip = relay_ip,
         // The last automated review (checked: one whose reviewer died or ran
         // too long reads as failed), and whether it is of an earlier round.
         .autoreview = ar,

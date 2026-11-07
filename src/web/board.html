@@ -1190,7 +1190,7 @@ async function openTicket(key, tab, focus) {
 }
 async function loadDetail(key, quiet) {
   let d;
-  try { d = await api("ticket/" + encodeURIComponent(key)); }
+  try { d = await api("ticket/" + encodeURIComponent(key) + (remoteView ? "?relay=1" : "")); }
   catch (e) { if (!quiet) toast(e.message, true); return; }
   // Another ticket was opened while this one loaded: never show this one there.
   if (state.open !== key) return;
@@ -1688,14 +1688,14 @@ function testTab(d) {
   let ci = all.findIndex((c) => c.si === at);
   return `<div class="wiz">${dots}
     <div class="muted" style="font-size:calc(12 * var(--u))">Step ${at + 1} of ${n}</div><strong style="font-size:calc(16 * var(--u))">${esc(st.title)}</strong>
-    ${st.do.length ? `<div class="do">${st.do.map((x) => `<p>${linkify(x)}</p>`).join("")}</div>` : ""}
+    ${st.do.length ? `<div class="do">${st.do.map((x) => `<p>${linkify(x, (u) => here(u, d))}</p>`).join("")}</div>` : ""}
     ${st.run ? `<div><pre class="term">${esc(st.run)}</pre>
       <div class="actions" style="margin-top:calc(8 * var(--u));align-items:center"><button type="button" class="btn primary" data-launch="${at + 1}">${l ? "Restart" : "Run"}</button>${l ? `<button type="button" class="btn" data-launch-stop="${at + 1}">Stop</button>` : ""}
       ${l ? `<span class="muted">${l.running ? "Running" : "Exited"}</span>` : ""}</div>
       ${l ? `<div class="tail" style="margin-top:calc(8 * var(--u))"><pre class="term runout" data-follow="${esc(d.ticket.key)}:${at}">${esc(l.output || "(no output yet)")}</pre>
         <button type="button" class="tobottom" data-run-bottom="${esc(d.ticket.key)}:${at}" ${runUnfollowed[d.ticket.key + ":" + at] ? "" : "hidden"}>Scroll to bottom ↓</button></div>` : ""}</div>` : ""}
     ${st.wait ? `<p class="wait ${ready ? "up" : ""}">${ready === true ? "✓ Answering" : ready === false ? "… Not answering yet" : "Waits for"}: ${esc(st.wait)}</p>` : ""}
-    ${st.open.length ? `<div class="actions">${st.open.map((u) => `<a class="btn" href="${esc(u)}" target="_blank" rel="noopener">Open ${esc(u.replace(/^https?:\/\//, ""))} ↗</a>`).join("")}</div>` : ""}
+    ${st.open.length ? `<div class="actions">${st.open.map((u) => here(u, d)).map((u) => `<a class="btn" href="${esc(u)}" target="_blank" rel="noopener">Open ${esc(u.replace(/^https?:\/\//, ""))} ↗</a>`).join("")}</div>` : ""}
     ${st.checks.length ? `<div style="display:flex;flex-direction:column;gap:calc(8 * var(--u))">${st.checks.map((c) => { const i = ci++; const r = state.checks["c" + i] || {};
       return `<div class="check"><span>${esc(c)}</span><div class="pf"><button type="button" class="btn pass ${r.pass === true ? "on" : ""}" data-check="${i}" data-pass="1">Pass</button>
         <button type="button" class="btn fail ${r.pass === false ? "on" : ""}" data-check="${i}" data-pass="0">Fail</button></div>
@@ -1728,9 +1728,25 @@ function saveProgress() {
   clearTimeout(progressTimer);
   progressTimer = setTimeout(() => api(`ticket/${encodeURIComponent(key)}/test-progress`, { progress }).catch((e) => toast("Couldn't save your progress: " + e.message, true)), 600);
 }
-// Plain text with its http(s) URLs as links that open in a new tab.
-function linkify(text) {
-  return esc(text).replace(/https?:\/\/[^\s<)`]+[^\s<)`.,;]/g, (u) => `<a href="${u}" target="_blank" rel="noopener">${u}</a>`);
+// Plain text with its http(s) URLs as links that open in a new tab (where
+// `to` sends them, when given).
+function linkify(text, to) {
+  return esc(text).replace(/https?:\/\/[^\s<)`]+[^\s<)`.,;]/g, (u) => { const v = to ? esc(to(u.replace(/&amp;/g, "&"))) : u; return `<a href="${v}" target="_blank" rel="noopener">${v}</a>`; });
+}
+// Seen from another machine (the phone, over tailscale), a test plan's
+// localhost links mean nothing there: they go to cl web's relays for those
+// apps instead (web.relayPlan), http://<the board's tailnet host>:<port>. On
+// this machine they stay as they are.
+const remoteView = !/^(localhost|127(\.\d+){3}|\[::1\])$/i.test(location.hostname);
+function here(u, d) {
+  if (!remoteView || !d.relays?.length) return u;
+  let url; try { url = new URL(u); } catch { return u; }
+  const r = url.protocol === "http:" && d.relays.find((x) => x.host === url.host);
+  if (!r) return u;
+  // The relays listen on the tailscale IP only: the page's own host name when
+  // it reaches that (MagicDNS, or the IP itself), else the IP.
+  const host = /\.ts\.net$/i.test(location.hostname) || location.hostname === d.relay_ip || !d.relay_ip ? location.hostname : d.relay_ip;
+  return `http://${host}:${r.port}${url.pathname}${url.search}${url.hash}`;
 }
 function commentsTab(d) {
   const t = d.ticket; const back = t.stage === "review" || t.stage === "testing";

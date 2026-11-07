@@ -1051,9 +1051,41 @@ cl pastes the review into the ticket's session, keeps it on the ticket as your
 comment, and the ticket starts another round. Closing gutter without
 submitting (or `--stop`) leaves the ticket as it was. gutter only listens on
 127.0.0.1, so while it runs the board links to it and `cl web` also opens the
-same port on its other `web.listen` addresses (tailscale) and forwards it. Test results that all pass move a ticket in testing to
+same port on its other `web.listen` addresses (tailscale) and forwards it,
+answering only connections from tailscale (a 100.64.0.0/10 or
+fd7a:115c:a1e0::/48 address; see "Test plans on the phone"). Test results that all pass move a ticket in testing to
 done; a failure sends them to Claude for another round, and so can comments
 when everything passed (the board asks).
+
+#### Test plans on the phone
+
+A test plan's links usually name this machine (`http://localhost:4002/`,
+`http://events.localhost:4002/`), which mean nothing on a phone. When the
+board is opened from another host (anything but localhost, 127.x or [::1],
+like `https://<machine>.<tailnet>.ts.net:8443`), each local `http://` app the
+plan links to (`open:` and URLs in its text) gets a relay in `cl web`, and the
+board's links go there instead: `http://<host>:<port>/same/path`, where the
+host is the board's own when that is a tailnet name (`*.ts.net`) or the
+tailscale IP, else the tailscale IP (a board opened at a LAN address still
+links to the tailnet).
+Opened on this machine, the links stay as Claude wrote them.
+
+- A relay listens on a free port on this machine's tailscale IP only (never
+  0.0.0.0, a LAN address or `tailscale serve`/Funnel), and answers only
+  connections from a tailscale address (gutter's relay too, even on a LAN
+  address in `web.listen`). Tailscale's firewall drops those that
+  don't arrive over tailscale, so nothing outside the tailnet gets in. It
+  doesn't ask for the board's password: anyone on your tailnet who knows the
+  port can reach the app while the relay is up, which is for six hours after
+  the board last showed the plan (and until `cl web` restarts).
+- It sends each request with the Host the app expects (`events.localhost:4002`,
+  so Vite's host check and subdomain routing work) and an Origin or Referer of
+  its own rewritten the same way; a redirect to the app's own URL comes back as
+  one to the relay. WebSockets (hot reload) go through.
+- It's plain http (tailscale encrypts it), so the page isn't a secure context
+  there: service workers and the like won't run. Links the app itself makes to
+  `localhost`, and cookies shared across `*.localhost`, don't follow it.
+- Without tailscale (`tailscale ip -4` fails) the links stay as they are.
 
 #### Automated review
 

@@ -660,6 +660,64 @@ pub fn waitStates(ctx: Ctx, a: std.mem.Allocator, plan: TestPlan) ![]?bool {
     return out;
 }
 
+/// A local app a test plan links to: how its URLs name it
+/// ("events.localhost:4002", as a browser's `URL.host` does) and where it listens.
+pub const LocalOrigin = struct { host: []const u8, addr: std.Io.net.IpAddress };
+
+/// The local http apps the plan's pages (open: and URLs in what to do) are
+/// on, each once: what cl web relays so they open from the phone.
+pub fn localOrigins(a: std.mem.Allocator, plan: TestPlan) ![]LocalOrigin {
+    var out: std.ArrayList(LocalOrigin) = .empty;
+    for (plan.steps) |st| {
+        var urls: std.ArrayList([]const u8) = .empty;
+        try urls.appendSlice(a, st.open);
+        for (st.do) |line| {
+            var rest = line;
+            while (urlIn(rest)) |u| {
+                try urls.append(a, u);
+                rest = rest[@intFromPtr(u.ptr) - @intFromPtr(rest.ptr) + u.len ..];
+            }
+        }
+        for (urls.items) |url| {
+            if (!std.ascii.startsWithIgnoreCase(url, "http://")) continue;
+            const addr = localAddress(url) orelse continue;
+            const uri = std.Uri.parse(url) catch continue;
+            var buf: [std.Io.net.HostName.max_len]u8 = undefined;
+            const name = std.ascii.lowerString(&buf, (uri.getHost(&buf) catch continue).bytes);
+            const host = if (uri.port) |p| (if (p == 80) try a.dupe(u8, name) else try std.fmt.allocPrint(a, "{s}:{d}", .{ name, p })) else try a.dupe(u8, name);
+            for (out.items) |o| {
+                if (std.mem.eql(u8, o.host, host)) break;
+            } else try out.append(a, .{ .host = host, .addr = addr });
+        }
+    }
+    return out.toOwnedSlice(a);
+}
+
+test localOrigins {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const md =
+        \\## Start
+        \\run: npm run dev
+        \\wait: http://localhost:9999
+        \\## Look
+        \\open: http://localhost:4002/x
+        \\open: http://Events.localhost:4002/
+        \\open: https://localhost:4443/
+        \\open: https://example.com/
+        \\Then http://127.0.0.1:5173/a and http://localhost:4002/y.
+        \\- [ ] It works
+    ;
+    const p = try parseTestPlan(a, md);
+    const o = try localOrigins(a, p);
+    try std.testing.expectEqual(@as(usize, 3), o.len);
+    try std.testing.expectEqualStrings("localhost:4002", o[0].host);
+    try std.testing.expectEqualStrings("events.localhost:4002", o[1].host);
+    try std.testing.expectEqualStrings("127.0.0.1:5173", o[2].host);
+    try std.testing.expectEqual(@as(u16, 4002), o[1].addr.getPort());
+}
+
 /// The loopback address and port of a local URL (localhost, *.localhost,
 /// 127.x, [::1]), else null.
 fn localAddress(url: []const u8) ?std.Io.net.IpAddress {

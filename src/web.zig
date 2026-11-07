@@ -379,78 +379,232 @@ fn listenLoop(state: *State, spec: Spec) void {
     }
 }
 
-// ---- gutter relay ----
+// ---- relays ----
 
-/// gutter listens on 127.0.0.1 only. To open it from another machine (the
-/// phone, over tailscale), the same port is opened on this server's other
-/// listen addresses and relayed to it, only while that ticket's gutter runs.
-const Relay = struct { port: u16, key: [32]u8, key_len: usize };
-var relays: [32]Relay = undefined;
+/// gutter and a test plan's dev servers listen on loopback only. To open them
+/// from another machine (the phone, over tailscale), cl web relays to them,
+/// for tailscale only: a relay answers only connections from a tailnet
+/// address (`tailnetPeer`; tailscale's firewall drops those that don't come in
+/// over tailscale0), and a plan relay listens only on this machine's tailscale
+/// IP. Nothing goes through `tailscale serve` or its public Funnel.
+///
+/// gutter: the same port, relayed as it is, only while that ticket's gutter
+/// runs. A test plan's local URL (localhost:4002, events.localhost:4002): a
+/// port of its own (ephemeral, so it never takes one a dev server may still
+/// want), relayed as HTTP with the Host the app expects (relayHttp), until
+/// `plan_relay_secs` after the board last asked for it.
+const Relay = struct {
+    port: u16,
+    key: [32]u8 = undefined,
+    key_len: usize = 0,
+    /// A plan relay's app: the Host it is reached by ("" for gutter), its
+    /// loopback address, and until when the relay answers.
+    app_host: [128]u8 = undefined,
+    app_host_len: usize = 0,
+    to: std.Io.net.IpAddress = undefined,
+    until: i64 = 0,
+
+    fn host(r: *const Relay) []const u8 {
+        return r.app_host[0..r.app_host_len];
+    }
+};
+var relays: [64]Relay = undefined;
 var relay_count: usize = 0;
 var relay_mutex: std.Io.Mutex = .init;
+
+/// How long a test plan's relay stays up after the board last showed the plan.
+const plan_relay_secs = 6 * 3600;
 
 /// Make the ticket's gutter on 127.0.0.1:`port` reachable on the other
 /// web.listen addresses.
 pub fn relayGutter(ctx: Ctx, cfg: config.Config, key: []const u8, port: u16) void {
     relay_mutex.lockUncancelable(ctx.io);
     defer relay_mutex.unlock(ctx.io);
-    for (relays[0..relay_count]) |*r| if (r.port == port) {
+    // gutter's own entries only: a plan relay's port is on another address
+    // and can have the same number.
+    for (relays[0..relay_count]) |*r| if (r.app_host_len == 0 and r.port == port) {
         // Same port, maybe a new ticket: point it there.
         r.key_len = @min(key.len, r.key.len);
         @memcpy(r.key[0..r.key_len], key[0..r.key_len]);
         return;
     };
     if (relay_count == relays.len) return;
-    var r: Relay = .{ .port = port, .key = undefined, .key_len = @min(key.len, 32) };
+    var r: Relay = .{ .port = port, .key_len = @min(key.len, 32) };
     @memcpy(r.key[0..r.key_len], key[0..r.key_len]);
-    relays[relay_count] = r;
+    const index = relay_count;
+    relays[index] = r;
     relay_count += 1;
     var it = std.mem.splitScalar(u8, cfg.web.listen, ',');
     while (it.next()) |raw| {
-        const text = std.mem.trim(u8, raw, " \t");
-        if (text.len == 0) continue;
-        const spec = parseSpec(text);
         var ip_buf: [64]u8 = undefined;
-        const host = if (std.mem.eql(u8, spec.host, "tailscale")) tailscaleIp(ctx, &ip_buf) catch continue else spec.host;
-        if (std.mem.startsWith(u8, host, "127.") or std.mem.eql(u8, host, "::1") or std.mem.eql(u8, host, "localhost")) continue;
+        const host = otherAddress(ctx, raw, &ip_buf) orelse continue;
         const addr = std.Io.net.IpAddress.parse(host, port) catch continue;
-        const t = std.Thread.spawn(.{}, relayListen, .{ ctx, addr, port }) catch continue;
+        const t = std.Thread.spawn(.{}, relayListen, .{ ctx, addr, index }) catch continue;
         t.detach();
     }
 }
 
-/// The ticket the relay on `port` is for, while its gutter still uses that port.
-fn relayLive(ctx: Ctx, port: u16) bool {
-    var key_buf: [32]u8 = undefined;
-    var key: []const u8 = "";
-    {
-        relay_mutex.lockUncancelable(ctx.io);
-        defer relay_mutex.unlock(ctx.io);
-        for (relays[0..relay_count]) |r| if (r.port == port) {
-            @memcpy(key_buf[0..r.key_len], r.key[0..r.key_len]);
-            key = key_buf[0..r.key_len];
-        };
-    }
-    if (key.len == 0) return false;
-    var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);
-    defer arena_state.deinit();
-    const live = review.gutterPort(ctx, arena_state.allocator(), key) catch return false;
-    return live == port;
+/// A web.listen entry's host when it isn't loopback (`tailscale` resolved), else null.
+fn otherAddress(ctx: Ctx, raw: []const u8, buf: *[64]u8) ?[]const u8 {
+    const text = std.mem.trim(u8, raw, " \t");
+    if (text.len == 0) return null;
+    const spec = parseSpec(text);
+    const host = if (std.mem.eql(u8, spec.host, "tailscale")) tailscaleIp(ctx, buf) catch return null else spec.host;
+    if (std.mem.startsWith(u8, host, "127.") or std.mem.eql(u8, host, "::1") or std.mem.eql(u8, host, "localhost")) return null;
+    return host;
 }
 
-fn relayListen(ctx: Ctx, addr: std.Io.net.IpAddress, port: u16) void {
-    var server = addr.listen(ctx.io, .{ .reuse_address = true }) catch |err| {
+/// Make a test plan's local app reachable from the tailnet: `app_host` is
+/// how its URL names it ("events.localhost:4002"), `to` where it listens. The
+/// port it is relayed on (on the tailscale IP, `relayIp`), or null without
+/// tailscale or when it can't be done.
+pub fn relayPlan(ctx: Ctx, key: []const u8, app_host: []const u8, to: std.Io.net.IpAddress) ?u16 {
+    if (app_host.len == 0 or app_host.len > 128) return null;
+    if (claimPlan(ctx, key, app_host, to, null)) |port| return port;
+    // A new listener: found and opened without holding relay_mutex, which
+    // every relay's accept takes.
+    var ip_buf: [64]u8 = undefined;
+    const ip = relayIp(ctx, &ip_buf) orelse return null;
+    const addr = std.Io.net.IpAddress.parse(ip, 0) catch return null;
+    const server = addr.listen(ctx.io, .{ .reuse_address = true }) catch |err| {
+        logf("test plan relay on {f}: {s}", .{ addr, @errorName(err) });
+        return null;
+    };
+    return claimPlan(ctx, key, app_host, to, server);
+}
+
+/// Point a plan relay at the app: the one it already has, one that ran out
+/// (its listener is still up), or else a new entry on `server`, which is
+/// closed when it isn't needed after all. Its port, or null.
+fn claimPlan(ctx: Ctx, key: []const u8, app_host: []const u8, to: std.Io.net.IpAddress, server: ?std.Io.net.Server) ?u16 {
+    relay_mutex.lockUncancelable(ctx.io);
+    defer relay_mutex.unlock(ctx.io);
+    const now = ctx.nowSeconds();
+    const r: *Relay = pick: {
+        for (relays[0..relay_count]) |*r| if (r.app_host_len > 0 and std.mem.eql(u8, r.host(), app_host)) break :pick r;
+        for (relays[0..relay_count]) |*r| if (r.app_host_len > 0 and r.until < now) break :pick r;
+        var srv = server orelse return null;
+        if (relay_count == relays.len) {
+            srv.deinit(ctx.io);
+            return null;
+        }
+        const index = relay_count;
+        relays[index] = .{ .port = srv.socket.address.getPort() };
+        const t = std.Thread.spawn(.{}, relayAccept, .{ ctx, srv, index }) catch {
+            srv.deinit(ctx.io);
+            return null;
+        };
+        t.detach();
+        relay_count += 1;
+        break :pick &relays[index];
+    };
+    if (server) |srv| if (r.port != srv.socket.address.getPort()) {
+        // Another request set it up meanwhile.
+        var x = srv;
+        x.deinit(ctx.io);
+    };
+    r.key_len = @min(key.len, r.key.len);
+    @memcpy(r.key[0..r.key_len], key[0..r.key_len]);
+    r.app_host_len = app_host.len;
+    @memcpy(r.app_host[0..app_host.len], app_host);
+    r.to = to;
+    r.until = now + plan_relay_secs;
+    return r.port;
+}
+
+/// This machine's tailscale IP, where plan relays listen; null without
+/// tailscale. Remembered for a while (a failure for less), as the board asks
+/// on every refresh and each answer would run the tailscale CLI.
+pub fn relayIp(ctx: Ctx, buf: *[64]u8) ?[]const u8 {
+    ts_mutex.lockUncancelable(ctx.io);
+    defer ts_mutex.unlock(ctx.io);
+    const now = ctx.nowSeconds();
+    if (now >= ts_cache.until) {
+        const ip = tailscaleIp(ctx, &ts_cache.ip) catch "";
+        ts_cache.len = ip.len;
+        ts_cache.until = now + @as(i64, if (ip.len > 0) 300 else 30);
+    }
+    if (ts_cache.len == 0) return null;
+    @memcpy(buf[0..ts_cache.len], ts_cache.ip[0..ts_cache.len]);
+    return buf[0..ts_cache.len];
+}
+var ts_cache: struct { ip: [64]u8 = undefined, len: usize = 0, until: i64 = 0 } = .{};
+var ts_mutex: std.Io.Mutex = .init;
+
+/// A tailnet address: 100.64.0.0/10 (also as ::ffff:100.x, on a [::]
+/// listener) or fd7a:115c:a1e0::/48 (tailscale's).
+fn tailnetPeer(addr: std.Io.net.IpAddress) bool {
+    const cgnat = struct {
+        fn f(b: []const u8) bool {
+            return b[0] == 100 and b[1] & 0xc0 == 64;
+        }
+    }.f;
+    return switch (addr) {
+        .ip4 => |v| cgnat(&v.bytes),
+        .ip6 => |v| std.mem.eql(u8, v.bytes[0..6], &.{ 0xfd, 0x7a, 0x11, 0x5c, 0xa1, 0xe0 }) or
+            (std.mem.eql(u8, v.bytes[0..12], &(@as([10]u8, @splat(0)) ++ [_]u8{ 0xff, 0xff })) and cgnat(v.bytes[12..])),
+    };
+}
+
+test tailnetPeer {
+    const p = struct {
+        fn f(s: []const u8) bool {
+            return tailnetPeer(std.Io.net.IpAddress.parse(s, 1) catch unreachable);
+        }
+    }.f;
+    try std.testing.expect(p("100.96.124.100"));
+    try std.testing.expect(p("100.64.0.1"));
+    try std.testing.expect(p("100.127.255.255"));
+    try std.testing.expect(p("fd7a:115c:a1e0::1"));
+    try std.testing.expect(p("::ffff:100.96.124.100"));
+    try std.testing.expect(!p("::ffff:192.168.1.20"));
+    try std.testing.expect(!p("100.128.0.1"));
+    try std.testing.expect(!p("100.63.255.255"));
+    try std.testing.expect(!p("192.168.1.20"));
+    try std.testing.expect(!p("127.0.0.1"));
+    try std.testing.expect(!p("fd7a:115c:a1e1::1"));
+}
+
+/// Relay `index` (entries never move), while it should answer: a plan relay
+/// until it runs out, gutter's while that ticket's gutter still uses its port.
+fn relayLive(ctx: Ctx, index: usize) ?Relay {
+    const r = blk: {
+        relay_mutex.lockUncancelable(ctx.io);
+        defer relay_mutex.unlock(ctx.io);
+        break :blk relays[index];
+    };
+    if (r.app_host_len > 0) return if (r.until >= ctx.nowSeconds()) r else null;
+    if (r.key_len == 0) return null;
+    var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);
+    defer arena_state.deinit();
+    const live = review.gutterPort(ctx, arena_state.allocator(), r.key[0..r.key_len]) catch return null;
+    return if (live == r.port) r else null;
+}
+
+fn relayListen(ctx: Ctx, addr: std.Io.net.IpAddress, index: usize) void {
+    const server = addr.listen(ctx.io, .{ .reuse_address = true }) catch |err| {
         logf("gutter relay on {f}: {s}", .{ addr, @errorName(err) });
         return;
     };
+    relayAccept(ctx, server, index);
+}
+
+fn relayAccept(ctx: Ctx, listening: std.Io.net.Server, index: usize) void {
+    var server = listening;
     defer server.deinit(ctx.io);
     while (true) {
         const client = server.accept(ctx.io) catch return;
-        if (!relayLive(ctx, port)) {
+        // Tailscale only: anything else (a LAN device, when web.listen has
+        // 0.0.0.0 or a LAN address for gutter) is turned away.
+        if (!tailnetPeer(client.socket.address)) {
             client.close(ctx.io);
             continue;
         }
-        const t = std.Thread.spawn(.{}, relayConn, .{ ctx, client, port }) catch {
+        const r = relayLive(ctx, index) orelse {
+            client.close(ctx.io);
+            continue;
+        };
+        const t = std.Thread.spawn(.{}, relayConn, .{ ctx, client, r }) catch {
             client.close(ctx.io);
             continue;
         };
@@ -458,9 +612,10 @@ fn relayListen(ctx: Ctx, addr: std.Io.net.IpAddress, port: u16) void {
     }
 }
 
-fn relayConn(ctx: Ctx, client: std.Io.net.Stream, port: u16) void {
+fn relayConn(ctx: Ctx, client: std.Io.net.Stream, r: Relay) void {
     defer client.close(ctx.io);
-    const local = std.Io.net.IpAddress.parse("127.0.0.1", port) catch return;
+    if (r.app_host_len > 0) return relayHttp(ctx, client, r);
+    const local = std.Io.net.IpAddress.parse("127.0.0.1", r.port) catch return;
     const upstream = local.connect(ctx.io, .{ .mode = .stream }) catch return;
     defer upstream.close(ctx.io);
     const back = std.Thread.spawn(.{}, pipe, .{ ctx, upstream, client }) catch return;
@@ -468,7 +623,255 @@ fn relayConn(ctx: Ctx, client: std.Io.net.Stream, port: u16) void {
     back.join();
 }
 
-/// Copy `from` to `to` until `from` ends, then end `to`'s sending side.
+/// One request to a test plan's app, as if it were opened on this machine:
+/// its Host (and an Origin or Referer naming where it was opened from) become
+/// the app's own, and a redirect to the app's own URL comes back as one to
+/// where it was opened from. Each request gets its own connection
+/// (`Connection: close`), so only the first head needs rewriting; a WebSocket
+/// upgrade keeps its connection and is relayed as it is after that.
+fn relayHttp(ctx: Ctx, client: std.Io.net.Stream, r: Relay) void {
+    var cbuf: [32 * 1024]u8 = undefined;
+    var cr = client.reader(ctx.io, &cbuf);
+    const req_head = readHead(&cr.interface) orelse return;
+    const seen = headerIn(req_head, "host") orelse return;
+    var out_buf: [40 * 1024]u8 = undefined;
+    const out = rewriteRequest(&out_buf, req_head, seen, r.host()) orelse return;
+
+    const upstream = r.to.connect(ctx.io, .{ .mode = .stream }) catch blk: {
+        // `localhost` may be served on ::1 only (Node does that).
+        const v6 = std.Io.net.IpAddress.parse("::1", r.to.getPort()) catch return;
+        break :blk v6.connect(ctx.io, .{ .mode = .stream }) catch return;
+    };
+    defer upstream.close(ctx.io);
+    {
+        var wbuf: [4096]u8 = undefined;
+        var w = upstream.writer(ctx.io, &wbuf);
+        w.interface.writeAll(out) catch return;
+        w.interface.writeAll(cr.interface.buffered()) catch return;
+        w.interface.flush() catch return;
+    }
+    // The rest of the request (a body, or a WebSocket's frames) as it comes.
+    const up = std.Thread.spawn(.{}, pipe, .{ ctx, client, upstream }) catch return;
+    defer up.join();
+
+    var ubuf: [32 * 1024]u8 = undefined;
+    var ur = upstream.reader(ctx.io, &ubuf);
+    var wbuf: [4096]u8 = undefined;
+    var w = client.writer(ctx.io, &wbuf);
+    if (readHead(&ur.interface)) |head| {
+        var back_buf: [40 * 1024]u8 = undefined;
+        w.interface.writeAll(rewriteResponse(&back_buf, head, seen, r.host()) orelse head) catch return;
+    }
+    w.interface.writeAll(ur.interface.buffered()) catch return;
+    w.interface.flush() catch return;
+    pipe(ctx, upstream, client);
+}
+
+/// An HTTP head (through its blank line) taken from `r`, or null when the
+/// connection ends first or it doesn't fit the buffer.
+fn readHead(r: *std.Io.Reader) ?[]const u8 {
+    while (true) {
+        const b = r.buffered();
+        if (std.mem.indexOf(u8, b, "\r\n\r\n")) |i| {
+            r.toss(i + 4);
+            return b[0 .. i + 4];
+        }
+        if (b.len == r.buffer.len) return null;
+        r.fillMore() catch return null;
+    }
+}
+
+/// The value of header `name` in an HTTP head.
+fn headerIn(head: []const u8, name: []const u8) ?[]const u8 {
+    var lines = std.mem.splitSequence(u8, head, "\r\n");
+    _ = lines.next();
+    while (lines.next()) |line| {
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        if (std.ascii.eqlIgnoreCase(line[0..colon], name)) return std.mem.trim(u8, line[colon + 1 ..], " \t");
+    }
+    return null;
+}
+
+/// Write `url` with its origin http(s)://`from` as http://`to`; false (and
+/// nothing written) when it isn't on `from`.
+fn swapOrigin(w: *std.Io.Writer, url: []const u8, from: []const u8, to: []const u8) !bool {
+    for ([_][]const u8{ "http://", "https://" }) |scheme| {
+        if (!std.mem.startsWith(u8, url, scheme)) continue;
+        const rest = url[scheme.len..];
+        if (!std.ascii.startsWithIgnoreCase(rest, from)) return false;
+        const tail = rest[from.len..];
+        if (tail.len > 0 and tail[0] != '/' and tail[0] != '?' and tail[0] != '#') return false;
+        try w.print("http://{s}{s}", .{ to, tail });
+        return true;
+    }
+    return false;
+}
+
+/// A request head for the app at `app_host`, from one sent to `seen`.
+fn rewriteRequest(buf: []u8, head: []const u8, seen: []const u8, app_host: []const u8) ?[]const u8 {
+    var w: std.Io.Writer = .fixed(buf);
+    rewriteRequestTo(&w, head, seen, app_host) catch return null;
+    return w.buffered();
+}
+
+fn rewriteRequestTo(w: *std.Io.Writer, head: []const u8, seen: []const u8, app_host: []const u8) !void {
+    const upgrade = headerIn(head, "upgrade") != null;
+    var lines = std.mem.splitSequence(u8, head[0 .. head.len - 4], "\r\n");
+    try w.print("{s}\r\n", .{lines.first()});
+    while (lines.next()) |line| {
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        const name = line[0..colon];
+        const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
+        if (std.ascii.eqlIgnoreCase(name, "host")) {
+            try w.print("Host: {s}\r\n", .{app_host});
+        } else if (std.ascii.eqlIgnoreCase(name, "origin") or std.ascii.eqlIgnoreCase(name, "referer")) {
+            try w.print("{s}: ", .{name});
+            if (!try swapOrigin(w, value, seen, app_host)) try w.writeAll(value);
+            try w.writeAll("\r\n");
+        } else if (!upgrade and (std.ascii.eqlIgnoreCase(name, "connection") or std.ascii.eqlIgnoreCase(name, "keep-alive"))) {
+            continue;
+        } else {
+            try w.print("{s}\r\n", .{line});
+        }
+    }
+    if (!upgrade) try w.writeAll("Connection: close\r\n");
+    try w.writeAll("\r\n");
+}
+
+/// A response head with a redirect to the app's own URL sent to `seen` instead.
+fn rewriteResponse(buf: []u8, head: []const u8, seen: []const u8, app_host: []const u8) ?[]const u8 {
+    var w: std.Io.Writer = .fixed(buf);
+    var lines = std.mem.splitSequence(u8, head[0 .. head.len - 4], "\r\n");
+    w.print("{s}\r\n", .{lines.first()}) catch return null;
+    while (lines.next()) |line| {
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
+        if (std.ascii.eqlIgnoreCase(line[0..colon], "location")) {
+            w.writeAll("Location: ") catch return null;
+            if (!(swapOrigin(&w, value, app_host, seen) catch return null)) w.writeAll(value) catch return null;
+            w.writeAll("\r\n") catch return null;
+        } else w.print("{s}\r\n", .{line}) catch return null;
+    }
+    w.writeAll("\r\n") catch return null;
+    return w.buffered();
+}
+
+test "a test plan's relay rewrites Host, Origin and redirects" {
+    var buf: [1024]u8 = undefined;
+    const req = "GET /events?x=1 HTTP/1.1\r\nHost: nova.ts.net:41234\r\nOrigin: http://nova.ts.net:41234\r\nReferer: http://nova.ts.net:41234/a\r\nConnection: keep-alive\r\nAccept: */*\r\n\r\n";
+    try std.testing.expectEqualStrings(
+        "GET /events?x=1 HTTP/1.1\r\nHost: events.localhost:4002\r\nOrigin: http://events.localhost:4002\r\nReferer: http://events.localhost:4002/a\r\nAccept: */*\r\nConnection: close\r\n\r\n",
+        rewriteRequest(&buf, req, "nova.ts.net:41234", "events.localhost:4002").?,
+    );
+    // A WebSocket (Vite's HMR) keeps its connection.
+    const ws = "GET /ws HTTP/1.1\r\nHost: nova.ts.net:41234\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n";
+    try std.testing.expectEqualStrings(
+        "GET /ws HTTP/1.1\r\nHost: localhost:4002\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n",
+        rewriteRequest(&buf, ws, "nova.ts.net:41234", "localhost:4002").?,
+    );
+    // Another site's Origin is left as it is.
+    const other = "POST / HTTP/1.1\r\nOrigin: https://evil.example\r\nHost: nova.ts.net:41234\r\n\r\n";
+    try std.testing.expect(std.mem.indexOf(u8, rewriteRequest(&buf, other, "nova.ts.net:41234", "localhost:4002").?, "Origin: https://evil.example\r\n") != null);
+    // nova.ts.net:412345 isn't nova.ts.net:41234.
+    const longer = "GET / HTTP/1.1\r\nHost: nova.ts.net:41234\r\nReferer: http://nova.ts.net:412345/\r\n\r\n";
+    try std.testing.expect(std.mem.indexOf(u8, rewriteRequest(&buf, longer, "nova.ts.net:41234", "localhost:4002").?, "Referer: http://nova.ts.net:412345/\r\n") != null);
+
+    const res = "HTTP/1.1 302 Found\r\nlocation: http://localhost:4002/login?next=%2F\r\nContent-Length: 0\r\n\r\n";
+    try std.testing.expectEqualStrings(
+        "HTTP/1.1 302 Found\r\nLocation: http://nova.ts.net:41234/login?next=%2F\r\nContent-Length: 0\r\n\r\n",
+        rewriteResponse(&buf, res, "nova.ts.net:41234", "localhost:4002").?,
+    );
+    const away = "HTTP/1.1 302 Found\r\nLocation: https://accounts.example/x\r\n\r\n";
+    try std.testing.expectEqualStrings(away, rewriteResponse(&buf, away, "nova.ts.net:41234", "localhost:4002").?);
+}
+
+/// The relay's end to end: `send` goes through a plan relay for
+/// events.localhost:4002 to an app on loopback that `app` plays (reading
+/// until `until`, then writing `reply`). What the app saw, and what came back.
+fn relayRoundTrip(send: []const []const u8, until: []const u8, reply: []const u8) !struct { seen: []u8, got: []u8 } {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var env: std.process.Environ.Map = .init(gpa);
+    const ctx: Ctx = .{ .io = io, .gpa = gpa, .perm = gpa, .env = &env, .home = "/tmp" };
+    const lo = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
+    var app = try lo.listen(io, .{ .reuse_address = true });
+    defer app.deinit(io);
+    var front = try lo.listen(io, .{ .reuse_address = true });
+    defer front.deinit(io);
+    var r: Relay = .{ .port = 0, .to = app.socket.address };
+    const host = "events.localhost:4002";
+    @memcpy(r.app_host[0..host.len], host);
+    r.app_host_len = host.len;
+
+    const Sides = struct {
+        fn relay(c: Ctx, srv: *std.Io.net.Server, rr: Relay) void {
+            const conn = srv.accept(c.io) catch return;
+            relayConn(c, conn, rr);
+        }
+        fn serve(c: Ctx, srv: *std.Io.net.Server, want: []const u8, answer: []const u8, out: *std.ArrayList(u8)) void {
+            const conn = srv.accept(c.io) catch return;
+            defer conn.close(c.io);
+            var rbuf: [4096]u8 = undefined;
+            var rd = conn.reader(c.io, &rbuf);
+            while (std.mem.indexOf(u8, rd.interface.buffered(), want) == null) rd.interface.fillMore() catch return;
+            out.appendSlice(c.gpa, rd.interface.buffered()) catch return;
+            var wbuf: [256]u8 = undefined;
+            var w = conn.writer(c.io, &wbuf);
+            w.interface.writeAll(answer) catch return;
+            w.interface.flush() catch return;
+        }
+    };
+    var seen: std.ArrayList(u8) = .empty;
+    errdefer seen.deinit(gpa);
+    const relay_t = try std.Thread.spawn(.{}, Sides.relay, .{ ctx, &front, r });
+    const app_t = try std.Thread.spawn(.{}, Sides.serve, .{ ctx, &app, until, reply, &seen });
+
+    const c = try front.socket.address.connect(io, .{ .mode = .stream });
+    var wbuf: [256]u8 = undefined;
+    var w = c.writer(io, &wbuf);
+    // In pieces, as a browser may send it (the head split, the body later).
+    for (send) |part| {
+        try w.interface.writeAll(part);
+        try w.interface.flush();
+        ctx.sleepMs(20);
+    }
+    var rbuf: [4096]u8 = undefined;
+    var rd = c.reader(io, &rbuf);
+    const got = try rd.interface.allocRemaining(gpa, .unlimited);
+    c.close(io);
+    app_t.join();
+    relay_t.join();
+    return .{ .seen = try seen.toOwnedSlice(gpa), .got = got };
+}
+
+test "relayHttp: a request reaches the app as on this machine, and its answer comes back" {
+    const gpa = std.testing.allocator;
+    const res = try relayRoundTrip(&.{
+        "POST /submit HTTP/1.1\r\nHost: nova.ts.net:5555\r\n",
+        "Origin: http://nova.ts.net:5555\r\nContent-Length: 11\r\nConnection: keep-alive\r\n\r\nhello",
+        " world",
+    }, "hello world", "HTTP/1.1 302 Found\r\nLocation: http://events.localhost:4002/done\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+    defer gpa.free(res.seen);
+    defer gpa.free(res.got);
+    try std.testing.expectEqualStrings(
+        "POST /submit HTTP/1.1\r\nHost: events.localhost:4002\r\nOrigin: http://events.localhost:4002\r\nContent-Length: 11\r\nConnection: close\r\n\r\nhello world",
+        res.seen,
+    );
+    try std.testing.expectEqualStrings("HTTP/1.1 302 Found\r\nLocation: http://nova.ts.net:5555/done\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok", res.got);
+}
+
+test "relayHttp: a WebSocket upgrade keeps its connection and frames go through" {
+    const gpa = std.testing.allocator;
+    const res = try relayRoundTrip(&.{
+        "GET /hmr HTTP/1.1\r\nHost: nova.ts.net:5555\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n",
+        "frame-1",
+    }, "frame-1", "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\nframe-back");
+    defer gpa.free(res.seen);
+    defer gpa.free(res.got);
+    try std.testing.expectEqualStrings("GET /hmr HTTP/1.1\r\nHost: events.localhost:4002\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\nframe-1", res.seen);
+    try std.testing.expectEqualStrings("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\nframe-back", res.got);
+}
+
 fn pipe(ctx: Ctx, from: std.Io.net.Stream, to: std.Io.net.Stream) void {
     var rbuf: [16 * 1024]u8 = undefined;
     var wbuf: [16 * 1024]u8 = undefined;
@@ -696,7 +1099,7 @@ fn safeNext(next: []const u8) ?[]const u8 {
 }
 
 /// One query parameter of `target`, percent-decoded into `buf`.
-fn queryValue(target: []const u8, name: []const u8, buf: []u8) ?[]const u8 {
+pub fn queryValue(target: []const u8, name: []const u8, buf: []u8) ?[]const u8 {
     const q = target[(std.mem.indexOfScalar(u8, target, '?') orelse return null) + 1 ..];
     var it = std.mem.splitScalar(u8, q, '&');
     while (it.next()) |pair| {
