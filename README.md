@@ -869,7 +869,12 @@ cl t list --parked
 Parking ends its session as `cl t kill` does (stage and conversation kept),
 keeps it out of Needs You, and shows "Parked: <reason>" on its card. The
 dispatcher never starts a parked ticket, even one moved to Queued; only the
-park ending (or `cl t start`, which ends it) brings it back. With
+park ending (or `cl t start`, which ends it) brings it back. Moving it to
+Done (by any route: the board, `cl t move`, Claude's `done --close`, an
+umbrella closing) ends the park without resuming it, and `cl t rm` drops it
+with the ticket. Shelved in Backlog it stays parked; a check that passes
+there ends the park (`unparked` flag) but leaves it in Backlog, its note
+waiting for when it's queued again. With
 `--until`, the dispatcher (`cl web`, `cl t dispatch`) runs the command with
 `sh -c` from the ticket's directory, at once and then every `--every`
 (default 1h), detached and in the dispatcher's environment (your `gh` login

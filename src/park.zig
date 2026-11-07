@@ -471,9 +471,15 @@ fn wake(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: boa
     if (took == null) return; // Unparked (or parked again) meanwhile.
     board.logEvent(ctx, db, t.id, "park condition met", p.reason) catch {};
     board.setFlagId(ctx, db, t.id, board.flag_unparked, "auto", (if (p.pr.len > 0) std.fmt.allocPrint(a, "PR merged: {s}", .{p.pr}) else std.fmt.allocPrint(a, "Parked condition met: {s}", .{p.reason})) catch p.reason) catch {};
+    const note = metNote(a, t, p) catch return;
+    // Shelved in Backlog: it isn't to start now. The note waits for whenever
+    // it is queued again.
+    if (t.stage == .backlog) {
+        holdInBacklog(ctx, db, a, t, note) catch {};
+        return;
+    }
     // Its project is paused: it waits in Queued, note and all, and the
     // dispatcher resumes it there once the project resumes.
-    const note = metNote(a, t, p) catch return;
     if (board.projectPaused(db, t.project) catch false) {
         holdForPause(ctx, db, a, t, note) catch |e| {
             board.setFlagId(ctx, db, t.id, "start-failed", "auto", dispatch.failureReason(e)) catch {};
@@ -505,6 +511,11 @@ pub fn followUp(ctx: Ctx, db: board.Db, a: std.mem.Allocator, parent: board.Tick
     // Queued and not killed: once the park ends, it starts there or waits its turn.
     try board.requeue(ctx, db, try board.getTicket(db, a, key));
     return key;
+}
+
+fn holdInBacklog(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, note: []const u8) !void {
+    _ = try board.addComment(ctx, db, a, t.key, "cl", note, false);
+    try board.logEvent(ctx, db, t.id, "held: in Backlog", "");
 }
 
 fn holdForPause(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, note: []const u8) !void {
@@ -735,4 +746,80 @@ test "a parked ticket woken while its queue is busy waits in Queued for the disp
     try testing.expectEqual(@as(usize, 1), w.len);
     try testing.expectEqualStrings(k, w[0].key);
     try testing.expectEqual(@as(usize, 1), (try board.unsentNotes(db, a, after.id)).len);
+}
+
+test "Done ends a park without resuming, also when an umbrella closes; Backlog keeps it; removing a ticket drops it" {
+    const ctx = testCtx();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "qa", .dir = "/x/qa" });
+    const cfg: config.Config = .{ .profiles = &.{}, .default = "", .operator = "" };
+
+    // Parked in Review on a PR, then closed by hand: no park, no checks, and
+    // no note waiting to resume its session with.
+    const k = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "On a PR", .stage = .review });
+    _ = try park(ctx, db, a, k, .{ .pr = "https://github.com/o/r/pull/31" });
+    const at = (try board.getTicket(db, a, k)).park.?.at;
+    // Moving within the workflow keeps it: it still waits on the PR.
+    try board.move(ctx, db, a, k, .testing);
+    try board.move(ctx, db, a, k, .queued);
+    try testing.expect((try board.getTicket(db, a, k)).park != null);
+    try board.move(ctx, db, a, k, .done);
+    const t = try board.getTicket(db, a, k);
+    try testing.expect(t.park == null);
+    try testing.expectEqual(@as(usize, 0), (try board.dueParks(db, a, at + 86400)).len);
+    try testing.expectEqual(@as(usize, 0), (try board.unsentNotes(db, a, t.id)).len);
+    try testing.expect((try db.int("SELECT 1 FROM events WHERE ticket = ?1 AND kind = 'unparked' AND detail = 'moved to Done'", .{t.id})) != null);
+
+    // An umbrella closed by cl once its last sub-ticket is Done: the same.
+    const ku = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Umbrella", .stage = .running, .umbrella = true });
+    const kc = try board.createTicket(ctx, db, a, .{ .parent = ku, .title = "Its part", .stage = .review });
+    _ = try park(ctx, db, a, ku, .{ .reason = "the deploy", .until = "true" });
+    try board.move(ctx, db, a, kc, .done);
+    const u = try board.getTicket(db, a, ku);
+    try testing.expectEqual(board.Stage.done, u.stage);
+    try testing.expect(u.park == null);
+
+    // A parked follow-up shelved (with its umbrella) and queued again still
+    // waits on its PR: the dispatcher doesn't start it.
+    const kp = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Parent", .stage = .queued, .umbrella = true });
+    const kf = try board.createTicket(ctx, db, a, .{ .parent = kp, .title = "Follow-up", .stage = .backlog });
+    _ = try park(ctx, db, a, kf, .{ .pr = "https://github.com/o/r/pull/32" });
+    try board.requeue(ctx, db, try board.getTicket(db, a, kf));
+    try board.move(ctx, db, a, kp, .backlog);
+    try testing.expectEqual(board.Stage.backlog, (try board.getTicket(db, a, kf)).stage);
+    try board.move(ctx, db, a, kp, .queued);
+    const f = try board.getTicket(db, a, kf);
+    try testing.expectEqual(board.Stage.queued, f.stage);
+    try testing.expect(f.park != null);
+    for (try dispatch.waitingToStart(db, a)) |w| try testing.expect(!std.mem.eql(u8, w.key, kf));
+
+    // Its check passing while it's in Backlog ends the park and says so,
+    // but doesn't start it: the note waits until it's queued again.
+    try board.move(ctx, db, a, kf, .backlog);
+    const fb = try board.getTicket(db, a, kf);
+    wake(ctx, cfg, db, a, fb, fb.park.?);
+    const fw = try board.getTicket(db, a, kf);
+    try testing.expect(fw.park == null);
+    try testing.expectEqual(board.Stage.backlog, fw.stage);
+    try testing.expectEqualStrings("", fw.tmux);
+    try testing.expectEqual(@as(usize, 1), (try board.unsentNotes(db, a, fw.id)).len);
+    var unparked = false;
+    for (fw.flags) |fl| unparked = unparked or std.mem.eql(u8, fl.kind, board.flag_unparked);
+    try testing.expect(unparked);
+
+    // Removed: its park goes with it, and a ticket that gets its id back
+    // doesn't find it parked.
+    const kr = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Removed", .stage = .review });
+    const id = (try board.getTicket(db, a, kr)).id;
+    _ = try park(ctx, db, a, kr, .{ .reason = "the deploy", .until = "true" });
+    _ = try board.removeTicket(ctx, db, a, kr);
+    try testing.expectEqual(@as(?i64, null), try db.int("SELECT 1 FROM parks WHERE ticket = ?1", .{id}));
+    const kn = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "New", .stage = .review });
+    try testing.expectEqual(id, (try board.getTicket(db, a, kn)).id);
+    try testing.expect((try board.getTicket(db, a, kn)).park == null);
 }

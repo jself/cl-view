@@ -1432,6 +1432,8 @@ pub fn removeTicket(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8) Err
         }
     }
     try db.exec("DELETE FROM deps WHERE ticket = ?1 OR blocker = ?1", .{t.id});
+    // Foreign keys aren't enforced, and a new ticket may get its id back.
+    try db.exec("DELETE FROM parks WHERE ticket = ?1", .{t.id});
     const pid = try parentId(db, t.id);
     try db.exec("DELETE FROM tickets WHERE id = ?1", .{t.id});
     if (pid) |p| if (t.stage != .done) {
@@ -1695,6 +1697,12 @@ fn moveId(ctx: Ctx, db: Db, id: i64, from: Stage, to: Stage) Error!void {
     // again if it's still in progress and idle).
     try setIdle(ctx, db, id, false);
     if (to == .testing) try setFlagId(ctx, db, id, flag_testing, "auto", "");
+    // Done, nothing waits on its park any more: it ends without resuming.
+    // (Shelved in Backlog it stays parked: queued again, it still waits.)
+    if (to == .done) {
+        try db.exec("DELETE FROM parks WHERE ticket = ?1", .{id});
+        if (db.changes() > 0) try logEvent(ctx, db, id, "unparked", "moved to Done");
+    }
     // All but a failed after-merge run's: that comes after the merge, so it
     // stays until the next run (or the human) clears it.
     if (to == .done) try db.exec("UPDATE flags SET cleared = ?2 WHERE ticket = ?1 AND cleared IS NULL AND kind != ?3", .{ id, now(ctx), flag_after_merge });
