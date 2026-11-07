@@ -1582,7 +1582,7 @@ function openNew(parentKey, pick = {}) {
         <label title="An umbrella is only a container for sub-tickets: it never runs. Queued, it moves to Running when a sub-ticket starts and to Done when they all are">Kind<select name="umbrella"><option value="0">Ticket</option><option value="1">Umbrella for sub-tickets</option></select></label></div>
       <div class="row2"><label>Sub-ticket of<select name="parent"><option value="">None</option>${d.tickets.filter((r) => r.ticket.stage !== "done").map((r) => `<option value="${esc(r.ticket.key)}" ${r.ticket.key === parentKey ? "selected" : ""}>${esc(r.ticket.key)} ${esc(r.ticket.title)}</option>`).join("")}</select></label>
         <label>Target branch<input type="text" name="onto" class="mono" autocomplete="off" placeholder="${esc(newOntoHint(d, proj, parentKey))}" title="A jj bookmark or git branch it starts from and merges into instead of trunk, like a long-lived feature branch. Empty: the parent's, else the project's, else trunk"></label></div>
-      <div class="actions"><button type="submit" class="btn primary">Create</button></div></form>`;
+      <div class="actions"><button type="submit" class="btn primary" title="Ctrl+Enter">Create</button></div></form>`;
   const form = document.getElementById("newForm");
   for (const k of NEW_KEEP) {
     const el = form.elements[k], v = last[k];
@@ -1617,6 +1617,17 @@ async function submitNew(form) {
     document.getElementById("newDlg").close(); toast(`${r.key} created`); await refresh();
   } catch (e) { toast(e.message, true); }
 }
+// Ctrl+Enter (Cmd+Enter on a Mac) creates the ticket from anywhere in the
+// form, the description box included. Not while a create is still going, so
+// a held or doubled key makes one ticket.
+document.getElementById("newDlg").addEventListener("keydown", (e) => {
+  if (e.key !== "Enter" || !(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey || e.isComposing) return;
+  const form = document.getElementById("newForm"), btn = form?.querySelector("[type=submit]");
+  if (!btn || !form.contains(e.target)) return;
+  e.preventDefault();
+  if (e.repeat || btn.classList.contains("busy")) return;
+  form.requestSubmit(btn);
+});
 
 // ---- quick ticket: the human's words go to the operator, which makes the ticket ----
 function openQuick() {

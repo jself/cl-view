@@ -276,6 +276,8 @@ web.font_size = 16              # text size of the board and terminal pages, in 
   remembers its own.
 - On the board, O (outside a text box, with no dialog open) opens the
   operator chat, like the Chat button.
+- In the New ticket dialog, Ctrl+Enter (Cmd+Enter on a Mac) creates the
+  ticket from any field, the description box included.
 - In a ticket's test plan walk-through (its Test tab), P and F pass or fail
   the first check of the step that isn't answered yet, N goes to the next
   step, and C puts the cursor in the step's comment box (the note box on the
