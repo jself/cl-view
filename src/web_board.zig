@@ -647,7 +647,10 @@ fn ticketAction(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator
         try actions.press(ctx, db, a, key, std.meta.stringToEnum(actions.Key, b.key orelse "") orelse return error.BadInput);
     } else if (eql(u8, action, "rm")) {
         const t = try board.getTicket(db, a, key);
-        const freed = try actions.remove(ctx, db, a, t.key);
+        const freed = actions.remove(ctx, db, a, t.key) catch |e| switch (e) {
+            error.Exists => return fail(req, .conflict, try std.fmt.allocPrint(a, "{s} has sub-tickets; delete them first", .{t.key})),
+            else => return e,
+        };
         images.removeTicket(ctx, a, cfg, t.key);
         // The tickets that waited on it go on without it: the board says so.
         return ok(req, a, .{ .ok = true, .freed = freed });

@@ -301,10 +301,11 @@
             background: none; color: var(--muted); cursor: pointer; }
   .xclose:hover, .xclose:focus-visible { background: #2a2c31; color: #fff; outline: none; }
   .xclose svg { width: calc(20 * var(--u)); height: calc(20 * var(--u)); fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
-  /* The ⋯ menu left of the close X: the ticket's less common actions (Park, Move to…, Kill). */
+  /* The ⋯ menu left of the close X: the ticket's less common actions (Park, Move to…, Kill, Delete ticket…). */
   .more { position: relative; display: inline-flex; }
   .more > .btn { min-width: calc(36 * var(--u)); padding: 0 calc(8 * var(--u)); font-size: calc(16 * var(--u)); letter-spacing: .05em; }
-  .more .menu { position: absolute; z-index: 5; top: calc(100% + calc(6 * var(--u))); right: 0; width: min(calc(320 * var(--u)), calc(100vw - calc(28 * var(--u)))); padding: calc(6 * var(--u));
+  /* Its right edge lines up with the close X's (the button plus the gap), so on a phone it stays on screen. */
+  .more .menu { position: absolute; z-index: 5; top: calc(100% + calc(6 * var(--u))); right: calc(-46 * var(--u)); width: min(calc(320 * var(--u)), calc(100vw - calc(28 * var(--u)))); padding: calc(6 * var(--u));
                 display: flex; flex-direction: column; background: #1c1d21; border: 1px solid #3a3c42; border-radius: calc(12 * var(--u)); box-shadow: 0 calc(10 * var(--u)) calc(30 * var(--u)) rgba(0, 0, 0, .5); }
   .more .menu[hidden] { display: none; }
   .more .menu button { display: flex; flex-direction: column; align-items: flex-start; gap: calc(2 * var(--u)); width: 100%; padding: calc(8 * var(--u)) calc(10 * var(--u)); border: 0;
@@ -563,6 +564,7 @@
 <dialog id="dismissDlg" aria-label="Dismiss alerts" style="width:min(calc(480 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="dismissBody"></div></dialog>
 <dialog id="pauseDlg" aria-label="Pause" style="width:min(calc(520 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="pauseBody"></div></dialog>
 <dialog id="pushDlg" aria-label="Notifications" style="width:min(calc(560 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="pushBody"></div></dialog>
+<dialog id="delTicketDlg" aria-label="Delete the ticket" style="width:min(calc(520 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="delTicketBody"></div></dialog>
 <dialog id="killDlg" aria-label="Kill the session" style="width:min(calc(480 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="killBody"></div></dialog>
 <div id="hints" popover="manual" aria-hidden="true"></div>
 <dialog id="palDlg" aria-label="Go to a ticket or command"><div class="pin"><span class="chip" id="palChip" hidden></span><input id="palIn" autocomplete="off" spellcheck="false" aria-label="Search"></div>
@@ -1363,8 +1365,10 @@ function renderDetailInner() {
     ? item(`data-relocate="worktree"`, "Move to a worktree", "Give it a worktree of its own; Claude goes on there and the queue session is free")
     : item(`data-relocate="queue"`, "Move to the queue", "Go on in the project's main folder, in its session once that is free"));
   if (liveSession) more.push((more.length ? "<hr>" : "") + item(`data-act="kill"`, "Kill", "End its session; it keeps its stage and can be restarted", "danger"));
-  const moreMenu = more.length ? `<span class="more"><button type="button" class="btn" id="moreBtn" aria-label="More actions" title="More actions" aria-haspopup="menu" aria-expanded="${!!state.moreOpen}">⋯</button>
-    <div class="menu" role="menu" id="moreMenu"${state.moreOpen ? "" : " hidden"}>${more.join("")}</div></span>` : "";
+  // Always there, last and set apart: it asks first (confirmDeleteTicket).
+  more.push((more.length ? "<hr>" : "") + item(`data-act="rm"`, "Delete ticket…", "Remove it from the board for good; asks first", "danger"));
+  const moreMenu = `<span class="more"><button type="button" class="btn" id="moreBtn" aria-label="More actions" title="More actions" aria-haspopup="menu" aria-expanded="${!!state.moreOpen}">⋯</button>
+    <div class="menu" role="menu" id="moreMenu"${state.moreOpen ? "" : " hidden"}>${more.join("")}</div></span>`;
   const shell = liveSession ? `<a class="shell-ic" href="${shellHref(t)}" title="Open shell" aria-label="Open shell">${SHELL_SVG}</a>` : "";
   // The status line: a parent without a session of its own shows its sub-tickets' progress instead; one with a session shows both.
   // A Done ticket that never had a worktree or branch doesn't name its workspace.
@@ -1752,8 +1756,7 @@ function detailsTab(d) {
     <label>Target branch<input type="text" name="onto" class="mono" value="${esc(t.onto_own)}" autocomplete="off" placeholder="${t.onto && !t.onto_own ? "The project's: " + esc(t.onto) : "Trunk"}" title="A jj bookmark or git branch it starts from and merges into instead of trunk, like a long-lived feature branch. Empty: the project's target, else trunk"></label>
     <div class="actions"><button type="submit" class="btn primary" value="close">Save and close</button>
       <button type="submit" class="btn">Save</button>
-      ${t.worktree && t.stage === "done" ? `<button type="button" class="btn" data-act="cleanup">Remove worktree</button>` : ""}
-      <button type="button" class="btn danger" id="deleteTicket">Delete ticket</button></div></form>`;
+      ${t.worktree && t.stage === "done" ? `<button type="button" class="btn" data-act="cleanup">Remove worktree</button>` : ""}</div></form>`;
 }
 
 // ---- images in a description ----
@@ -2118,6 +2121,41 @@ function confirmKill(d) {
   dlg.returnValue = ""; dlg.showModal();
   return new Promise((res) => { dlg.onclose = () => res(dlg.returnValue === "yes"); });
 }
+// ---- deleting a ticket ----
+// Says what will happen, as `cl ticket rm` would: refused while it has
+// sub-tickets; otherwise the tickets that wait on it go on without it, and its
+// session ends unless another open ticket shares it (actions.remove).
+function confirmDeleteTicket(d) {
+  const t = d.ticket; const subs = d.subtickets || []; const blocks = d.blocks || [];
+  const keys = (ks) => ks.map((k) => `<span class="mono">${esc(k)}</span>`).join(", ");
+  const p = (html, cls) => `<p${cls ? ` class="${cls}"` : ""} style="margin:0">${html}</p>`;
+  let body;
+  if (subs.length) {
+    const sk = subs.map((r) => r.ticket.key);
+    body = p(`It has ${subs.length} sub-ticket${subs.length > 1 ? "s" : ""} (${keys(sk)}), so cl won't delete it: delete ${subs.length > 1 ? "them" : "it"} first.`)
+      + `<div class="actions"><button type="button" class="btn" data-del-ticket="">Close</button></div>`;
+  } else {
+    const live = t.tmux && d.status && d.status !== "gone";
+    const shared = live && state.data.tickets.some((r) => r.ticket.tmux === t.tmux && r.ticket.key !== t.key && r.ticket.stage !== "done");
+    const said = [];
+    if (blocks.length) said.push(p(`${keys(blocks)} ${blocks.length > 1 ? "wait" : "waits"} on it and will go on without it.`));
+    if (live) said.push(p(shared ? `Its session <span class="mono">${esc(t.tmux)}</span> is shared with other open tickets, so it stays.`
+      : `Its session <span class="mono">${esc(t.tmux)}</span> ends, and Claude in it.`));
+    if (t.worktree || t.branch) said.push(p(`Its ${t.worktree ? `worktree <span class="mono">${esc(t.worktree)}</span>` : ""}${t.worktree && t.branch ? " and " : ""}${t.branch ? `branch <span class="mono">${esc(t.branch)}</span>` : ""} stay${t.worktree && t.branch ? "" : "s"} where ${t.worktree && t.branch ? "they are" : "it is"}.`));
+    body = said.join("") + p(`Its description, comments, images and history go with it; this can't be undone.`, "muted")
+      + `<p class="formerr" id="delTicketErr" role="alert" hidden></p>
+      <div class="actions"><button type="button" class="btn danger" data-del-ticket="${esc(t.key)}">Delete ticket</button><button type="button" class="btn" data-del-ticket="">Cancel</button></div>`;
+  }
+  document.getElementById("delTicketBody").innerHTML = `<h2 style="margin:0;font-size:calc(17 * var(--u));overflow-wrap:anywhere">Delete ${esc(t.key)}, “${esc(t.title)}”?</h2>${body}`;
+  document.getElementById("delTicketDlg").showModal();
+}
+async function deleteTicket(key) {
+  const err = document.getElementById("delTicketErr"); err.hidden = true;
+  let r; try { r = await api(`ticket/${encodeURIComponent(key)}/rm`, {}); } catch (e) { err.textContent = e.message; err.hidden = false; return; }
+  document.getElementById("delTicketDlg").close(); if (state.open === key) document.getElementById("ticketDlg").close();
+  toast(r.freed?.length ? `${key} deleted; ${r.freed.join(", ")} no longer wait${r.freed.length > 1 ? "" : "s"} on it` : `${key} deleted`);
+  await refresh();
+}
 function confirmDismissAll(kind, keys) {
   const dlg = document.getElementById("dismissDlg"); const name = FLAG_NAME[kind] || kind;
   document.getElementById("dismissBody").innerHTML = `<h2 style="margin:0;font-size:calc(17 * var(--u))">Dismiss ${keys.length} “${esc(name)}” alerts?</h2>
@@ -2303,6 +2341,9 @@ async function onClick(e) {
   if (ds.editCancel) { state.editing = null; delete state.edit[ds.editCancel]; renderDetail(); return; }
   if (ds.editSave || ds.editRevert) return saveEdit(key, ds.editSave || ds.editRevert, !!ds.editRevert);
   if (ds.act === "park") { if (state.detail) openPark(state.detail); return; }
+  if (ds.act === "rm") { if (state.detail) confirmDeleteTicket(state.detail); return; }
+  // The key the dialog was opened for, not state.open: the palette can open another ticket under it.
+  if (ds.delTicket !== undefined) { if (ds.delTicket) return deleteTicket(ds.delTicket); document.getElementById("delTicketDlg").close(); return; }
   if (ds.act === "unpark" || ds.act === "unpark-only") {
     try { const r = await act(key, "unpark", { no_resume: ds.act === "unpark-only" }); toast(unparkMsg(key, r.resumed)); } catch {}
     return;
@@ -2351,12 +2392,6 @@ async function onClick(e) {
     toast(r.sent ? "Sent to Claude" : r.unsent ? "No session to send to: kept as a comment" : !r.approved ? "All passed: kept on the ticket"
       : finishMsg(key, extra) ? "All passed: " + finishMsg(key, extra) : "All passed: done", r.unsent); state.checks = {};
     return;
-  }
-  if (el.id === "deleteTicket") {
-    if (el.dataset.sure !== "1") { el.dataset.sure = "1"; el.textContent = "Really delete?"; return; }
-    const r = await act(key, "rm", {});
-    toast(r.freed?.length ? `Deleted; ${r.freed.join(", ")} no longer wait${r.freed.length > 1 ? "" : "s"} on ${key}` : "Deleted");
-    document.getElementById("ticketDlg").close(); return;
   }
 }
 document.addEventListener("click", (e) => busyWhile(e.target.closest("[data-unpark], button, a, tr.row"), onClick(e)));
