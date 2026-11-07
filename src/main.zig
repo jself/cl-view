@@ -100,7 +100,33 @@ pub fn main(init: std.process.Init) !void {
         try out(usage);
         std.process.exit(2);
     };
+    const tty = std.Io.File.stdin().isTty(ctx.io) catch false;
+    switch (launchMode(argv.len, opts.detach, tty)) {
+        .launch => {},
+        .usage => return out(usage),
+        .no_terminal => fail("no terminal to attach the new session to; add -d to start it in the background", .{}),
+    }
     try cmdLaunch(ctx, cfg, opts);
+}
+
+/// What the launch fallback does. Without a terminal there is nothing to
+/// attach to, so starting a session would only leave it behind: a bare `cl`
+/// (what agents run to read the help) prints the help instead, and a launch
+/// that would attach is refused before it starts anything. The operator
+/// running bare `cl` in its own folder left untagged "operator" sessions
+/// that other sessions then messaged instead of it.
+const LaunchMode = enum { launch, usage, no_terminal };
+
+fn launchMode(argc: usize, detach: bool, tty: bool) LaunchMode {
+    if (detach or tty) return .launch;
+    return if (argc == 0) .usage else .no_terminal;
+}
+
+test launchMode {
+    try std.testing.expectEqual(LaunchMode.usage, launchMode(0, false, false));
+    try std.testing.expectEqual(LaunchMode.no_terminal, launchMode(1, false, false));
+    try std.testing.expectEqual(LaunchMode.launch, launchMode(2, true, false));
+    try std.testing.expectEqual(LaunchMode.launch, launchMode(0, false, true));
 }
 
 fn out(text: []const u8) !void {
@@ -162,6 +188,7 @@ fn cmdLaunch(ctx: Ctx, cfg: config.Config, o: LaunchOptions) !void {
     const tmux_name = launch.create(ctx, cfg, opts) catch |err| switch (err) {
         error.NoSuchDir => fail("no such directory: {s}", .{o.dir orelse "."}),
         error.NoSuchProfile => fail("no such profile: {s}", .{o.profile orelse ""}),
+        error.OperatorReserved => fail("that folder and the name \"operator\" belong to the operator; run `cl operator` to open it, or pick another name with -n", .{}),
         error.PromptTimeout => fail("claude never showed a prompt; message not sent", .{}),
         else => return err,
     };

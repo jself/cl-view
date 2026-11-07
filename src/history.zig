@@ -6,6 +6,7 @@ const Ctx = @import("ctx.zig");
 const config = @import("config.zig");
 const tmux = @import("tmux.zig");
 const claude = @import("claude.zig");
+const launch = @import("launch.zig");
 
 pub const Entry = struct {
     tmux: []const u8,
@@ -127,6 +128,9 @@ pub fn closed(ctx: Ctx, arena: std.mem.Allocator, cfg: config.Config, live: []co
         const like = try std.fmt.allocPrint(arena, "{s}\x00{s}\x00{s}", .{ e.name, e.dir, e.profile });
         const has_newer = (try newer.getOrPut(arena, like)).found_existing;
         if (running.contains(e.tmux)) continue;
+        // An untagged copy of the operator (launch.reservedForOperator):
+        // resuming it is refused, and the operator comes back on its own.
+        if (launch.refused(ctx, arena, e.dir, e.name)) continue;
         if (e.session_id.len > 0) {
             if (running.contains(e.session_id)) continue;
             if ((try seen.getOrPut(arena, e.session_id)).found_existing) continue;

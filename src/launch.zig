@@ -27,7 +27,51 @@ pub const Options = struct {
     accept_trust: bool = false,
 };
 
-pub const Error = error{ NoSuchDir, NoSuchProfile, PromptTimeout };
+pub const Error = error{ NoSuchDir, NoSuchProfile, PromptTimeout, OperatorReserved };
+
+/// The operator's folder: `operator.ensure` starts it there. Caller owns the result.
+pub fn operatorDir(ctx: Ctx, a: std.mem.Allocator) ![]const u8 {
+    return std.fmt.allocPrint(a, "{s}/.config/cl/operator", .{ctx.home});
+}
+
+/// Whether a session in `dir` named `name` would pass for the operator
+/// without being it. Only `operator.ensure` (role "operator") may start one
+/// there or by that name: anything else is an untagged copy that cl doesn't
+/// treat as the operator (no instructions, invisible to `tmux.operator`), and
+/// other Claude sessions, finding it by name, message it instead of the real
+/// one. A bare `cl` run by the operator itself (its folder is its cwd) made
+/// six of them in a day. `op_dir` is `operatorDir`, resolved like `dir`.
+pub fn reservedForOperator(dir: []const u8, name: []const u8, role: []const u8, op_dir: []const u8) bool {
+    if (std.mem.eql(u8, role, tmux.operator_role)) return false;
+    return std.mem.eql(u8, name, operator_name) or std.mem.eql(u8, dir, op_dir);
+}
+
+/// The operator's session name (`operator.name`).
+pub const operator_name = "operator";
+
+test reservedForOperator {
+    const op = "/home/u/.config/cl/operator";
+    try std.testing.expect(reservedForOperator(op, "operator", "", op));
+    try std.testing.expect(reservedForOperator(op, "notes", "", op));
+    try std.testing.expect(reservedForOperator("/home/u/devel/x", "operator", "", op));
+    try std.testing.expect(!reservedForOperator(op, "operator", tmux.operator_role, op));
+    try std.testing.expect(!reservedForOperator("/home/u/devel/operator-ui", "operator-ui", "", op));
+}
+
+/// `operatorDir`, with symlinks resolved when it exists (as `create` resolves
+/// the folder it is given). `a` should be an arena.
+fn resolvedOperatorDir(ctx: Ctx, a: std.mem.Allocator) ![]const u8 {
+    const raw = try operatorDir(ctx, a);
+    return std.Io.Dir.cwd().realPathFileAlloc(ctx.io, raw, a) catch raw;
+}
+
+/// Whether a session in `dir` named `name` is refused by `create`
+/// (`reservedForOperator`), for lists that offer to start one (closed sessions).
+/// `a` should be an arena.
+pub fn refused(ctx: Ctx, a: std.mem.Allocator, dir: []const u8, name: []const u8) bool {
+    const op_dir = resolvedOperatorDir(ctx, a) catch return false;
+    return reservedForOperator(dir, name, "", op_dir);
+}
 
 /// Create the tmux session, optionally send the initial message, return the tmux name.
 pub fn create(ctx: Ctx, cfg: config.Config, o: Options) ![]const u8 {
@@ -38,6 +82,11 @@ pub fn create(ctx: Ctx, cfg: config.Config, o: Options) ![]const u8 {
     defer ctx.gpa.free(raw_dir);
     const dir = std.Io.Dir.cwd().realPathFileAlloc(ctx.io, raw_dir, ctx.perm) catch return error.NoSuchDir;
     const name = if (o.name) |n| (if (n.len > 0) n else std.fs.path.basename(dir)) else std.fs.path.basename(dir);
+    {
+        var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);
+        defer arena_state.deinit();
+        if (reservedForOperator(dir, name, o.role, try resolvedOperatorDir(ctx, arena_state.allocator()))) return error.OperatorReserved;
+    }
 
     var cmd: std.ArrayList([]const u8) = .empty;
     defer cmd.deinit(ctx.gpa);

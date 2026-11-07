@@ -622,6 +622,10 @@ const App = struct {
                     .profile = if (self.new_profile.len > 0) self.new_profile else null,
                     .message = text,
                 }) catch |err| {
+                    if (err == error.OperatorReserved) {
+                        self.setMessage("that's the operator's: press o to open it, or pick another name", .{});
+                        return;
+                    }
                     self.setMessage("launch failed: {s}", .{@errorName(err)});
                     return;
                 };

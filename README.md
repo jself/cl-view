@@ -204,6 +204,14 @@ setting. Its instructions come from the binary (`src/operator.zig`); put a
 `cl` that started it, so it doesn't depend on `cl` being on the PATH its Bash
 tool gets from your shell.
 
+That folder and the session name `operator` are the operator's: `cl` refuses to
+start any other session there or by that name (`cl operator` opens the real
+one). A copy would lack the operator's tag and instructions, and other Claude
+sessions, finding it by name, would message it instead. For the same reason a
+bare `cl` with no terminal (an agent reading the help, say) prints the help
+rather than starting a session in the current folder, and `cl <dir>` without
+`-d` refuses when there is no terminal to attach to.
+
 `operator.model = sonnet` (any `claude --model` value) runs the operator on
 another model than the profile's default: faster answers, voice ones
 included. It takes effect the next time the operator starts (`/exit` in Chat).

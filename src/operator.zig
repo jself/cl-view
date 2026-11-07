@@ -263,14 +263,14 @@ const tickets_skill =
     \\
 ;
 
-pub const name = "operator";
+pub const name = launch.operator_name;
 
 /// Return the operator's tmux name, creating the session if it is not running.
 pub fn ensure(ctx: Ctx, cfg: config.Config) ![]const u8 {
     var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const dir = try std.fmt.allocPrint(ctx.perm, "{s}/.config/cl/operator", .{ctx.home});
+    const dir = try launch.operatorDir(ctx, ctx.perm);
     const skill_dir = try std.fmt.allocPrint(arena, "{s}/.claude/skills/cl-tickets", .{dir});
     try std.Io.Dir.cwd().createDirPath(ctx.io, skill_dir);
     try std.Io.Dir.cwd().writeFile(ctx.io, .{
