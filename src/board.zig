@@ -41,6 +41,19 @@ pub const Mode = enum {
     }
 };
 
+/// What a project does when one of its tickets reaches Review (`cl project
+/// set --auto-review`): nothing, run the automated review (autoreview.zig),
+/// or run it and send what it finds to the ticket's Claude for one round.
+pub const AutoReview = enum {
+    off,
+    on,
+    send,
+
+    pub fn parse(s: []const u8) ?AutoReview {
+        return std.meta.stringToEnum(AutoReview, s);
+    }
+};
+
 /// The flags the board knows. Others are allowed (set by hand).
 pub const flag_input = "input"; // blocked on a permission prompt
 pub const flag_question = "question"; // Claude asked something
@@ -90,6 +103,9 @@ pub const Project = struct {
     /// The skill the automated review uses (`cl project set --review-skill`),
     /// "" for cl's own review instructions (see autoreview.zig).
     review_skill: []const u8 = "",
+    /// Whether a ticket reaching Review gets an automated review by itself
+    /// (`cl project set --auto-review`, `autoreview.startOnReview`).
+    auto_review: AutoReview = .off,
 };
 
 pub const Flag = struct {
@@ -285,6 +301,7 @@ const schema =
     \\  paused INTEGER NOT NULL DEFAULT 0,
     \\  onto TEXT NOT NULL DEFAULT '',
     \\  review_skill TEXT NOT NULL DEFAULT '',
+    \\  auto_review TEXT NOT NULL DEFAULT 'off',
     \\  planners INTEGER NOT NULL DEFAULT
 ++ std.fmt.comptimePrint(" {d}\n", .{default_planners}) ++
     \\);
@@ -467,6 +484,7 @@ pub fn migrate(db: Db) !void {
         // Automated reviews.
         _ = try addColumn(db, "tickets", "autoreview", "TEXT NOT NULL DEFAULT ''");
         _ = try addColumn(db, "projects", "review_skill", "TEXT NOT NULL DEFAULT ''");
+        _ = try addColumn(db, "projects", "auto_review", "TEXT NOT NULL DEFAULT 'off'");
     }
     if (have >= version) return;
     // Version 1 had no sub-tickets, version 2 no planning skill.
@@ -584,8 +602,9 @@ test "migrate: a board from before automated reviews gets their columns" {
     const db = try Db.open(":memory:");
     defer db.close();
     try migrate(db);
-    try db.execMulti("ALTER TABLE tickets DROP COLUMN autoreview; ALTER TABLE projects DROP COLUMN review_skill");
+    try db.execMulti("ALTER TABLE tickets DROP COLUMN autoreview; ALTER TABLE projects DROP COLUMN review_skill; ALTER TABLE projects DROP COLUMN auto_review");
     try migrate(db);
+    try std.testing.expect((try db.int("SELECT 1 FROM pragma_table_info('projects') WHERE name = 'auto_review'", .{})) != null);
     try std.testing.expect((try db.int("SELECT 1 FROM pragma_table_info('tickets') WHERE name = 'autoreview'", .{})) != null);
     try std.testing.expect((try db.int("SELECT 1 FROM pragma_table_info('projects') WHERE name = 'review_skill'", .{})) != null);
 }
@@ -630,6 +649,7 @@ pub const ProjectInput = struct {
     planners: ?i64 = null,
     onto: ?[]const u8 = null,
     review_skill: ?[]const u8 = null,
+    auto_review: ?AutoReview = null,
 };
 
 /// A key prefix from a project name: a short first word as is (`qa-tool` →
@@ -691,8 +711,10 @@ pub fn addProject(db: Db, in: ProjectInput) Error!void {
     const prefix = in.prefix orelse defaultPrefix(&buf, in.name);
     if (!validPrefix(prefix)) return error.BadInput;
     if (try db.int("SELECT 1 FROM projects WHERE name = ?1 OR prefix = ?2", .{ in.name, prefix }) != null) return error.Exists;
-    try db.exec("INSERT INTO projects (name, dir, prefix, slots, mode, profile, after_merge, after_merge_claude, planners, onto) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)", .{
-        in.name, in.dir, prefix, in.slots orelse default_slots, @tagName(in.mode orelse .queue), in.profile orelse "", in.after_merge orelse "", in.after_merge_claude orelse "", in.planners orelse default_planners, in.onto orelse "",
+    try db.exec("INSERT INTO projects (name, dir, prefix, slots, mode, profile, after_merge, after_merge_claude, planners, onto, review_skill, auto_review) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)", .{
+        in.name,                             in.dir,               prefix,                    in.slots orelse default_slots,
+        @tagName(in.mode orelse .queue),     in.profile orelse "", in.after_merge orelse "",  in.after_merge_claude orelse "",
+        in.planners orelse default_planners, in.onto orelse "",    in.review_skill orelse "", @tagName(in.auto_review orelse .off),
     });
 }
 
@@ -713,6 +735,7 @@ pub fn updateProject(db: Db, name: []const u8, in: ProjectInput) Error!void {
     if (in.after_merge_claude) |c| try db.exec("UPDATE projects SET after_merge_claude = ?2 WHERE name = ?1", .{ name, c });
     if (in.onto) |o| try db.exec("UPDATE projects SET onto = ?2 WHERE name = ?1", .{ name, o });
     if (in.review_skill) |k| try db.exec("UPDATE projects SET review_skill = ?2 WHERE name = ?1", .{ name, k });
+    if (in.auto_review) |r| try db.exec("UPDATE projects SET auto_review = ?2 WHERE name = ?1", .{ name, @tagName(r) });
     // Renaming last, so the lookups above still match.
     if (in.name.len > 0 and !std.mem.eql(u8, in.name, name)) {
         if (try db.int("SELECT 1 FROM projects WHERE name = ?1", .{in.name}) != null) return error.Exists;
@@ -749,7 +772,7 @@ pub fn removeProject(db: Db, name: []const u8) Error!void {
     try db.exec("DELETE FROM projects WHERE name = ?1", .{name});
 }
 
-const project_cols = "name, dir, prefix, slots, mode, profile, after_merge, after_merge_claude, hidden, planners, paused, onto, review_skill";
+const project_cols = "name, dir, prefix, slots, mode, profile, after_merge, after_merge_claude, hidden, planners, paused, onto, review_skill, auto_review";
 
 fn readProject(st: sqlite.Stmt, a: std.mem.Allocator) !Project {
     return .{
@@ -766,6 +789,7 @@ fn readProject(st: sqlite.Stmt, a: std.mem.Allocator) !Project {
         .paused = st.int(10) != 0,
         .onto = try st.dupe(a, 11),
         .review_skill = try st.dupe(a, 12),
+        .auto_review = AutoReview.parse(st.text(13)) orelse .off,
     };
 }
 

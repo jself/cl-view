@@ -217,6 +217,8 @@ const Body = struct {
     after_merge_claude: ?[]const u8 = null,
     /// Project: the automated review's skill ("" for cl's own instructions).
     review_skill: ?[]const u8 = null,
+    /// Project: whether a ticket reaching Review gets an automated review by itself.
+    auto_review: ?board.AutoReview = null,
     /// Ticket or project: the branch it targets ("" for trunk / the project's).
     onto: ?[]const u8 = null,
     /// finish "tell": what Claude should do first.
@@ -370,6 +372,7 @@ fn route(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: 
                 .after_merge = b.after_merge,
                 .after_merge_claude = b.after_merge_claude,
                 .review_skill = b.review_skill,
+                .auto_review = b.auto_review,
                 .onto = b.onto,
             }) catch |e| return projectFail(req, e);
             _ = worktree.ensureJj(ctx, a, dir);
@@ -391,6 +394,7 @@ fn route(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: 
                 .after_merge = b.after_merge,
                 .after_merge_claude = b.after_merge_claude,
                 .review_skill = b.review_skill,
+                .auto_review = b.auto_review,
                 .onto = b.onto,
             }) catch |e| return projectFail(req, e);
         } else if (std.mem.eql(u8, action, "after-merge")) {
@@ -540,6 +544,8 @@ fn ticketAction(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator
         return ok(req, a, .{ .dismissed = try board.dismissFlag(ctx, db, a, key, kind) });
     } else if (eql(u8, action, "done")) {
         try review.done(ctx, db, a, key, b.summary orelse "", null, null);
+        // Into Review as with Claude's `cl ticket done`: the project may review it by itself.
+        _ = autoreview.startOnReview(ctx, cfg, db, a, key);
     } else if (eql(u8, action, "approve")) {
         _ = try actions.approve(ctx, db, a, key, b.spin_off orelse false, try finishOf(b));
     } else if (eql(u8, action, "start")) {

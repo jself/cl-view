@@ -185,10 +185,11 @@ pub const project_usage =
     \\
     \\  add <name> <dir> [--prefix <KEY>] [--slots <n>] [--planners <n>] [--mode queue|worktree]
     \\      [--profile <name>] [--after-merge <command>] [--after-merge-claude <steps> | none]
-    \\      [--review-skill <skill>]
+    \\      [--review-skill <skill>] [--auto-review off|on|send]
     \\  set <name> [--name <new>] [--dir <dir>] [--prefix <KEY>] [--slots <n>] [--planners <n>]
     \\      [--mode queue|worktree] [--profile <name>] [--after-merge <command>]
     \\      [--after-merge-claude <steps> | none] [--onto <branch>] [--review-skill <skill>]
+    \\      [--auto-review off|on|send]
     \\  rm <name>                   (refused while it has tickets)
     \\  hide <name> / unhide <name> keep its tickets out of the board's views, Needs You,
     \\                              `cl ticket needs` and `cl ticket list`, or bring them back;
@@ -215,12 +216,22 @@ pub const project_usage =
     \\--review-skill: the skill the automated review (cl ticket autoreview) uses
     \\  instead of cl's own instructions; it still reports findings in cl's format.
     \\  "" (the default): cl's own.
+    \\--auto-review: run the automated review by itself when a ticket reaches review
+    \\  (Claude's `cl ticket done`, once per round, not for one without changes), so
+    \\  it reaches Needs You with the findings there. send: also send what it finds to
+    \\  Claude for one round (like Send findings); the round that answers them isn't
+    \\  reviewed again by itself. off (the default): only when you start it.
     \\--after-merge-claude: what Claude is asked to do after a merge when there is no
     \\  command (the ticket's Claude, or the operator once its session is gone), and
     \\  what the operator is asked to sort out when the command fails. "" (the
     \\  default): rebuild and restart what runs from the checkout. none: nothing.
     \\
 ++ std.fmt.comptimePrint("--slots: worktree tickets in progress at once (default {d})\n--planners: planning sessions at once; they don't wait for the queue or a slot (default {d})\n", .{ board.default_slots, board.default_planners });
+
+fn parseAutoReview(args: Args) ?board.AutoReview {
+    const v = args.get("--auto-review") orelse return null;
+    return board.AutoReview.parse(v) orelse fail("--auto-review is off, on or send", .{});
+}
 
 fn out(text: []const u8) !void {
     try std.Io.File.stdout().writeStreamingAll(std.Io.Threaded.global_single_threaded.io(), text);
@@ -364,7 +375,7 @@ pub fn projectMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void
     defer arena_state.deinit();
     const a = arena_state.allocator();
     const cmd = argv[0];
-    const args = try Args.parse(a, argv[1..], &.{ "--prefix", "--slots", "--planners", "--mode", "--profile", "--name", "--dir", "--after-merge", "--after-merge-claude", "--onto", "--review-skill" }, project_usage);
+    const args = try Args.parse(a, argv[1..], &.{ "--prefix", "--slots", "--planners", "--mode", "--profile", "--name", "--dir", "--after-merge", "--after-merge-claude", "--onto", "--review-skill", "--auto-review" }, project_usage);
     const db = openBoard(ctx, cfg);
     defer db.close();
 
@@ -373,7 +384,7 @@ pub fn projectMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void
         const ps = board.listProjects(db, a) catch |e| boardFail(db, e, "project");
         if (args.has("--json")) return out(try std.fmt.allocPrint(a, "{f}\n", .{std.json.fmt(ps, .{})}));
         var aw: std.Io.Writer.Allocating = .init(a);
-        for (ps) |p| try aw.writer.print("{s}\t{s}\t{s}\tslots {d}\tplanners {d}\t{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}\n", .{
+        for (ps) |p| try aw.writer.print("{s}\t{s}\t{s}\tslots {d}\tplanners {d}\t{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}\n", .{
             p.name, p.prefix, try ctx.shortenHomeIn(a, p.dir), p.slots, p.planners, @tagName(p.mode),
             if (p.onto.len > 0) "\tonto " else "", p.onto,
             if (p.hidden) "\thidden" else "",
@@ -382,11 +393,12 @@ pub fn projectMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void
             if (p.after_merge.len > 0) "\tafter merge: " else "", p.after_merge,
             if (p.after_merge_claude.len > 0) "\tclaude after merge: " else "", p.after_merge_claude,
             if (p.review_skill.len > 0) "\treview skill: " else "", p.review_skill,
+            if (p.auto_review != .off) "\tauto review: " else "", if (p.auto_review != .off) @tagName(p.auto_review) else "",
         });
         return out(aw.writer.buffered());
     }
     if (std.mem.eql(u8, cmd, "add")) {
-        args.only(&.{ "--prefix", "--slots", "--planners", "--mode", "--profile", "--after-merge", "--after-merge-claude", "--onto", "--review-skill" }, project_usage);
+        args.only(&.{ "--prefix", "--slots", "--planners", "--mode", "--profile", "--after-merge", "--after-merge-claude", "--onto", "--review-skill", "--auto-review" }, project_usage);
         if (args.pos.items.len != 2) fail("usage: cl project add <name> <dir> [options]", .{});
         const dir = try realDir(ctx, a, args.pos.items[1]);
         try checkProfile(cfg, args.get("--profile"));
@@ -403,13 +415,14 @@ pub fn projectMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void
             .after_merge_claude = args.get("--after-merge-claude"),
             .onto = args.get("--onto"),
             .review_skill = args.get("--review-skill"),
+            .auto_review = parseAutoReview(args),
         }) catch |e| boardFail(db, e, "project (name or prefix)");
         const p = board.getProject(db, a, args.pos.items[0]) catch |e| boardFail(db, e, "project");
         const jj = worktree.ensureJj(ctx, a, dir);
         return out(try std.fmt.allocPrint(a, "{s}: tickets are {s}-1, {s}-2, ...{s}\n", .{ p.name, p.prefix, p.prefix, if (jj) "\n(set up jj alongside git: jj git init --colocate)" else "" }));
     }
     if (std.mem.eql(u8, cmd, "set")) {
-        args.only(&.{ "--prefix", "--slots", "--planners", "--mode", "--profile", "--name", "--dir", "--after-merge", "--after-merge-claude", "--onto", "--review-skill" }, project_usage);
+        args.only(&.{ "--prefix", "--slots", "--planners", "--mode", "--profile", "--name", "--dir", "--after-merge", "--after-merge-claude", "--onto", "--review-skill", "--auto-review" }, project_usage);
         if (args.pos.items.len != 1) fail("usage: cl project set <name> [options]", .{});
         try checkProfile(cfg, args.get("--profile"));
         if (args.get("--onto") != null) checkOnto(ctx, a, (board.getProject(db, a, args.pos.items[0]) catch |e| boardFail(db, e, "project")).dir, args.get("--onto"));
@@ -425,6 +438,7 @@ pub fn projectMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void
             .after_merge_claude = args.get("--after-merge-claude"),
             .onto = args.get("--onto"),
             .review_skill = args.get("--review-skill"),
+            .auto_review = parseAutoReview(args),
         }) catch |e| boardFail(db, e, "project (name or prefix)");
         return;
     }
@@ -747,6 +761,14 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
             error.BadPlan => fail("the plan on stdin is empty", .{}),
             else => boardFail(db, e, "ticket"),
         };
+        // The project reviews what reaches Review by itself (--auto-review).
+        const auto: []const u8 = if (t0.stage == .planning) "" else switch (autoreview.startOnReview(ctx, cfg, db, a, key)) {
+            .off, .skipped => "",
+            .started => |m| if (m == .send)
+                "\nAn automated review of your changes runs now. If it finds problems, they're sent to you here for one more round: check them, then finish the same way."
+            else
+                "\nAn automated review of your changes runs now; the human gets its findings with your work.",
+        };
         const t = board.getTicket(db, a, key) catch |e| boardFail(db, e, "ticket");
         // Said when Claude finishes, as that's when it knows: its work has a
         // branch the human will be offered to merge.
@@ -754,8 +776,8 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
             try std.fmt.allocPrint(a, "\nIf its work shouldn't be merged (or made a PR) as it is, say so now: `cl ticket custom-close {s} \"<what to do with it instead>\"`.", .{t.key})
         else
             "";
-        return out(try std.fmt.allocPrint(a, "{s}: {s}. The board shows it to the human; nothing more to do.{s}\n", .{
-            t.key, if (t.stage == .planning) "plan ready for approval" else "moved to review", hint,
+        return out(try std.fmt.allocPrint(a, "{s}: {s}. The board shows it to the human; nothing more to do.{s}{s}\n", .{
+            t.key, if (t.stage == .planning) "plan ready for approval" else "moved to review", auto, hint,
         }));
     }
     if (std.mem.eql(u8, cmd, "rm")) {
@@ -934,7 +956,11 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
                 // Claude goes on, told why.
                 .retry => |why| return out(try std.fmt.allocPrint(a, "{f}\n", .{std.json.fmt(.{ .decision = "block", .reason = why }, .{})})),
                 // Last: it is the session this runs in.
-                .done, .failed => return autoreview.killSession(ctx, a, t.key) catch {},
+                .done => {
+                    actions.afterAutoreview(ctx, db, a, t.key);
+                    return autoreview.killSession(ctx, a, t.key) catch {};
+                },
+                .failed => return autoreview.killSession(ctx, a, t.key) catch {},
             }
         }
         if (args.has("--send")) {
@@ -955,6 +981,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
                 else => boardFail(db, e, "ticket"),
             };
             try out(try std.fmt.allocPrint(a, "Took {d} finding{s} for {s}; its reviewer is closed.\n", .{ r.findings.len, if (r.findings.len == 1) "" else "s", t.key }));
+            actions.afterAutoreview(ctx, db, a, t.key);
             // The review is over. Last: this may run in its session.
             autoreview.killSession(ctx, a, t.key) catch {};
             return;
@@ -1291,7 +1318,7 @@ fn showText(ctx: Ctx, a: std.mem.Allocator, t: board.Ticket, blocks: []const []c
 /// The automated review, under `show`.
 fn writeAutoreview(w: *std.Io.Writer, a: std.mem.Allocator, t: board.Ticket, r: autoreview.Review) !void {
     const old = if (r.round > 0 and r.round < t.round) try std.fmt.allocPrint(a, ", of round {d} (before Claude's last changes)", .{r.round}) else "";
-    try w.print("\nautomated review ({s}, {s}, profile {s}{s}):\n", .{ r.status, try stamp(a, r.started), r.profile, old });
+    try w.print("\nautomated review ({s}, {s}, profile {s}{s}{s}):\n", .{ r.status, try stamp(a, r.started), r.profile, old, if (r.auto.len > 0) ", started by itself" else "" });
     if (std.mem.eql(u8, r.status, "running")) try w.print("  reviewing in tmux session {s}\n", .{try autoreview.sessionName(a, t.key)});
     if (std.mem.eql(u8, r.status, "failed")) try w.print("  failed: {s}\n", .{r.@"error"});
     if (!std.mem.eql(u8, r.status, "done")) return;

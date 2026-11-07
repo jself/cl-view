@@ -877,6 +877,11 @@ pub fn gutterSubmitted(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []cons
 /// a gutter review and kept as a comment, which starts another round.
 /// error.NoFindings unless a finished review has some (or your edit).
 pub fn autoreviewSend(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8) !CommentResult {
+    return sendFindings(ctx, db, a, key, false);
+}
+
+/// `autoreviewSend`; `by_cl` records that cl sent them itself (`Review.auto_sent`).
+fn sendFindings(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, by_cl: bool) !CommentResult {
     const t = try board.getTicket(db, a, key);
     var r = autoreview.load(a, t) orelse return error.NoFindings;
     if (!autoreview.usable(r)) return error.NoFindings;
@@ -885,11 +890,63 @@ pub fn autoreviewSend(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const
     const msg = try autoreview.message(a, r);
     try tmux.pasteText(ctx, s, msg);
     r.sent = ctx.nowSeconds();
+    r.auto_sent = by_cl;
     // Marked sent only if it is still the review that was sent (not a new
     // one started meanwhile).
     _ = try board.setAutoreviewIf(db, t.id, try std.fmt.allocPrint(a, "{f}", .{std.json.fmt(r, .{})}), t.autoreview);
     const br = try board.addComment(ctx, db, a, key, "you", msg, true);
     return .{ .sent = true, .sent_back = br.sent_back, .round = (try board.getTicket(db, a, key)).round };
+}
+
+/// An automated review just finished (its reviewer's Stop hook, or
+/// `--findings`): one cl started under --auto-review send has its findings
+/// sent to the ticket's session now, for one round (`autoreview.sendsItself`).
+/// One it can't send (no live session) stays on the board for you, and the
+/// ticket is back in Needs You (`autoreview.submit` left that to this); why
+/// is logged on the ticket.
+pub fn afterAutoreview(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8) void {
+    const t = board.getTicket(db, a, key) catch return;
+    const r = autoreview.load(a, t) orelse return;
+    if (!autoreview.sendsItself(r, t)) return;
+    if (sendFindings(ctx, db, a, key, true)) |_| {
+        board.logEvent(ctx, db, t.id, "autoreview sent by itself", "") catch {};
+        return;
+    } else |e| board.logEvent(ctx, db, t.id, "autoreview not sent", switch (e) {
+        error.NoSession => "the ticket has no live session",
+        else => @errorName(e),
+    }) catch {};
+    board.raiseAfterReview(ctx, db, t.id, t.stage) catch {};
+}
+
+test "afterAutoreview: findings cl can't send itself stay for you" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env: std.process.Environ.Map = .init(a);
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = a, .env = &env, .home = "/tmp", .tmux_blocked = true };
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "qa", .dir = "/x" });
+    const k = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "T", .stage = .review });
+    const id = (try board.getTicket(db, a, k)).id;
+    // One you started: left alone.
+    try board.setAutoreview(db, id, "{\"status\":\"done\",\"round\":1,\"findings\":[{\"title\":\"x\",\"body\":\"y\"}]}");
+    afterAutoreview(ctx, db, a, k);
+    try std.testing.expectEqual(@as(usize, 1), (try board.events(db, a, id)).len);
+    // Started under send, but its session is gone: logged, not sent, still
+    // in Review, and back in Needs You with its flag.
+    try board.setAutoreview(db, id, "{\"status\":\"done\",\"round\":1,\"auto\":\"send\",\"findings\":[{\"title\":\"x\",\"body\":\"y\"}]}");
+    afterAutoreview(ctx, db, a, k);
+    var logged = false;
+    for (try board.events(db, a, id)) |e| logged = logged or std.mem.eql(u8, e.kind, "autoreview not sent");
+    try std.testing.expect(logged);
+    const needs = try board.listTickets(db, a, .{ .needs = true });
+    try std.testing.expectEqual(@as(usize, 1), needs.len);
+    try std.testing.expectEqualStrings(board.flag_review, needs[0].flags[0].kind);
+    const t = try board.getTicket(db, a, k);
+    try std.testing.expectEqual(board.Stage.review, t.stage);
+    try std.testing.expectEqual(@as(i64, 0), autoreview.load(a, t).?.sent);
 }
 
 test "findings from an earlier round aren't sent" {

@@ -916,6 +916,26 @@ After a new round, the old findings say which round they were from. Done,
 deleting the ticket, or moving it back to Queued stops a review that's
 running.
 
+A project can have it run by itself when a ticket reaches Review: `cl project
+set <p> --auto-review on` (or the project's "When a ticket reaches Review" on
+the board). When Claude says it's done (`cl ticket done`, or the board's
+done for it), the review starts right away, so the ticket reaches Needs You with its findings already there
+instead of waiting for you to press Auto review. `--auto-review send` also
+sends what it finds to Claude, as Send findings would, for one round; when
+Claude finishes that round, the ticket waits for you with the old findings and
+Claude's answer, and isn't reviewed again by itself (so the two don't go back
+and forth with nobody looking). A review with no findings sends nothing.
+Either way it runs once per round: not again when Claude says done twice in
+one round, but again in a round you start (your comment, or findings you sent
+yourself). A ticket with no changes, or one whose reviewer can't start, is
+skipped (its log says why) and is in Needs You as usual; so are findings cl
+couldn't send because the ticket's session is gone. With send, the ticket
+only comes back to Needs You if cl couldn't send them, or once Claude has
+answered. If you approve or send the
+ticket back while the review runs, nothing is sent by itself. A review
+started this way says so on the Review tab and in `cl t show`. `off` (the
+default) goes back to only when you start it.
+
 Tests clean up after themselves. Sending test results stops the ticket's
 launches, and so does finishing it. Once a minute the main `cl web` also
 stops whatever a finished (or deleted) ticket left running: its launch

@@ -1028,6 +1028,7 @@ function openProject(name) {
         <label>Worktree slots<input type="number" name="slots" min="1" value="${p ? p.slots : ""}" placeholder="3"></label></div>
       <div class="row2"><label>Profile<select name="profile"><option value="">Default</option>${profiles.map((x) => `<option ${x === p?.profile ? "selected" : ""}>${esc(x)}</option>`).join("")}</select></label>
         <label>Target branch<input type="text" name="onto" class="mono" value="${esc(p?.onto || "")}" placeholder="Trunk" autocomplete="off" title="A jj bookmark or git branch its tickets start from and merge into instead of trunk; a ticket's own target wins. Merges into it don't run the after-merge steps"></label></div>
+      <label>When a ticket reaches Review<select name="auto_review" title="Run the automated review by itself, once per round, so the ticket reaches Needs you with its findings there">${[["off", "Wait for me to run the automated review"], ["on", "Run the automated review"], ["send", "Run the automated review and send its findings to Claude for one round"]].map(([v, l]) => `<option value="${v}" ${(p?.auto_review || "off") === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>
       ${p ? `<p class="muted" style="margin:0;font-size:calc(12.5 * var(--u))">A new prefix applies to new tickets; existing keys stay as they are.</p>` : ""}
       <p class="formerr" id="projErr" role="alert" hidden></p>
       <div class="actions"><button type="submit" class="btn primary">${p ? "Save" : "Add project"}</button></div></form>`;
@@ -1035,7 +1036,7 @@ function openProject(name) {
 }
 async function submitProject(form) {
   const f = Object.fromEntries(new FormData(form)); const old = form.dataset.name;
-  const body = { name: f.name.trim(), dir: f.dir.trim(), prefix: f.prefix.trim().toUpperCase(), mode: f.mode, profile: f.profile, onto: f.onto.trim() };
+  const body = { name: f.name.trim(), dir: f.dir.trim(), prefix: f.prefix.trim().toUpperCase(), mode: f.mode, profile: f.profile, onto: f.onto.trim(), auto_review: f.auto_review };
   if (f.slots !== "") body.slots = Number(f.slots);
   // An unchanged directory isn't sent: one that's gone since would refuse the save.
   if (old && body.dir === state.data.projects.find((x) => x.name === old)?.dir) delete body.dir;
@@ -1392,7 +1393,7 @@ function autoreviewHtml(d) {
   const runBtn = (label, primary) => !can ? "" : `<button type="button" class="btn${primary ? " primary" : ""}" data-act="autoreview" title="A separate Claude (profile ${esc(t.profile || "default")} or the project's) reads the changes and reports problems; nothing is sent until you choose">${label}</button>`;
   const head = (what) => `<div class="hd"><strong>Automated review</strong><span class="muted">${what}</span></div>`;
   if (!r) return `<div class="ar">${head("a second Claude goes over the changes before you do")}<div class="actions">${runBtn("Run automated review", false)}</div></div>`;
-  const meta = [r.profile ? `profile ${esc(r.profile)}` : "", r.skill ? `skill ${esc(r.skill)}` : "", r.round && r.round < t.round ? `of round ${r.round}, before Claude's last changes` : ""].filter(Boolean).join(" · ");
+  const meta = [r.auto ? "started by itself" : "", r.profile ? `profile ${esc(r.profile)}` : "", r.skill ? `skill ${esc(r.skill)}` : "", r.round && r.round < t.round ? `of round ${r.round}, before Claude's last changes` : ""].filter(Boolean).join(" · ");
   if (r.status === "running") return `<div class="ar">${head(`Reviewing… (started ${ago(r.started)}${ago(r.started) === "now" ? "" : " ago"}${meta ? " · " + meta : ""})`)}
     <p class="muted" style="margin:0">The findings show here when it's done. To watch it: <code>tmux attach -t ${esc(d.autoreview_session)}</code></p>
     <div class="actions"><button type="button" class="btn" data-act="autoreview-stop">Stop</button></div></div>`;

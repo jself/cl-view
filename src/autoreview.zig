@@ -82,6 +82,13 @@ pub const Review = struct {
     /// What you made of `message` on the board (its Edit), sent in its
     /// place; "" for the findings as they came. A new review drops it.
     edited: []const u8 = "",
+    /// Started by cl as the ticket reached Review (`startOnReview`), under
+    /// the project's --auto-review: "on" or "send" (its findings go to
+    /// Claude when it finishes, `sendsItself`). "" for one you started.
+    auto: []const u8 = "",
+    /// cl sent its findings itself (`actions.afterAutoreview`), not you: the
+    /// round that answers them isn't reviewed by itself (`startOnReview`).
+    auto_sent: bool = false,
 };
 
 pub const Error = error{
@@ -298,6 +305,11 @@ test hookSettings {
 /// Start a review of `t` in clrv_<key>. It runs on its own; the result
 /// comes back through `submit`. Refused while one is running.
 pub fn start(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: board.Ticket) !Review {
+    return startAs(ctx, cfg, db, a, t, "");
+}
+
+/// `start`, recording `auto` (`Review.auto`).
+fn startAs(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: board.Ticket, auto: []const u8) !Review {
     if (t.stage != .review and t.stage != .testing) return error.NotInReview;
     const dir = try review.ticketDir(db, a, t);
     const rev = try worktree.reviewRev(ctx, a, dir, t.base, t.change);
@@ -355,10 +367,166 @@ pub fn start(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t
     // so a helper says yes, detached so this doesn't wait for Claude to start.
     if (cfg.board.trust_projects) spawnTrust(ctx, a, exe, t.key) catch {};
 
-    const r: Review = .{ .status = "running", .started = ctx.nowSeconds(), .round = t.round, .rev = rev, .profile = prof.name, .skill = p.review_skill };
+    const r: Review = .{ .status = "running", .started = ctx.nowSeconds(), .round = t.round, .rev = rev, .profile = prof.name, .skill = p.review_skill, .auto = auto };
     try save(db, a, t.id, r);
-    try board.logEvent(ctx, db, t.id, "autoreview started", prof.name);
+    try board.logEvent(ctx, db, t.id, if (auto.len > 0) "autoreview started by itself" else "autoreview started", prof.name);
     return r;
+}
+
+/// What `startOnReview` did.
+pub const OnReview = union(enum) {
+    /// The project doesn't review by itself (or the ticket isn't in Review).
+    off,
+    /// Started, as the project's setting says (on or send).
+    started: board.AutoReview,
+    /// Not this time, and why (logged on the ticket too).
+    skipped: []const u8,
+};
+
+/// The ticket just reached Review (Claude's `cl ticket done`): run its
+/// automated review now if the project says so (`--auto-review on|send`),
+/// so it reaches Needs You with the findings already there. It is out of
+/// Needs You meanwhile, as with one you start (`board.isWorking`).
+///
+/// Once per round: not when this round has a review already (Claude said
+/// done twice), and with send, not the round that answered findings cl sent
+/// by itself, so Claude and the reviewer don't go back and forth with
+/// nobody looking. A round you start (your comment, or Send findings
+/// yourself) gets one again. Nothing here fails `done`: a review that can't
+/// start (no changes, tmux) is skipped and logged, and the ticket is in
+/// Needs You as usual.
+pub fn startOnReview(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, key: []const u8) OnReview {
+    const t = board.getTicket(db, a, key) catch return .off;
+    if (t.stage != .review) return .off;
+    const p = board.getProject(db, a, t.project) catch return .off;
+    if (p.auto_review == .off) return .off;
+    const why: []const u8 = if (load(a, t)) |prev| blk: {
+        if (prev.round >= t.round and !std.mem.eql(u8, prev.status, "failed")) break :blk "this round has an automated review already";
+        if (prev.auto_sent and prev.round + 1 == t.round) break :blk "this round answered the findings cl sent by itself";
+        break :blk "";
+    } else "";
+    if (why.len == 0) {
+        if (startAs(ctx, cfg, db, a, t, @tagName(p.auto_review))) |_| return .{ .started = p.auto_review } else |e| {
+            const w = switch (e) {
+                error.NoChanges => "it has no changes to review",
+                error.AlreadyRunning => "a review of it is running already",
+                error.StartFailed => std.fmt.allocPrint(a, "couldn't start the reviewer: {s}", .{tmux.lastError()}) catch "couldn't start the reviewer",
+                else => @errorName(e),
+            };
+            board.logEvent(ctx, db, t.id, "autoreview skipped", w) catch {};
+            return .{ .skipped = w };
+        }
+    }
+    board.logEvent(ctx, db, t.id, "autoreview skipped", why) catch {};
+    return .{ .skipped = why };
+}
+
+/// Whether cl sends `r`'s findings to the ticket's Claude itself, now that
+/// it is done: started under --auto-review send, with findings, of the
+/// ticket's current round.
+pub fn sendsItself(r: Review, t: board.Ticket) bool {
+    // Moved on (approved to Testing, sent back) meanwhile: you've taken it.
+    return t.stage == .review and std.mem.eql(u8, r.auto, "send") and r.sent == 0 and usable(r) and current(r, t);
+}
+
+test "startOnReview: only when the project says so, once a round, and not the round that answered findings cl sent" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env: std.process.Environ.Map = .init(a);
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = a, .env = &env, .home = "/tmp", .tmux_blocked = true };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var profiles = [_]config.Profile{.{ .name = "work", .config_dir = "/h/.claude-work" }};
+    var cfg: config.Config = .{ .profiles = &profiles, .default = "work", .operator = "work" };
+    cfg.board.dir = try tmp.dir.realPathFileAlloc(ctx.io, ".", a);
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "qa", .dir = cfg.board.dir });
+    const k = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "T", .stage = .review });
+    const id = (try board.getTicket(db, a, k)).id;
+    // Off (the default): nothing.
+    try std.testing.expect(startOnReview(ctx, cfg, db, a, k) == .off);
+    try board.updateProject(db, "qa", .{ .name = "", .dir = "", .auto_review = .send });
+    try std.testing.expectEqual(board.AutoReview.send, (try board.getProject(db, a, "qa")).auto_review);
+    // No changes: skipped, and nothing recorded on the ticket.
+    try std.testing.expectEqualStrings("it has no changes to review", startOnReview(ctx, cfg, db, a, k).skipped);
+    try std.testing.expect(load(a, try board.getTicket(db, a, k)) == null);
+    // This round was reviewed already (Claude said done twice).
+    try save(db, a, id, .{ .status = "done", .round = 1, .auto = "send" });
+    try std.testing.expectEqualStrings("this round has an automated review already", startOnReview(ctx, cfg, db, a, k).skipped);
+    // Its findings were sent by cl, and this round answered them.
+    try save(db, a, id, .{ .status = "done", .round = 1, .auto = "send", .sent = 5, .auto_sent = true });
+    try db.exec("UPDATE tickets SET round = 2 WHERE id = ?1", .{id});
+    try std.testing.expectEqualStrings("this round answered the findings cl sent by itself", startOnReview(ctx, cfg, db, a, k).skipped);
+    // You sent them yourself (cl couldn't, or you'd moved it on): reviewed.
+    try db.exec("UPDATE tickets SET base = 'abc' WHERE id = ?1", .{id});
+    try save(db, a, id, .{ .status = "done", .round = 1, .auto = "send", .sent = 5 });
+    try std.testing.expect(!std.mem.startsWith(u8, startOnReview(ctx, cfg, db, a, k).skipped, "this round"));
+    // A round after that one (you sent it back) is reviewed again; so is one
+    // after findings you sent from a review you started. Here it gets past
+    // the rules to starting the reviewer, which tests can't (no tmux).
+    try db.exec("UPDATE tickets SET round = 3, base = 'abc' WHERE id = ?1", .{id});
+    try std.testing.expect(!std.mem.startsWith(u8, startOnReview(ctx, cfg, db, a, k).skipped, "this round"));
+    try save(db, a, id, .{ .status = "done", .round = 2, .sent = 5 });
+    try std.testing.expect(!std.mem.startsWith(u8, startOnReview(ctx, cfg, db, a, k).skipped, "this round"));
+    // Not in Review (a plan, or moved on): nothing.
+    try board.move(ctx, db, a, k, .testing);
+    try std.testing.expect(startOnReview(ctx, cfg, db, a, k) == .off);
+}
+
+test "submit leaves a ticket out of Needs You when cl sends the findings itself" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = a, .env = undefined, .home = "/tmp" };
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "qa", .dir = "/x" });
+    const k = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "T", .stage = .review });
+    const id = (try board.getTicket(db, a, k)).id;
+    const findings = "{\"summary\": \"x\", \"findings\": [{\"title\": \"Crash\", \"body\": \"y\"}]}";
+    try save(db, a, id, .{ .status = "running", .round = 1, .auto = "send" });
+    _ = try submit(ctx, db, a, k, findings);
+    try std.testing.expectEqual(@as(usize, 0), (try board.listTickets(db, a, .{ .needs = true })).len);
+    // Under on, it is back as usual.
+    try save(db, a, id, .{ .status = "running", .round = 1, .auto = "on" });
+    _ = try submit(ctx, db, a, k, findings);
+    try std.testing.expectEqual(@as(usize, 1), (try board.listTickets(db, a, .{ .needs = true })).len);
+}
+
+test sendsItself {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = a, .env = undefined, .home = "/tmp" };
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "qa", .dir = "/x" });
+    const k = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "T", .stage = .review });
+    try db.exec("UPDATE tickets SET round = 2", .{});
+    const t = try board.getTicket(db, a, k);
+    const fs = [_]Finding{.{ .title = "x" }};
+    const r: Review = .{ .status = "done", .round = 2, .auto = "send", .findings = &fs };
+    try std.testing.expect(sendsItself(r, t));
+    var x = r;
+    x.auto = "on";
+    try std.testing.expect(!sendsItself(x, t));
+    x = r;
+    x.findings = &.{};
+    try std.testing.expect(!sendsItself(x, t));
+    x = r;
+    x.sent = 1;
+    try std.testing.expect(!sendsItself(x, t));
+    x = r;
+    x.round = 1;
+    try std.testing.expect(!sendsItself(x, t));
+    var moved = t;
+    moved.stage = .testing;
+    try std.testing.expect(!sendsItself(r, moved));
 }
 
 fn spawnTrust(ctx: Ctx, a: std.mem.Allocator, exe: []const u8, key: []const u8) !void {
@@ -745,8 +913,11 @@ pub fn submit(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, inp
     // Only while it runs: stopped or timed out meanwhile, that stands.
     if (!try board.setAutoreviewIfRunning(db, t.id, try std.fmt.allocPrint(a, "{f}", .{std.json.fmt(r, .{})}))) return error.NotRunning;
     try board.logEvent(ctx, db, t.id, "autoreview done", try std.fmt.allocPrint(a, "{d} finding{s}", .{ got.findings.len, if (got.findings.len == 1) "" else "s" }));
-    // Out of Needs You while it ran (board.isWorking): back now.
-    try board.raiseAfterReview(ctx, db, t.id, t.stage);
+    // Out of Needs You while it ran (board.isWorking): back now, unless cl
+    // sends the findings to Claude itself (actions.afterAutoreview, which
+    // raises it if that fails), so you aren't called for a ticket about to
+    // go back to work.
+    if (!sendsItself(r, t)) try board.raiseAfterReview(ctx, db, t.id, t.stage);
     return r;
 }
 
