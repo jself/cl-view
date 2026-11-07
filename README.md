@@ -300,6 +300,33 @@ web.font_size = 16              # text size of the board and terminal pages, in 
   ticket's test server still running, or `cl web start`'s), so the newest
   build is the one that answers. The main server is never stopped this way.
 
+### On a phone
+
+The board installs as an app (a PWA: its own home-screen icon, opening
+full-screen on the board without the browser's address bar). Phones only
+install it from an HTTPS page, so put `tailscale serve` in front of `cl web`
+(HTTPS on your tailnet only, with a real certificate for the machine's
+`ts.net` name; HTTPS certificates must be on in the tailnet's admin console):
+
+    tailscale serve --bg --https=8443 http://127.0.0.1:8421
+
+Then open `https://<machine>.<tailnet>.ts.net:8443/board` on the phone, sign
+in, and install it: on Android, Chrome's menu → **Install app** (or **Add to
+Home screen**); on an iPhone, Safari's Share → **Add to Home Screen**. The
+installed app keeps its own sign-in (on an iPhone it doesn't share Safari's
+cookies), so it asks for the password once. The same address also gets the
+microphone for voice (below).
+
+- Pick any free port for `--https`; plain `--https=443` replaces whatever
+  this machine already serves there. `tailscale serve status` shows what's
+  set, and `tailscale serve --https=8443 off` removes it. Only `tailscale
+  funnel` would put it on the internet; `serve` stays on the tailnet.
+- The app is the page served live, nothing cached on the phone: it needs
+  the tailnet up and `cl web` running, and picks up a new cl at once.
+- Over plain `http://<machine>:8421` Android only makes a home-screen
+  shortcut that opens in a browser tab; an iPhone's Add to Home Screen
+  still opens full-screen.
+
 ## Window
 
 `cl window` opens the web UI (board, session terminals, chat) in its own
@@ -458,7 +485,8 @@ Then restart the server (`cl web stop`) and reload the board.
 - The browser allows the microphone only on HTTPS or `127.0.0.1`/`localhost`.
   `cl window` and a browser on this machine work; a phone over
   `http://<machine>:8421` gets "the browser only allows the mic on HTTPS".
-  `tailscale serve` can put HTTPS in front of `cl web` for that.
+  `tailscale serve` can put HTTPS in front of `cl web` for that (Web, "On a
+  phone").
 - `cl window` allows the microphone for cl's own pages, and lets the answer
   play without a click.
 - Speed, on CPU: whisper's `base.en` takes 2–4 s for a short request.

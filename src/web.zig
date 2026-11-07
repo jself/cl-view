@@ -22,6 +22,12 @@ const vendor = .{
     .{ "/xterm.css", "text/css", @embedFile("web/vendor/xterm.css") },
     .{ "/addon-fit.js", "text/javascript", @embedFile("web/vendor/addon-fit.js") },
     .{ "/addon-web-links.js", "text/javascript", @embedFile("web/vendor/addon-web-links.js") },
+    // What a phone needs to install the board as an app (README, "On a phone").
+    .{ "/manifest.webmanifest", "application/manifest+json", @embedFile("web/manifest.webmanifest") },
+    .{ "/icon.svg", "image/svg+xml", @embedFile("window/cl.svg") },
+    .{ "/icon-192.png", "image/png", @embedFile("web/icon-192.png") },
+    .{ "/icon-512.png", "image/png", @embedFile("web/icon-512.png") },
+    .{ "/apple-touch-icon.png", "image/png", @embedFile("web/apple-touch-icon.png") },
 };
 
 const cookie_name = "cl_session";
