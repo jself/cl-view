@@ -12,6 +12,7 @@ const signals = @import("signals.zig");
 const claude = @import("claude.zig");
 const after_merge = @import("after_merge.zig");
 const operator = @import("operator.zig");
+const park = @import("park.zig");
 
 pub const Error = error{
     /// The ticket has no live session to act on.
@@ -39,6 +40,9 @@ pub const Error = error{
     SharedSession,
     /// It is being started right now.
     Starting,
+    /// `done --close` on a ticket finishing with a PR and steps for after
+    /// it merges, without the PR's URL to park the follow-up on.
+    NoPrUrl,
 };
 
 pub fn liveSession(ctx: Ctx, t: board.Ticket) ?[]const u8 {
@@ -205,10 +209,13 @@ fn startFinish(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, fi
     const text = switch (finish) {
         .close, .tell => unreachable,
         .merge => try std.fmt.allocPrint(a, "This ticket is approved. Finish it by merging its branch {s} into {s}: commit anything left here first, then merge it in the project's checkout at {s} (it may have uncommitted work of its own; leave that alone). If it conflicts in a way you can't settle with confidence, or anything is unclear, ask me. {s} `cl ticket done {s} --close`.", .{ t.branch, main, dir, restart, t.key }),
-        .pr => if (t.change.len > 0)
+        .pr => try std.fmt.allocPrint(a, "{s}{s}", .{ if (t.change.len > 0)
             try std.fmt.allocPrint(a, "This ticket is approved. Finish it with a pull request: push its jj bookmark {s} (`jj git push -b {s}`) and open a PR against {s} (gh pr create --head {s} --base {s}) with a title and description of the change. If anything is unclear, ask me. Then run `cl ticket done {s} --close --pr-url <the PR's URL>`.", .{ t.branch, t.branch, main, t.branch, main, t.key })
         else
-            try std.fmt.allocPrint(a, "This ticket is approved. Finish it with a pull request: commit anything left, push its branch {s} and open a PR against {s} (gh pr create --base {s}) with a title and description of the change. If anything is unclear, ask me. Then run `cl ticket done {s} --close --pr-url <the PR's URL>`.", .{ t.branch, main, main, t.key }),
+            try std.fmt.allocPrint(a, "This ticket is approved. Finish it with a pull request: commit anything left, push its branch {s} and open a PR against {s} (gh pr create --base {s}) with a title and description of the change. If anything is unclear, ask me. Then run `cl ticket done {s} --close --pr-url <the PR's URL>`.", .{ t.branch, main, main, t.key }), if (t.pr_then.len > 0)
+            try std.fmt.allocPrint(a, " Don't do what's left for after it merges ({s}): with the PR's URL, cl makes a follow-up ticket that does it once the PR merges.", .{t.pr_then})
+        else
+            "" }),
     };
     // Finishing first, so the sent comment doesn't send it back to Running.
     try board.setFinishing(ctx, db, t.id, @tagName(finish));
@@ -391,6 +398,10 @@ pub fn mergeSettled(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticke
 pub fn finished(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, summary: []const u8, pr: []const u8) !void {
     const t = try board.getTicket(db, a, key);
     if (t.finishing.len == 0) return error.NotFinishing;
+    // Steps for after the PR merges: they need the PR to wait on.
+    const then = followsUp(t);
+    if (then and pr.len == 0) return error.NoPrUrl;
+    if (then) _ = try park.parsePr(a, pr, null);
     _ = try mergeSettled(ctx, db, a, t);
     // A git branch Claude merged into the main branch: it is there now.
     // Into another branch (its target): nothing runs from that.
@@ -405,7 +416,22 @@ pub fn finished(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, s
     // Checked before the session closes: this runs in it.
     if (!std.mem.eql(u8, t.finishing, "pr") and pr.len == 0)
         try checkLanded(ctx, db, a, key, if (std.mem.eql(u8, t.finishing, "tell")) "Claude finished what you told it without merging it" else "Claude said it was merged, but it isn't");
+    // It is Done already: a follow-up that couldn't be made is flagged with
+    // its steps, rather than leaving the session open too.
+    if (then) if (park.followUp(ctx, db, a, t, pr, t.pr_then)) |k| {
+        _ = try board.addComment(ctx, db, a, key, "claude", try std.fmt.allocPrint(a, "Follow-up {s} is parked on the PR: it does what's left once the PR merges.", .{k}), false);
+    } else |e| {
+        try board.setFlagId(ctx, db, t.id, flag_follow_up_failed, "auto", try std.fmt.allocPrint(a, "cl couldn't make the follow-up for {s} ({s}). What was left for after it merges: {s}", .{ pr, @errorName(e), t.pr_then }));
+    };
     try closeSession(ctx, db, a, key);
+}
+
+/// Finishing with a PR, with steps for after it merges: `finished` makes a
+/// follow-up for them, parked on the PR.
+pub const flag_follow_up_failed = "follow-up-failed";
+
+pub fn followsUp(t: board.Ticket) bool {
+    return std.mem.eql(u8, t.finishing, "pr") and std.mem.trim(u8, t.pr_then, " \t\r\n").len > 0;
 }
 
 /// What Claude is doing for a ticket finishing `how`.
@@ -1342,4 +1368,50 @@ test "going to Done closes the ticket's session, even when a test server of its 
     try std.testing.expect(!T.alive(ctx, "cl_qa-6_dd"));
     try std.testing.expect(!T.alive(ctx, "clrun_qa-6_s1"));
     try std.testing.expectError(error.NotFound, board.getTicket(db, a, six));
+}
+
+test "finished with a PR and steps for after it: done, plus a follow-up parked on the PR" {
+    const gpa = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var env: std.process.Environ.Map = .init(gpa);
+    defer env.deinit();
+    // A socket of the test's own with no server: closing its (missing)
+    // session never reaches the real tmux.
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = gpa, .perm = a, .env = &env, .home = "/tmp", .tmux_socket = "/tmp/cl-test-followup-none" };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "qa", .dir = dir });
+    const k = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Redact metadata", .stage = .testing });
+    const t = try board.getTicket(db, a, k);
+    try board.setPrThen(ctx, db, t.id, "Deploy, then run the backfill.");
+    try board.setFinishing(ctx, db, t.id, "pr");
+    try std.testing.expect(followsUp(try board.getTicket(db, a, k)));
+
+    // Without the PR there's nothing to park the follow-up on.
+    try std.testing.expectError(error.NoPrUrl, finished(ctx, db, a, k, "", ""));
+    try std.testing.expectEqual(board.Stage.testing, (try board.getTicket(db, a, k)).stage);
+
+    try finished(ctx, db, a, k, "Opened the PR", "https://github.com/o/r/pull/31");
+    const done = try board.getTicket(db, a, k);
+    try std.testing.expectEqual(board.Stage.done, done.stage);
+    try std.testing.expectEqual(@as(i64, 1), done.children);
+    const fk = (try board.listTickets(db, a, .{ .parent = k }))[0].key;
+    const f = try board.getTicket(db, a, fk);
+    try std.testing.expectEqual(board.Stage.queued, f.stage);
+    try std.testing.expectEqualStrings("https://github.com/o/r/pull/31", f.park.?.pr);
+    try std.testing.expect(std.mem.indexOf(u8, f.body, "Deploy, then run the backfill.") != null);
+    const comments = try board.comments(db, a, done.id);
+    try std.testing.expect(std.mem.indexOf(u8, comments[comments.len - 1].body, fk) != null);
+
+    // Finished with a PR and no steps: nothing follows.
+    const k2 = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Plain PR", .stage = .testing });
+    try board.setFinishing(ctx, db, (try board.getTicket(db, a, k2)).id, "pr");
+    try finished(ctx, db, a, k2, "", "https://github.com/o/r/pull/32");
+    try std.testing.expectEqual(@as(i64, 0), (try board.getTicket(db, a, k2)).children);
 }

@@ -358,6 +358,7 @@
   #imgDlg { max-width: 96vw; max-height: 96vh; width: auto; height: auto; background: #000; cursor: zoom-out; }
   #imgDlg img { display: block; max-width: 96vw; max-height: 96vh; object-fit: contain; margin: auto; }
   .form label { display: flex; flex-direction: column; gap: calc(5 * var(--u)); font-size: calc(12.5 * var(--u)); color: var(--muted); }
+  .form label[hidden], .form p[hidden] { display: none; }
   .form .row2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(calc(200 * var(--u)), 1fr)); gap: calc(12 * var(--u)); }
   .check { display: flex; flex-direction: column; gap: calc(6 * var(--u)); padding: calc(10 * var(--u)) calc(12 * var(--u)); border: 1px solid var(--line); border-radius: calc(10 * var(--u)); }
   .check .pf { display: flex; gap: calc(6 * var(--u)); }
@@ -498,9 +499,11 @@
   <div class="head"><h1 style="flex:1" id="parkTitle">Park</h1><button type="button" class="btn" id="closePark">Cancel</button></div>
   <form class="form" id="parkForm">
     <p class="muted" style="margin:0" id="parkNote"></p>
+    <label>Wake it when this PR merges (optional)<input type="text" name="pr" class="mono" placeholder="https://github.com/owner/repo/pull/30, or #30" autocomplete="off"></label>
+    <p class="muted" style="margin:0" id="parkPrNote">cl checks the PR's state with <span class="mono">gh</span>: merged resumes it; closed without merging ends the park with a flag. <span class="mono">#30</span> is a PR of the ticket's origin remote.</p>
     <label>What it waits on<input type="text" name="reason" required placeholder="PR #30: waiting for approval, merge and deploy"></label>
-    <label>Wake it when this command passes (optional)<textarea name="until" rows="3" class="mono" placeholder="gh pr view 30 --json state -q .state | grep -qx MERGED"></textarea></label>
-    <p class="muted" style="margin:0">Run with <span class="mono">sh -c</span> from the ticket's directory; exit 0 resumes it. Without a command nothing checks it: Resume brings it back.</p>
+    <label id="parkUntil">Wake it when this command passes (optional)<textarea name="until" rows="3" class="mono" placeholder="curl -sf https://staging.example.com/health"></textarea></label>
+    <p class="muted" style="margin:0" id="parkUntilNote">Run with <span class="mono">sh -c</span> from the ticket's directory; exit 0 resumes it. Without a PR or a command nothing checks it: Resume brings it back.</p>
     <div style="display:flex;gap:calc(12 * var(--u));flex-wrap:wrap">
       <label>Check every<input type="text" name="every" value="1h" size="6"></label>
       <label>Give up after<input type="text" name="max" value="7d" size="6"></label></div>
@@ -521,7 +524,7 @@
 "use strict";
 const STAGES = ["backlog", "planning", "queued", "running", "review", "testing", "done"];
 const STAGE_NAME = { backlog: "Backlog", planning: "Planning", queued: "Queued", running: "Running", review: "Review", testing: "Testing", done: "Done" };
-const FLAG_NAME = { input: "Needs input", question: "Question", review: "Ready for review", testing: "Needs testing", ended: "Session ended", "start-failed": "Didn't start", conflict: "Conflicts", "after-merge": "After-merge failed", "merge-failed": "Didn't land", unmerged: "Not merged", unparked: "Woke from park", "park-expired": "Park expired", idle: "Idle", "ready-to-close": "Ready to close" };
+const FLAG_NAME = { input: "Needs input", question: "Question", review: "Ready for review", testing: "Needs testing", ended: "Session ended", "start-failed": "Didn't start", conflict: "Conflicts", "after-merge": "After-merge failed", "merge-failed": "Didn't land", unmerged: "Not merged", unparked: "Woke from park", "park-expired": "Park expired", "pr-closed": "PR closed", "follow-up-failed": "Follow-up failed", idle: "Idle", "ready-to-close": "Ready to close" };
 const STATUS_NAME = { waits: "Waits", paused: "Paused", busy: "Working", waiting: "Waiting on you", blocked: "Waiting on you", idle: "Idle", shell: "Idle · background task", starting: "Starting", gone: "Session ended", nosession: "No session", killed: "Killed · restart it", parked: "Parked", unknown: "Unknown" };
 
 const store = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch { return null; } };
@@ -654,9 +657,9 @@ const DISMISS_TIP = "Remove this alert for good. The ticket itself doesn't chang
 // A failed start of a queued (or planning) ticket is retried by the dispatcher.
 const retries = (t) => (t.stage === "queued" || t.stage === "planning") && !t.tmux && !t.killed && !t.park;
 const flagLabel = (f) => f.kind === "review" && f.detail === "plan" ? "Plan ready" : (FLAG_NAME[f.kind] || f.kind);
-const flagClass = (k) => ["after-merge", "park-expired", "merge-failed", "unmerged"].includes(k) ? "f-conflict" : k === "unparked" || k === "ready-to-close" ? "f-review" : ["input", "question", "review", "testing", "conflict"].includes(k) ? "f-" + k : "";
+const flagClass = (k) => ["after-merge", "park-expired", "pr-closed", "follow-up-failed", "merge-failed", "unmerged"].includes(k) ? "f-conflict" : k === "unparked" || k === "ready-to-close" ? "f-review" : ["input", "question", "review", "testing", "conflict"].includes(k) ? "f-" + k : "";
 // Finishing: Claude is merging the branch or opening a PR before it goes to Done.
-const finishPill = (t) => t.finishing ? `<span class="pill f-finishing" title="${t.finishing === "pr" ? "Claude is opening a PR" : t.finishing === "after-merge" ? "It's merged; Claude is doing the after-merge steps (rebuilding, restarting)" : t.finishing === "tell" ? "Claude is doing what you told it" : "Claude is merging its branch"}; it goes to Done after">Finishing</span>` : "";
+const finishPill = (t) => t.finishing ? `<span class="pill f-finishing" title="${t.finishing === "pr" ? `Claude is opening a PR${t.pr_then ? esc("; a follow-up ticket, parked on it, does what's left once it merges: " + t.pr_then) : ""}` : t.finishing === "after-merge" ? "It's merged; Claude is doing the after-merge steps (rebuilding, restarting)" : t.finishing === "tell" ? "Claude is doing what you told it" : "Claude is merging its branch"}; it goes to Done after">Finishing</span>` : "";
 // Claude asked to close it its own way (cl ticket custom-close).
 const customPill = (t) => t.custom_close ? `<span class="pill f-review" title="Claude: ${esc(t.custom_close)}">Custom close</span>` : "";
 // Parked (cl ticket park): what it waits on, and how it's checked.
@@ -1299,6 +1302,7 @@ function parkBox(t) {
   const p = t.park; if (!p) return "";
   const stamp = (s) => new Date(s * 1000).toLocaleString();
   return `<div class="parkbox"><div><strong>Parked</strong> ${ago(p.at)} ago: ${esc(p.reason)}</div>
+    ${p.pr ? `<div>Wakes when <a href="${esc(p.pr)}" target="_blank" rel="noopener">${esc(p.pr.replace(/^https:\/\/(github\.com\/)?/, ""))}</a> merges; closed without merging, the park ends with a flag.</div>` : ""}
     ${p.until ? `<div class="muted">Wakes when this passes (exit 0), checked every ${dur(p.every)} until ${esc(stamp(p.deadline))}:</div><code>${esc(p.until)}</code>
       <div class="muted">${p.checked ? `Last check ${ago(p.checked)} ago: <span class="mono">${esc(p.result)}</span>` : "Not checked yet"} · next ${until(p.next)}</div>`
     : `<div class="muted">Nothing checks it; Resume now brings it back.</div>`}</div>`;
@@ -1649,6 +1653,7 @@ document.addEventListener("drop", (e) => {
   e.preventDefault(); addImages(ta, files);
 });
 document.addEventListener("input", (e) => { const ta = descBox(e.target); if (ta) showThumbs(ta); });
+document.addEventListener("input", (e) => { if (e.target.name === "pr" && e.target.form?.id === "parkForm") parkPrChanged(e.target.form); });
 document.getElementById("imgDlg").addEventListener("click", (e) => e.currentTarget.close());
 
 // ---- new ticket ----
@@ -1873,13 +1878,15 @@ async function chooseFinish(key) {
     ${custom ? `<div class="q"><span class="pill f-review" style="align-self:flex-start">Custom close</span><div>Claude says not to finish this one the usual way: ${esc(custom)}</div></div>` : ""}
     <div style="display:flex;flex-direction:column;gap:calc(8 * var(--u))">
       ${t.branch || t.change ? `<button type="button" class="btn ${custom ? "" : "primary"}" data-finish="merge" ${custom ? `disabled title="Claude asked for a custom close"` : ""}>Merge into ${esc(main)}</button>
-      <button type="button" class="btn" data-finish="pr" ${custom ? `disabled title="Claude asked for a custom close"` : ""}>Open a PR</button>` : ""}
+      <button type="button" class="btn" data-finish="pr" ${custom ? `disabled title="Claude asked for a custom close"` : ""}>Open a PR</button>
+      ${custom ? "" : `<label class="muted" style="font-size:calc(12.5 * var(--u))">Once the PR merges (optional; with PR)${t.pr_then ? " · Claude suggests this" : ""}
+        <textarea id="finishThen" rows="2" style="width:100%" placeholder="Deploy it, then run the backfill on prod">${esc(t.pr_then || "")}</textarea></label>`}` : ""}
       <button type="button" class="btn" data-finish="close">Just close</button>
       <div style="display:flex;gap:calc(8 * var(--u))"><input type="text" id="finishTell" style="flex:1;min-width:0" aria-label="What Claude should do first" placeholder="Tell Claude what to do: …" value="${esc(custom)}">
         <button type="button" class="btn ${custom ? "primary" : ""}" data-finish="tell">Tell Claude</button></div>
       <button type="button" class="btn" data-finish="">Cancel</button></div>
-    <p class="muted" style="margin:0;font-size:calc(12.5 * var(--u))">${t.change ? "Merge: cl rebases its jj change onto " + esc(main) + " and moves " + esc(main) + " to it; Claude settles any conflicts" + (t.onto ? " (" + esc(t.onto) + " isn't trunk, so nothing is rebuilt or restarted)" : " and restarts what runs from the checkout") + ". PR: Claude pushes it and opens the PR." : "Merge and PR ask Claude to do it in the ticket's session."} Tell Claude: it gets your words in its session instead, for anything else. It stays where it is, marked Finishing, until Claude is through; then it goes to Done and the session closes.</p>`;
-  dlg.returnValue = ""; dlg.dataset.tell = ""; dlg.showModal();
+    <p class="muted" style="margin:0;font-size:calc(12.5 * var(--u))">${t.change ? "Merge: cl rebases its jj change onto " + esc(main) + " and moves " + esc(main) + " to it; Claude settles any conflicts" + (t.onto ? " (" + esc(t.onto) + " isn't trunk, so nothing is rebuilt or restarted)" : " and restarts what runs from the checkout") + ". PR: Claude pushes it and opens the PR." : "Merge and PR ask Claude to do it in the ticket's session."} ${t.branch || t.change ? "With steps for once the PR merges, the ticket still closes when the PR is open, and a follow-up sub-ticket parked on the PR does them after it merges. " : ""}Tell Claude: it gets your words in its session instead, for anything else. It stays where it is, marked Finishing, until Claude is through; then it goes to Done and the session closes.</p>`;
+  dlg.returnValue = ""; dlg.dataset.tell = ""; dlg.dataset.then = ""; dlg.showModal();
   return new Promise((res) => { dlg.onclose = () => res(dlg.returnValue || null); });
 }
 // "Tell Claude": its words go with it; Enter in the box sends them too.
@@ -1900,13 +1907,22 @@ function openPark(d) {
   document.getElementById("parkNote").textContent = live
     ? `This ends its session ${t.tmux}${t.mode === "queue" ? " (the project's shared one)" : ""}; it keeps its stage${t.session_id ? " and resumes this conversation when it wakes" : ""}, and stays out of Needs you meanwhile.`
     : "It keeps its stage, stays out of Needs you, and nothing starts it until the park ends.";
-  document.getElementById("parkDlg").showModal(); form.elements.reason.focus();
+  parkPrChanged(form);
+  document.getElementById("parkDlg").showModal(); form.elements.pr.focus();
+}
+// With a PR, cl writes the check: no command, and the reason is optional.
+function parkPrChanged(form) {
+  const f = form.elements; const pr = f.pr.value.trim(); const n = (pr.match(/(?:#|\/pull\/)(\d+)/) || [])[1];
+  f.reason.required = !pr; f.reason.placeholder = pr ? `PR #${n || "…"}: waiting to merge` : "PR #30: waiting for approval, merge and deploy";
+  document.getElementById("parkUntil").hidden = !!pr; document.getElementById("parkUntilNote").hidden = !!pr;
+  // A PR waits longer by default (reviews take time); a value you typed stays.
+  if (f.max.value === "7d" || f.max.value === "14d") f.max.value = pr ? "14d" : "7d";
 }
 async function submitPark(form) {
   const f = form.elements; const key = form.dataset.key;
-  const until = f.until.value.trim();
-  const body = { reason: f.reason.value.trim(), until, every: until ? f.every.value : "", max: until ? f.max.value : "" };
-  try { await act(key, "park", body, until ? `${key} parked; the first check runs now` : `${key} parked`); } catch { return; }
+  const pr = f.pr.value.trim(); const until = pr ? "" : f.until.value.trim();
+  const body = { reason: f.reason.value.trim(), until, pr, every: until || pr ? f.every.value : "", max: until || pr ? f.max.value : "" };
+  try { await act(key, "park", body, until || pr ? `${key} parked; the first check runs now` : `${key} parked`); } catch { return; }
   document.getElementById("parkDlg").close();
 }
 function confirmKill(d) {
@@ -1942,9 +1958,10 @@ async function dismissAll(kind, keys) {
 async function doneExtras(key) {
   const extra = await confirmDone(key); if (!extra) return null;
   const finish = await chooseFinish(key); if (!finish) return null;
-  return { ...extra, finish, ...(finish === "tell" ? { tell: document.getElementById("finishDlg").dataset.tell } : {}) };
+  const dlg = document.getElementById("finishDlg");
+  return { ...extra, finish, ...(finish === "tell" ? { tell: dlg.dataset.tell } : {}), ...(finish === "pr" && document.getElementById("finishThen") ? { then: dlg.dataset.then } : {}) };
 }
-const finishMsg = (key, x) => x.finish === "pr" ? `${key}: Claude is opening a PR` : x.finish === "merge" ? `${key}: Claude is merging it` : x.finish === "tell" ? `${key}: Claude got your instructions` : "";
+const finishMsg = (key, x) => x.finish === "pr" ? `${key}: Claude is opening a PR${x.then ? "; a follow-up waits on it for the rest" : ""}` : x.finish === "merge" ? `${key}: Claude is merging it` : x.finish === "tell" ? `${key}: Claude got your instructions` : "";
 async function moveTo(key, stage, place = {}) {
   const row = state.data.tickets.find((r) => r.ticket.key === key);
   if (!row || row.ticket.stage === stage) return render();
@@ -2027,7 +2044,7 @@ async function onClick(e) {
   if (el.id === "closePark") return document.getElementById("parkDlg").close();
   if (el.id === "closeDlg") { document.getElementById("ticketDlg").close(); return; }
   if (ds.finish === "tell") return finishTell();
-  if (ds.finish !== undefined) { document.getElementById("finishDlg").close(ds.finish); return; }
+  if (ds.finish !== undefined) { const dlg = document.getElementById("finishDlg"); dlg.dataset.then = document.getElementById("finishThen")?.value.trim() || ""; dlg.close(ds.finish); return; }
   if (el.id === "spinOff" || el.id === "spinCancel") { document.getElementById("subsDlg").close(el.id === "spinOff" ? "spin" : ""); return; }
   if (ds.kill !== undefined) { document.getElementById("killDlg").close(ds.kill); return; }
   if (el.id === "needsHiddenBtn") { state.needsHidden = !state.needsHidden; store("cl-needs-hidden", state.needsHidden ? "1" : "0"); renderNeeds(); return; }

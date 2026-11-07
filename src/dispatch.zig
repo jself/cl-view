@@ -100,6 +100,8 @@ pub fn prompt(a: std.mem.Allocator, t: board.Ticket, notes: []const board.Commen
         \\     ("- [ ] what I should see"). `cl ticket testplan --format` shows the format.
         \\  If its work shouldn't be merged (or made a PR) as it is, say so first with
         \\  `cl ticket custom-close "<what to do with it instead>"`; the board then offers only that.
+        \\  If something will be left to do once its PR merges (a deploy, a backfill), suggest it with
+        \\  `cl ticket custom-close --then "<steps>"`: finished with a PR, a follow-up ticket does it.
         \\  Don't run it while you still need anything from me. When I send feedback, finish the same way.
         \\
     , .{
@@ -955,7 +957,7 @@ pub fn tick(ctx: Ctx, cfg: config.Config, db: board.Db) !usize {
 /// another ticket (board.hold: a link, its parent, or the sub-ticket before
 /// it) waits until that one is Done, and an umbrella runs as its
 /// sub-tickets, so it doesn't start itself.
-fn waitingToStart(db: board.Db, a: std.mem.Allocator) ![]board.Ticket {
+pub fn waitingToStart(db: board.Db, a: std.mem.Allocator) ![]board.Ticket {
     const paused = try pausedProjects(db, a);
     var waiting: std.ArrayList(board.Ticket) = .empty;
     for (try board.listTickets(db, a, .{ .stage = .queued })) |t| {

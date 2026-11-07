@@ -211,7 +211,7 @@ fn flagColor(kind: []const u8) vaxis.Color {
     if (eql(u8, kind, board.flag_review) or eql(u8, kind, board.flag_unparked) or eql(u8, kind, board.flag_ready_to_close)) return .{ .index = 2 };
     if (eql(u8, kind, board.flag_testing)) return .{ .index = 6 };
     if (eql(u8, kind, board.flag_conflict) or eql(u8, kind, board.flag_after_merge) or eql(u8, kind, board.flag_park_expired) or
-        eql(u8, kind, board.flag_merge_failed) or eql(u8, kind, board.flag_unmerged)) return .{ .index = 5 };
+        eql(u8, kind, board.flag_pr_closed) or eql(u8, kind, board.flag_merge_failed) or eql(u8, kind, board.flag_unmerged)) return .{ .index = 5 };
     return .{ .index = 3 };
 }
 
@@ -430,6 +430,7 @@ fn askLineRaw(a: std.mem.Allocator, t: board.Ticket, f: board.Flag) ![]const u8 
     }
     if (eql(u8, f.kind, "start-failed")) return std.fmt.allocPrint(a, "Its session didn't start ({s})", .{if (f.detail.len > 0) f.detail else "no reason given"});
     if (eql(u8, f.kind, board.flag_park_expired)) return std.fmt.allocPrint(a, "Its park's check never passed{s}{s}", .{ if (f.detail.len > 0) ": " else "", f.detail });
+    if (eql(u8, f.kind, board.flag_pr_closed)) return std.fmt.allocPrint(a, "PR closed without merging{s}{s}", .{ if (f.detail.len > 0) ": " else "", f.detail });
     if (eql(u8, f.kind, board.flag_unparked)) return std.fmt.allocPrint(a, "Woke from its park{s}{s}", .{ if (f.detail.len > 0) ": " else "", f.detail });
     return if (f.detail.len > 0) f.detail else f.kind;
 }

@@ -66,6 +66,7 @@ pub const flag_unmerged = "unmerged"; // Done, but its branch's work isn't on it
 pub const flag_unparked = "unparked"; // its park's condition came true; it resumed
 pub const flag_park_expired = "park-expired"; // its park's check never passed in time
 pub const flag_idle = "idle"; // Claude ended its turn; nothing else asks, so it waits on you
+pub const flag_pr_closed = "pr-closed"; // the PR its park waited on was closed without merging
 pub const flag_ready_to_close = "ready-to-close"; // its sub-tickets are all done, but it has work of its own
 
 pub const Project = struct {
@@ -146,6 +147,9 @@ pub const Park = struct {
     /// When the last check finished (0: none yet) and what it said.
     checked: i64 = 0,
     result: []const u8 = "",
+    /// Parked on a pull request (`park --pr`): its URL. `until` is the gh
+    /// check cl wrote for it, and a PR closed without merging ends the park.
+    pr: []const u8 = "",
 };
 
 pub const Event = struct {
@@ -211,6 +215,11 @@ pub const Ticket = struct {
     /// The last automated review (autoreview.zig), as JSON: its status,
     /// summary and findings; "" for none.
     autoreview: []const u8 = "",
+    /// What to do once its PR merges: Claude's suggestion (`custom-close
+    /// --then`), or what you chose finishing it with a PR. Finished with a
+    /// PR URL, it becomes a follow-up sub-ticket parked on that PR; "" for
+    /// none.
+    pr_then: []const u8 = "",
     /// The plan its planning session gave with `done` (markdown), "" for
     /// none: what the session that builds it is told.
     plan_md: []const u8 = "",
@@ -339,6 +348,7 @@ const schema =
     \\  parallel INTEGER NOT NULL DEFAULT 0,
     \\  umbrella INTEGER NOT NULL DEFAULT 0,
     \\  onto TEXT NOT NULL DEFAULT '',
+    \\  pr_then TEXT NOT NULL DEFAULT '',
     \\  created INTEGER NOT NULL,
     \\  updated INTEGER NOT NULL
     \\);
@@ -426,7 +436,8 @@ const parks_schema =
     \\  deadline INTEGER NOT NULL DEFAULT 0,
     \\  next INTEGER NOT NULL DEFAULT 0,
     \\  checked INTEGER NOT NULL DEFAULT 0,
-    \\  result TEXT NOT NULL DEFAULT ''
+    \\  result TEXT NOT NULL DEFAULT '',
+    \\  pr TEXT NOT NULL DEFAULT ''
     \\);
 ;
 
@@ -485,6 +496,9 @@ pub fn migrate(db: Db) !void {
         _ = try addColumn(db, "tickets", "autoreview", "TEXT NOT NULL DEFAULT ''");
         _ = try addColumn(db, "projects", "review_skill", "TEXT NOT NULL DEFAULT ''");
         _ = try addColumn(db, "projects", "auto_review", "TEXT NOT NULL DEFAULT 'off'");
+        // Parks on a PR, and the steps for after one merges.
+        _ = try addColumn(db, "parks", "pr", "TEXT NOT NULL DEFAULT ''");
+        _ = try addColumn(db, "tickets", "pr_then", "TEXT NOT NULL DEFAULT ''");
     }
     if (have >= version) return;
     // Version 1 had no sub-tickets, version 2 no planning skill.
@@ -957,7 +971,7 @@ const ticket_cols = "t.id, t.key, t.project, t.title, t.body, t.stage, t.mode, t
     "coalesce((SELECT p.key FROM tickets p WHERE p.id = t.parent), ''), (SELECT count(*) FROM tickets c WHERE c.parent = t.id), t.skill, t.base, t.finishing, t.change_id, t.rank, t.killed, t.test_plan, t.test_progress, t.custom_close, t.plan_md, t.review_guide, t.asking, t.parallel, " ++
     "EXISTS (SELECT 1 FROM events e WHERE e.ticket = t.id AND e.kind = 'started'), " ++
     "(SELECT count(*) FROM tickets c WHERE c.parent = t.id AND c.stage = 'done'), t.umbrella, " ++
-    "t.onto, coalesce((SELECT p.onto FROM projects p WHERE p.name = t.project), ''), t.autoreview";
+    "t.onto, coalesce((SELECT p.onto FROM projects p WHERE p.name = t.project), ''), t.autoreview, t.pr_then";
 
 fn readTicket(st: sqlite.Stmt, a: std.mem.Allocator) !Ticket {
     return .{
@@ -1000,6 +1014,7 @@ fn readTicket(st: sqlite.Stmt, a: std.mem.Allocator) !Ticket {
         .onto_own = try st.dupe(a, 36),
         .onto = if (st.text(36).len > 0) try st.dupe(a, 36) else try st.dupe(a, 37),
         .autoreview = try st.dupe(a, 38),
+        .pr_then = try st.dupe(a, 39),
     };
 }
 
@@ -1361,6 +1376,13 @@ test editPlan {
 }
 
 /// Save how far testing got (left out of `updated`: it changes as you type).
+/// What to do once its PR merges (see Ticket.pr_then); "" clears it.
+pub fn setPrThen(ctx: Ctx, db: Db, id: i64, text: []const u8) Error!void {
+    try db.exec("UPDATE tickets SET pr_then = ?2 WHERE id = ?1", .{ id, text });
+    try logEvent(ctx, db, id, if (text.len > 0) "after the PR" else "after the PR cleared", text);
+    try touch(ctx, db, id);
+}
+
 /// Claude's custom close (see Ticket.custom_close); "" clears it.
 pub fn setCustomClose(ctx: Ctx, db: Db, id: i64, text: []const u8) Error!void {
     try db.exec("UPDATE tickets SET custom_close = ?2 WHERE id = ?1", .{ id, text });
@@ -2013,7 +2035,7 @@ pub fn setTarget(db: Db, id: i64, target: []const u8) Error!void {
 // ---- parks ----
 
 fn parkOf(db: Db, a: std.mem.Allocator, id: i64) Error!?Park {
-    var st = try db.query("SELECT reason, until_cmd, every, at, deadline, next, checked, result FROM parks WHERE ticket = ?1", .{id});
+    var st = try db.query("SELECT reason, until_cmd, every, at, deadline, next, checked, result, pr FROM parks WHERE ticket = ?1", .{id});
     defer st.finalize();
     if (!try st.step()) return null;
     return .{
@@ -2025,6 +2047,7 @@ fn parkOf(db: Db, a: std.mem.Allocator, id: i64) Error!?Park {
         .next = st.int(5),
         .checked = st.int(6),
         .result = try st.dupe(a, 7),
+        .pr = try st.dupe(a, 8),
     };
 }
 
@@ -2032,9 +2055,9 @@ fn parkOf(db: Db, a: std.mem.Allocator, id: i64) Error!?Park {
 /// first one is due at once.
 pub fn setPark(ctx: Ctx, db: Db, id: i64, p: Park) Error!void {
     try db.exec(
-        \\INSERT OR REPLACE INTO parks (ticket, reason, until_cmd, every, at, deadline, next, checked, result)
-        \\VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, '')
-    , .{ id, p.reason, p.until, p.every, p.at, p.deadline, p.next });
+        \\INSERT OR REPLACE INTO parks (ticket, reason, until_cmd, every, at, deadline, next, checked, result, pr)
+        \\VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, '', ?8)
+    , .{ id, p.reason, p.until, p.every, p.at, p.deadline, p.next, p.pr });
     try logEvent(ctx, db, id, "parked", p.reason);
     try touch(ctx, db, id);
 }

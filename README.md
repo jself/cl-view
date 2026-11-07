@@ -760,6 +760,22 @@ park) only ends it. Claude can park its own ticket from its session (the
 key may be left out); the session closes after the command answers.
 `cl t show` (and `--json`) has the park, its last check and the next.
 
+#### Parking on a PR
+
+```
+cl t park QA-3 --pr https://github.com/org/repo/pull/30    (or --pr '#30')
+```
+
+`--pr` writes the check itself: `gh pr view <n> -R <repo> --json state`,
+merged passes. The repo comes from the URL, or for `#30` from the ticket's
+checkout's `origin` remote (jj's remotes first, then git's); `org/repo#30`
+works too. `--reason` defaults to "PR #30: waiting to merge" and `--max` to
+14d (`--every` stays 1h: it's one cheap gh call). A PR closed without merging
+ends the park at its next check with a `pr-closed` flag in Needs You,
+rather than being checked until `--max`; the session stays stopped. Merged,
+its session resumes told "The PR it waited on has merged: <url>.". The
+board's Park form has a PR field that does the same.
+
 ### What needs you
 
 cl watches each ticket's session (every few seconds, in `cl web` or `cl t
@@ -786,7 +802,7 @@ and the flag comes back only if the same thing happens again. When two or
 more cards share a kind, "Dismiss all" clears that kind on them after you
 confirm. Dismiss is only offered on informational flags (didn't start,
 session ended, after-merge failed, didn't land, not merged, woke from park,
-park expired, flags set by hand); a question, a permission prompt, a review, a test or a conflict waits
+park expired, PR closed, flags set by hand); a question, a permission prompt, a review, a test or a conflict waits
 on you, and clears when you act on it.
 
 `cl t watch` prints a line each time a ticket's flags or stage change, until
@@ -971,6 +987,27 @@ shouldn't be finished the usual way, its Claude can say so with
 then shows a Custom close pill, Merge and PR are turned off for it (in the
 dialog and the CLI), and the dialog fills Tell Claude in with Claude's
 words.
+
+#### Work left for after a PR merges
+
+A ticket finished with a PR closes when the PR is open; whatever is left
+for after the merge (a deploy, a backfill on prod) goes in a follow-up:
+
+```
+cl t move QA-3 done --pr --then "Deploy, back up, dry run, then run metadata:redact on prod"
+```
+
+(`approve --pr --then` too; on the board, the box under Open a PR in the
+Done dialog.) When Claude runs `cl t done QA-3 --close --pr-url <url>`
+(refused without the URL while there are steps), QA-3 goes to Done as usual,
+and cl creates a sub-ticket of it, "After PR #30 merges: <title>", in Queued
+and parked on that PR (`--pr` above). Its description names the parent, the
+PR and the steps. When the PR merges, it starts with a fresh session that
+does them; closed without merging, it gets `pr-closed` and waits for you.
+Claude can suggest the steps from its session with `cl t custom-close --then
+"<steps>"` (not a custom close: Merge and PR stay on): the Done dialog fills
+the box in with them, and `move --pr` without `--then` takes them (`--then
+""` drops them).
 
 With `--merge` or `--pr` the instruction is typed into the ticket's session
 and the ticket stays where it is with a Finishing pill; questions and

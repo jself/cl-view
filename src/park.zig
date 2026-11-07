@@ -11,6 +11,12 @@
 //! `park-expired` flag and the session stays stopped.
 //!
 //! `unpark` ends it by hand, resuming the session unless told not to.
+//!
+//! Parked on a pull request (`--pr`), cl writes the check itself (gh asks
+//! for the PR's state): merged wakes it, and closed without merging ends the
+//! park with a `pr-closed` flag rather than checking until it gives up. A
+//! ticket finished with a PR and steps for after it merges (`pr_then`) gets
+//! a follow-up sub-ticket parked that way (`followUp`).
 const std = @import("std");
 const Ctx = @import("ctx.zig");
 const config = @import("config.zig");
@@ -21,6 +27,11 @@ const review = @import("review.zig");
 
 pub const default_every = 3600;
 pub const default_max = 7 * 86400;
+/// How long a park on a PR waits for the merge: reviews take longer.
+pub const default_max_pr = 14 * 86400;
+/// What the check cl writes for a PR exits with when the PR was closed
+/// without merging (only a park on a PR reads it so).
+const pr_closed_exit = 3;
 /// The longest one check may run, in seconds (less when checks are more often).
 const max_check = 600;
 
@@ -77,12 +88,145 @@ test parseDuration {
 }
 
 pub const Options = struct {
-    reason: []const u8,
+    /// "" with a PR: "PR #n: waiting to merge".
+    reason: []const u8 = "",
     /// Shell command; "" for none.
     until: []const u8 = "",
+    /// A pull request to wait on instead of `until`: its URL, "#n" or "n"
+    /// (the ticket's origin remote's), or "owner/repo#n".
+    pr: []const u8 = "",
     every: i64 = default_every,
-    max: i64 = default_max,
+    /// null: default_max, or default_max_pr on a PR.
+    max: ?i64 = null,
 };
+
+/// A pull request on a GitHub host.
+pub const Pr = struct {
+    /// As gh's -R takes it: "owner/repo", or "host/owner/repo" off github.com.
+    repo: []const u8,
+    number: u32,
+    url: []const u8,
+
+    /// The check: exit 0 once it's merged, `pr_closed_exit` once it's
+    /// closed without merging, 1 otherwise (open, or gh failed). It prints
+    /// the state, which the board shows as the last check.
+    pub fn check(p: Pr, a: std.mem.Allocator) ![]const u8 {
+        return std.fmt.allocPrint(a, "s=$(gh pr view {d} -R {s} --json state -q .state) || exit 1; echo \"PR #{d}: $s\"; case \"$s\" in MERGED) exit 0;; CLOSED) exit {d};; esac; exit 1", .{ p.number, p.repo, p.number, pr_closed_exit });
+    }
+};
+
+/// A host and "owner/repo" path as a Pr's repo.
+fn repoOf(a: std.mem.Allocator, host: []const u8, path: []const u8) !?[]const u8 {
+    const p = std.mem.trim(u8, path, "/");
+    const p2 = if (std.mem.endsWith(u8, p, ".git")) p[0 .. p.len - 4] else p;
+    const slash = std.mem.indexOfScalar(u8, p2, '/') orelse return null;
+    if (slash == 0 or slash + 1 == p2.len or std.mem.indexOfScalar(u8, p2[slash + 1 ..], '/') != null) return null;
+    if (host.len == 0) return null;
+    // It goes into the check's shell command: names only, nothing to quote.
+    for ([_][]const u8{ host, p2 }) |part| for (part) |c| {
+        if (!std.ascii.isAlphanumeric(c) and c != '.' and c != '-' and c != '_' and c != '/') return null;
+    };
+    return if (std.ascii.eqlIgnoreCase(host, "github.com")) try a.dupe(u8, p2) else try std.fmt.allocPrint(a, "{s}/{s}", .{ host, p2 });
+}
+
+/// The repo a git remote's URL points at ("git@github.com:o/r.git",
+/// "https://github.com/o/r", "ssh://git@host:22/o/r.git"); null when it
+/// isn't one of those.
+pub fn remoteRepo(a: std.mem.Allocator, url_in: []const u8) !?[]const u8 {
+    var url = std.mem.trim(u8, url_in, " \t\r\n");
+    var scp = true;
+    if (std.mem.indexOf(u8, url, "://")) |i| {
+        url = url[i + 3 ..];
+        scp = false;
+    }
+    if (std.mem.indexOfScalar(u8, url, '@')) |i| url = url[i + 1 ..];
+    // scp-like: host:path. Otherwise host[:port]/path.
+    const cut = if (scp) std.mem.indexOfAny(u8, url, ":/") else std.mem.indexOfScalar(u8, url, '/');
+    const i = cut orelse return null;
+    var host = url[0..i];
+    if (std.mem.indexOfScalar(u8, host, ':')) |c| host = host[0..c];
+    return repoOf(a, host, url[i + 1 ..]);
+}
+
+/// Read a PR as `park --pr` takes it. `origin`: the ticket's origin
+/// remote's repo, for "#n" (null when it has none).
+pub fn parsePr(a: std.mem.Allocator, spec_in: []const u8, origin: ?[]const u8) !Pr {
+    const spec = std.mem.trim(u8, spec_in, " \t\r\n");
+    if (std.mem.indexOf(u8, spec, "://")) |i| {
+        // https://<host>/<owner>/<repo>/pull/<n>[/files...]
+        const rest = spec[i + 3 ..];
+        const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return error.BadPr;
+        const host = rest[0..slash];
+        var it = std.mem.splitScalar(u8, rest[slash + 1 ..], '/');
+        const owner = it.next() orelse return error.BadPr;
+        const name = it.next() orelse return error.BadPr;
+        if (!std.mem.eql(u8, it.next() orelse "", "pull")) return error.BadPr;
+        const n = std.fmt.parseInt(u32, it.next() orelse "", 10) catch return error.BadPr;
+        const repo = try repoOf(a, host, try std.fmt.allocPrint(a, "{s}/{s}", .{ owner, name })) orelse return error.BadPr;
+        return pr(a, repo, n);
+    }
+    const hash = std.mem.lastIndexOfScalar(u8, spec, '#');
+    const num = if (hash) |h| spec[h + 1 ..] else spec;
+    const n = std.fmt.parseInt(u32, num, 10) catch return error.BadPr;
+    if (n == 0) return error.BadPr;
+    const before = if (hash) |h| spec[0..h] else "";
+    if (before.len > 0) return pr(a, try repoOf(a, "github.com", before) orelse return error.BadPr, n);
+    return pr(a, origin orelse return error.NoRemote, n);
+}
+
+fn pr(a: std.mem.Allocator, repo: []const u8, n: u32) !Pr {
+    // "host/owner/repo" has two slashes; on github.com it's just owner/repo.
+    const off_github = std.mem.count(u8, repo, "/") == 2;
+    return .{ .repo = repo, .number = n, .url = if (off_github)
+        try std.fmt.allocPrint(a, "https://{s}/pull/{d}", .{ repo, n })
+    else
+        try std.fmt.allocPrint(a, "https://github.com/{s}/pull/{d}", .{ repo, n }) };
+}
+
+test parsePr {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const u = try parsePr(a, "https://github.com/epoch/qa-tool/pull/31/files", null);
+    try std.testing.expectEqualStrings("epoch/qa-tool", u.repo);
+    try std.testing.expectEqual(@as(u32, 31), u.number);
+    try std.testing.expectEqualStrings("https://github.com/epoch/qa-tool/pull/31", u.url);
+    const h = try parsePr(a, "#30", "epoch/qa-tool");
+    try std.testing.expectEqualStrings("https://github.com/epoch/qa-tool/pull/30", h.url);
+    try std.testing.expectEqual(@as(u32, 7), (try parsePr(a, "7", "o/r")).number);
+    try std.testing.expectEqualStrings("o/r", (try parsePr(a, "o/r#7", null)).repo);
+    const ghe = try parsePr(a, "https://git.corp.io/team/app/pull/5", null);
+    try std.testing.expectEqualStrings("git.corp.io/team/app", ghe.repo);
+    try std.testing.expectEqualStrings("https://git.corp.io/team/app/pull/5", ghe.url);
+    try std.testing.expectError(error.NoRemote, parsePr(a, "#30", null));
+    for ([_][]const u8{ "", "#", "#0", "abc", "https://github.com/o/r/issues/3", "https://github.com/o", "a/b/c#1", "https://github.com/o;touch${IFS}x/r/pull/1", "o$(id)/r#2", "https://git hub.com/o/r/pull/1" }) |bad|
+        try std.testing.expectError(error.BadPr, parsePr(a, bad, "o/r"));
+    try std.testing.expectEqualStrings("o/r", (try remoteRepo(a, "git@github.com:o/r.git\n")).?);
+    try std.testing.expectEqualStrings("o/r", (try remoteRepo(a, "https://github.com/o/r")).?);
+    try std.testing.expectEqualStrings("o/r", (try remoteRepo(a, "ssh://git@github.com:22/o/r.git")).?);
+    try std.testing.expectEqualStrings("git.corp.io/t/app", (try remoteRepo(a, "git@git.corp.io:t/app.git")).?);
+    try std.testing.expect(try remoteRepo(a, "/srv/git/app.git") == null);
+}
+
+/// The repo of the origin remote of the checkout at `dir` (jj's remotes
+/// first: a jj workspace has no .git of its own); null without one.
+fn originRepo(ctx: Ctx, a: std.mem.Allocator, dir: []const u8) ?[]const u8 {
+    if (runOut(ctx, a, dir, &.{ "jj", "git", "remote", "list" })) |out| {
+        var lines = std.mem.splitScalar(u8, out, '\n');
+        while (lines.next()) |l| {
+            const sp = std.mem.indexOfScalar(u8, l, ' ') orelse continue;
+            if (std.mem.eql(u8, l[0..sp], "origin")) return remoteRepo(a, l[sp + 1 ..]) catch null;
+        }
+    }
+    const url = runOut(ctx, a, dir, &.{ "git", "remote", "get-url", "origin" }) orelse return null;
+    return remoteRepo(a, url) catch null;
+}
+
+fn runOut(ctx: Ctx, a: std.mem.Allocator, dir: []const u8, argv: []const []const u8) ?[]const u8 {
+    const r = std.process.run(a, ctx.io, .{ .argv = argv, .cwd = .{ .path = dir } }) catch return null;
+    if (r.term != .exited or r.term.exited != 0) return null;
+    return r.stdout;
+}
 
 pub const Parked = struct {
     /// Its live session, which `stopSession` kills; null without one.
@@ -99,23 +243,34 @@ pub const Parked = struct {
 pub fn park(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, o: Options) !Parked {
     const t = try board.getTicket(db, a, key);
     if (t.stage == .done) return error.Finished;
-    const reason = std.mem.trim(u8, o.reason, " \t\r\n");
+    var reason = std.mem.trim(u8, o.reason, " \t\r\n");
+    var until = std.mem.trim(u8, o.until, " \t\r\n");
+    const pr_spec = std.mem.trim(u8, o.pr, " \t\r\n");
+    var the_pr: ?Pr = null;
+    if (pr_spec.len > 0) {
+        if (until.len > 0) return error.BadInput;
+        const origin = if (std.mem.indexOfScalar(u8, pr_spec, '/') == null) originRepo(ctx, a, try review.ticketDir(db, a, t)) else null;
+        the_pr = try parsePr(a, pr_spec, origin);
+        until = try the_pr.?.check(a);
+        if (reason.len == 0) reason = try std.fmt.allocPrint(a, "PR #{d}: waiting to merge", .{the_pr.?.number});
+    }
     if (reason.len == 0) return error.BadInput;
-    const until = std.mem.trim(u8, o.until, " \t\r\n");
     const now = ctx.nowSeconds();
     try board.setPark(ctx, db, t.id, .{
         .reason = reason,
         .until = until,
         .every = if (until.len > 0) o.every else 0,
         .at = now,
-        .deadline = if (until.len > 0) now + o.max else 0,
+        .deadline = if (until.len > 0) now + (o.max orelse @as(i64, if (the_pr != null) default_max_pr else default_max)) else 0,
         // The first check right away: it may be over already, and a broken
         // command shows at once.
         .next = now,
+        .pr = if (the_pr) |x| x.url else "",
     });
     // What an earlier park left is settled by this one.
     try board.clearFlagId(ctx, db, t.id, board.flag_unparked);
     try board.clearFlagId(ctx, db, t.id, board.flag_park_expired);
+    try board.clearFlagId(ctx, db, t.id, board.flag_pr_closed);
     const live = actions.liveSession(ctx, t) orelse {
         // No session: it still waits for the park, not for the dispatcher.
         try db.exec("UPDATE tickets SET killed = 1 WHERE id = ?1", .{t.id});
@@ -167,8 +322,13 @@ fn resumeWith(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, 
     _ = try board.addComment(ctx, db, a, key, "cl", note, false);
     const t = try board.getTicket(db, a, key);
     dispatch.start(ctx, cfg, db, a, t, false) catch |e| switch (e) {
-        // It moved to Queued; the dispatcher starts it there, note and all.
-        error.TargetBusy => return .waiting,
+        // It waits in Queued; the dispatcher starts it there, note and all.
+        // One that was already there (parked without a session) is still
+        // marked killed, which the dispatcher would wait on forever.
+        error.TargetBusy => {
+            try db.exec("UPDATE tickets SET killed = 0 WHERE id = ?1", .{t.id});
+            return .waiting;
+        },
         error.AlreadyStarted => return .running,
         else => return e,
     };
@@ -227,10 +387,11 @@ pub fn runCheck(ctx: Ctx, cfg: config.Config, db: board.Db, key: []const u8, at:
     if (p.at != at or p.until.len == 0) return;
     const result = check(ctx, db, a, t, p);
     board.recordParkCheck(db, t.id, at, ctx.nowSeconds(), result.text) catch {};
-    if (result.ok) wake(ctx, cfg, db, a, t, p);
+    if (result.ok) wake(ctx, cfg, db, a, t, p) else if (result.closed) prClosed(ctx, db, a, t, p) catch {};
 }
 
-const CheckResult = struct { ok: bool, text: []const u8 };
+/// `closed`: a park on a PR whose PR was closed without merging.
+const CheckResult = struct { ok: bool, closed: bool = false, text: []const u8 };
 
 fn check(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, p: board.Park) CheckResult {
     return checkIn(ctx, db, a, t, p) catch |e| .{ .ok = false, .text = std.fmt.allocPrint(a, "cl couldn't run it: {s}", .{@errorName(e)}) catch "cl couldn't run it" };
@@ -265,6 +426,7 @@ fn checkIn(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, p: boa
     const last = lastLine(res.stdout);
     return .{
         .ok = code == 0,
+        .closed = p.pr.len > 0 and code == pr_closed_exit,
         .text = if (last.len > 0) try std.fmt.allocPrint(a, "{s}: {s}", .{ what, last }) else what,
     };
 }
@@ -284,24 +446,65 @@ test lastLine {
     try std.testing.expectEqualStrings("", lastLine("  \n"));
 }
 
+/// The PR it waited on was closed without merging: the park ends with a
+/// `pr-closed` flag (it won't merge now), and the session stays stopped.
+fn prClosed(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, p: board.Park) !void {
+    _ = try board.takePark(ctx, db, a, t.id, p.at) orelse return;
+    try board.logEvent(ctx, db, t.id, "pr closed", p.pr);
+    try board.setFlagId(ctx, db, t.id, board.flag_pr_closed, "auto", try std.fmt.allocPrint(a, "{s} was closed without merging, so the park ended; its session stays stopped{s}.", .{
+        p.pr, if (t.started) "" else " (it never started: `cl ticket start` runs it anyway, `cl ticket rm` drops it)",
+    }));
+}
+
+/// The note a park's session resumes with once its check passes.
+fn metNote(a: std.mem.Allocator, t: board.Ticket, p: board.Park) ![]const u8 {
+    // A follow-up that never ran has nothing to continue: its body says what to do.
+    const go = if (t.session_id.len > 0) " Continue." else "";
+    if (p.pr.len > 0) return std.fmt.allocPrint(a, "The PR it waited on has merged: {s}.{s}", .{ p.pr, go });
+    return std.fmt.allocPrint(a, "Parked condition met: {s}.{s}", .{ p.reason, go });
+}
+
 /// The check passed: the park ends, the ticket comes back to Needs You and
 /// its session resumes, told what happened.
 fn wake(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: board.Ticket, p: board.Park) void {
     const took = board.takePark(ctx, db, a, t.id, p.at) catch return;
     if (took == null) return; // Unparked (or parked again) meanwhile.
     board.logEvent(ctx, db, t.id, "park condition met", p.reason) catch {};
-    board.setFlagId(ctx, db, t.id, board.flag_unparked, "auto", std.fmt.allocPrint(a, "Parked condition met: {s}", .{p.reason}) catch p.reason) catch {};
+    board.setFlagId(ctx, db, t.id, board.flag_unparked, "auto", (if (p.pr.len > 0) std.fmt.allocPrint(a, "PR merged: {s}", .{p.pr}) else std.fmt.allocPrint(a, "Parked condition met: {s}", .{p.reason})) catch p.reason) catch {};
     // Its project is paused: it waits in Queued, note and all, and the
     // dispatcher resumes it there once the project resumes.
+    const note = metNote(a, t, p) catch return;
     if (board.projectPaused(db, t.project) catch false) {
-        holdForPause(ctx, db, a, t, std.fmt.allocPrint(a, "Parked condition met: {s}. Continue.", .{p.reason}) catch return) catch |e| {
+        holdForPause(ctx, db, a, t, note) catch |e| {
             board.setFlagId(ctx, db, t.id, "start-failed", "auto", dispatch.failureReason(e)) catch {};
         };
         return;
     }
-    _ = resumeWith(ctx, cfg, db, a, t.key, std.fmt.allocPrint(a, "Parked condition met: {s}. Continue.", .{p.reason}) catch return) catch |e| {
+    _ = resumeWith(ctx, cfg, db, a, t.key, note) catch |e| {
         board.setFlagId(ctx, db, t.id, "start-failed", "auto", dispatch.failureReason(e)) catch {};
     };
+}
+
+/// A ticket finished with a PR (`pr_url`) and steps for after it merges
+/// (`steps`): a sub-ticket that does them, in Queued and parked on the PR,
+/// so a fresh session starts on it once the PR merges. Returns its key.
+pub fn followUp(ctx: Ctx, db: board.Db, a: std.mem.Allocator, parent: board.Ticket, pr_url: []const u8, steps: []const u8) ![]const u8 {
+    const the_pr = try parsePr(a, pr_url, null);
+    const title = try std.fmt.allocPrint(a, "After PR #{d} merges: {s}", .{ the_pr.number, parent.title });
+    const body = try std.fmt.allocPrint(a,
+        \\Follow-up of {s} ({s}), which was finished with the pull request {s}. That PR has merged now; what's left to do after it:
+        \\
+        \\{s}
+        \\
+        \\It merged on the remote, so the local checkout may not have it yet: fetch it first (`jj git fetch`, or `git pull`) if these steps need it.
+    , .{ parent.key, parent.title, the_pr.url, std.mem.trim(u8, steps, " \t\r\n") });
+    // Made in Backlog and queued only once parked: a dispatcher pass in
+    // between would otherwise start it before the PR merged.
+    const key = try board.createTicket(ctx, db, a, .{ .project = parent.project, .parent = parent.key, .title = title, .body = body, .stage = .backlog });
+    _ = try park(ctx, db, a, key, .{ .pr = the_pr.url });
+    // Queued and not killed: once the park ends, it starts there or waits its turn.
+    try board.requeue(ctx, db, try board.getTicket(db, a, key));
+    return key;
 }
 
 fn holdForPause(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, note: []const u8) !void {
@@ -415,4 +618,121 @@ test "a park whose check passes in a paused project waits in Queued with its not
     const notes = try board.unsentNotes(db, a, after.id);
     try testing.expectEqual(@as(usize, 1), notes.len);
     try testing.expect(std.mem.indexOf(u8, notes[0].body, "PR #30") != null);
+}
+
+test "park --pr: cl writes the check; a PR closed without merging ends the park with a flag" {
+    const gpa = testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var env: std.process.Environ.Map = .init(gpa);
+    defer env.deinit();
+    // tmux, should anything reach for it, is a socket of the test's own (no server).
+    const ctx: Ctx = .{ .io = testing.io, .gpa = gpa, .perm = a, .env = &env, .home = "/tmp", .tmux_socket = "/tmp/cl-test-park-pr-none" };
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realPathFileAlloc(testing.io, ".", a);
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "qa", .dir = dir });
+    const cfg: config.Config = .{ .profiles = &.{}, .default = "", .operator = "" };
+
+    const k = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Waits on a PR", .stage = .review });
+    try testing.expectError(error.BadInput, park(ctx, db, a, k, .{ .pr = "#31", .until = "true" }));
+    try testing.expectError(error.BadPr, park(ctx, db, a, k, .{ .pr = "https://github.com/o/r/issues/31" }));
+    _ = try park(ctx, db, a, k, .{ .pr = "https://github.com/o/r/pull/31" });
+    const t = try board.getTicket(db, a, k);
+    const p = t.park.?;
+    try testing.expectEqualStrings("PR #31: waiting to merge", p.reason);
+    try testing.expectEqualStrings("https://github.com/o/r/pull/31", p.pr);
+    try testing.expect(std.mem.startsWith(u8, p.until, "s=$(gh pr view 31 -R o/r --json state -q .state)"));
+    try testing.expectEqual(@as(i64, default_max_pr), p.deadline - p.at);
+    try testing.expectEqual(@as(i64, default_every), p.every);
+
+    // Still open: it goes on waiting.
+    try board.setPark(ctx, db, t.id, .{ .reason = p.reason, .until = "echo 'PR #31: OPEN'; exit 1", .every = 3600, .at = p.at, .deadline = p.deadline, .pr = p.pr });
+    runCheck(ctx, cfg, db, k, p.at);
+    try testing.expectEqualStrings("exit 1: PR #31: OPEN", (try board.getTicket(db, a, k)).park.?.result);
+    // Closed without merging: the park ends, flagged; nothing resumes it.
+    try board.setPark(ctx, db, t.id, .{ .reason = p.reason, .until = "echo 'PR #31: CLOSED'; exit 3", .every = 3600, .at = p.at, .deadline = p.deadline, .pr = p.pr });
+    runCheck(ctx, cfg, db, k, p.at);
+    const after = try board.getTicket(db, a, k);
+    try testing.expect(after.park == null);
+    try testing.expect(after.killed);
+    try testing.expectEqual(@as(usize, 1), after.flags.len);
+    try testing.expectEqualStrings(board.flag_pr_closed, after.flags[0].kind);
+    try testing.expect(std.mem.indexOf(u8, after.flags[0].detail, "https://github.com/o/r/pull/31") != null);
+    try testing.expectEqual(@as(usize, 1), (try board.listTickets(db, a, .{ .needs = true })).len);
+    // Parked again, the flag goes; exit 3 from a check of your own is just a failed check.
+    _ = try park(ctx, db, a, k, .{ .reason = "the deploy", .until = "exit 3" });
+    const own = try board.getTicket(db, a, k);
+    try testing.expectEqual(@as(usize, 0), own.flags.len);
+    runCheck(ctx, cfg, db, k, own.park.?.at);
+    try testing.expectEqualStrings("exit 3", (try board.getTicket(db, a, k)).park.?.result);
+}
+
+test "a follow-up is a queued sub-ticket parked on the PR, told the parent, the PR and the steps" {
+    const ctx = testCtx();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "qa", .dir = "/x/qa" });
+    const kp = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Redact metadata", .stage = .done });
+    const parent = try board.getTicket(db, a, kp);
+    const k = try followUp(ctx, db, a, parent, "https://github.com/epoch/qa/pull/30", "Deploy, back up, dry run, then run metadata:redact on prod.\n");
+    const t = try board.getTicket(db, a, k);
+    try testing.expectEqualStrings(kp, t.parent);
+    try testing.expectEqual(board.Stage.queued, t.stage);
+    // Queued but parked: the dispatcher leaves it alone until the PR merges.
+    try testing.expect(!t.killed);
+    try testing.expectEqual(@as(usize, 0), (try dispatch.waitingToStart(db, a)).len);
+    try testing.expectEqualStrings("After PR #30 merges: Redact metadata", t.title);
+    for ([_][]const u8{ kp, "https://github.com/epoch/qa/pull/30", "then run metadata:redact on prod." }) |s| try testing.expect(std.mem.indexOf(u8, t.body, s) != null);
+    try testing.expectEqualStrings("https://github.com/epoch/qa/pull/30", t.park.?.pr);
+    // Out of Needs You, and not started by the dispatcher, until the PR merges.
+    try testing.expectEqual(@as(usize, 0), (try board.listTickets(db, a, .{ .needs = true })).len);
+    // Never run: woken, it starts fresh rather than "continuing".
+    const note = try metNote(a, t, t.park.?);
+    try testing.expectEqualStrings("The PR it waited on has merged: https://github.com/epoch/qa/pull/30.", note);
+    try testing.expectEqual(@as(i64, 1), (try board.getTicket(db, a, kp)).children);
+}
+
+test "a parked ticket woken while its queue is busy waits in Queued for the dispatcher" {
+    const gpa = testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var env: std.process.Environ.Map = .init(gpa);
+    defer env.deinit();
+    // A socket of the test's own with no server behind it: never the real tmux.
+    const ctx: Ctx = .{ .io = testing.io, .gpa = gpa, .perm = a, .env = &env, .home = "/tmp", .tmux_socket = "/tmp/cl-test-park-busy-none" };
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "qa", .dir = "/x/qa" });
+    const cfg: config.Config = .{ .profiles = &.{}, .default = "", .operator = "" };
+    // Its parent is still being planned, so starting it says TargetBusy, as
+    // a busy queue session does.
+    const kp = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Parent", .stage = .planning });
+    const k = try board.createTicket(ctx, db, a, .{ .parent = kp, .title = "Waits on a PR", .stage = .queued });
+    // Parked in Queued with no session: marked killed, as a follow-up was.
+    _ = try park(ctx, db, a, k, .{ .pr = "https://github.com/o/r/pull/31" });
+    const t = try board.getTicket(db, a, k);
+    try testing.expect(t.killed);
+    wake(ctx, cfg, db, a, t, t.park.?);
+    const after = try board.getTicket(db, a, k);
+    try testing.expect(after.park == null);
+    try testing.expectEqual(board.Stage.queued, after.stage);
+    try testing.expect(!after.killed);
+    try board.setProjectPaused(db, "qa", false);
+    // Once the planning is done, the dispatcher starts it, note and all.
+    try db.exec("UPDATE tickets SET stage = 'done' WHERE key = ?1", .{kp});
+    const w = try dispatch.waitingToStart(db, a);
+    try testing.expectEqual(@as(usize, 1), w.len);
+    try testing.expectEqualStrings(k, w[0].key);
+    try testing.expectEqual(@as(usize, 1), (try board.unsentNotes(db, a, after.id)).len);
 }

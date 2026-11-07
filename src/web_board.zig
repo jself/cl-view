@@ -156,6 +156,8 @@ pub fn handle(ctx: Ctx, cfg: config.Config, req: *std.http.Server.Request, path:
             error.Busy => .{ .conflict, "Claude is working in its session or waiting on you; it can move once it is idle" },
             error.NoChange => .{ .conflict, "its work has no jj change of its own to move with it" },
             error.NotParked => .{ .conflict, "it isn't parked" },
+            error.BadPr => .{ .bad_request, "the PR is its URL (https://github.com/<owner>/<repo>/pull/<n>), #<n>, or <owner>/<repo>#<n>" },
+            error.NoRemote => .{ .bad_request, "its checkout has no GitHub origin remote to find that PR number in; give the PR's URL" },
             error.Finished => .{ .conflict, "it's done; there's nothing to park" },
             error.BadDuration => .{ .bad_request, "every and max are durations like 90s, 30m, 1h, 1d, 1w (every at least 1m)" },
             error.SessionFailed => .{ .internal_server_error, std.fmt.allocPrint(a, "the session didn't start: {s}", .{dispatch.failureReason(err)}) catch "the session didn't start" },
@@ -242,7 +244,29 @@ const Body = struct {
     until: ?[]const u8 = null,
     every: ?[]const u8 = null,
     max: ?[]const u8 = null,
+    /// park: the PR to wait on instead of `until` (its URL or "#n").
+    pr: ?[]const u8 = null,
+    /// Going to Done with "pr": what a follow-up does once it merges ("" for
+    /// nothing; left out, Claude's suggestion stands).
+    then: ?[]const u8 = null,
 };
+
+/// The steps for after the PR merges, when it goes to Done with a PR.
+/// Returns what it replaced (null when it set nothing), for `restoreThen`.
+fn setThen(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, b: Body, finish: actions.Finish) !?[]const u8 {
+    if (finish != .pr) return null;
+    const then = b.then orelse return null;
+    const t = try board.getTicket(db, a, key);
+    try board.setPrThen(ctx, db, t.id, std.mem.trim(u8, then, " \t\r\n"));
+    return t.pr_then;
+}
+
+/// Put back what `setThen` replaced: the move it was for was refused.
+fn restoreThen(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, old: ?[]const u8) void {
+    const o = old orelse return;
+    const t = board.getTicket(db, a, key) catch return;
+    board.setPrThen(ctx, db, t.id, o) catch {};
+}
 
 /// A duration from the board ("1h"), or `default` when it is left empty.
 fn durationOr(s: ?[]const u8, default: i64) !i64 {
@@ -524,7 +548,10 @@ fn ticketAction(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator
         const stage = board.Stage.parse(b.stage orelse "") orelse return error.BadInput;
         // Ranked first, so the dispatcher never sees it queued in the wrong place.
         if (nonEmpty(b.after) != null or nonEmpty(b.before) != null) try board.rankTicket(db, a, key, nonEmpty(b.after), nonEmpty(b.before));
-        try actions.move(ctx, cfg, db, a, key, stage, b.spin_off orelse false, try finishOf(b));
+        const finish = try finishOf(b);
+        const old = if (stage == .done) try setThen(ctx, db, a, key, b, finish) else null;
+        errdefer restoreThen(ctx, db, a, key, old);
+        try actions.move(ctx, cfg, db, a, key, stage, b.spin_off orelse false, finish);
     } else if (eql(u8, action, "block")) {
         _ = try board.addBlocker(ctx, db, a, key, b.blocker orelse return error.BadInput);
     } else if (eql(u8, action, "unblock")) {
@@ -547,7 +574,10 @@ fn ticketAction(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator
         // Into Review as with Claude's `cl ticket done`: the project may review it by itself.
         _ = autoreview.startOnReview(ctx, cfg, db, a, key);
     } else if (eql(u8, action, "approve")) {
-        _ = try actions.approve(ctx, db, a, key, b.spin_off orelse false, try finishOf(b));
+        const finish = try finishOf(b);
+        const old = if ((try board.getTicket(db, a, key)).stage == .testing) try setThen(ctx, db, a, key, b, finish) else null;
+        errdefer restoreThen(ctx, db, a, key, old);
+        _ = try actions.approve(ctx, db, a, key, b.spin_off orelse false, finish);
     } else if (eql(u8, action, "start")) {
         const t = try board.getTicket(db, a, key);
         try dispatch.start(ctx, cfg, db, a, t, b.now orelse false);
@@ -558,7 +588,8 @@ fn ticketAction(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator
     } else if (eql(u8, action, "park")) {
         const every = try durationOr(b.every, park.default_every);
         if (every < 60) return error.BadDuration;
-        const r = try park.park(ctx, db, a, key, .{ .reason = b.reason orelse "", .until = b.until orelse "", .every = every, .max = try durationOr(b.max, park.default_max) });
+        const max: ?i64 = if (nonEmpty(b.max) != null) try durationOr(b.max, park.default_max) else null;
+        const r = try park.park(ctx, db, a, key, .{ .reason = b.reason orelse "", .until = b.until orelse "", .pr = b.pr orelse "", .every = every, .max = max });
         try park.stopSession(ctx, cfg, db, a, key);
         return ok(req, a, .{ .session = r.session orelse "", .others = r.others });
     } else if (eql(u8, action, "unpark")) {
@@ -619,7 +650,10 @@ fn ticketAction(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator
         try board.setTestProgress(db, (try board.getTicket(db, a, key)).id, json);
     } else if (eql(u8, action, "test-results")) {
         const steps = b.steps orelse &.{review.StepResult{ .checks = b.checks orelse return error.BadInput }};
-        return ok(req, a, try actions.testResults(ctx, db, a, key, steps, b.note orelse "", b.send, b.spin_off orelse false, try finishOf(b)));
+        const finish = try finishOf(b);
+        const old = try setThen(ctx, db, a, key, b, finish);
+        errdefer restoreThen(ctx, db, a, key, old);
+        return ok(req, a, try actions.testResults(ctx, db, a, key, steps, b.note orelse "", b.send, b.spin_off orelse false, finish));
     } else return error.NotFound;
     return ok(req, a, .{ .ok = true });
 }

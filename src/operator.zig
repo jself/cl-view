@@ -241,7 +241,8 @@ const tickets_skill =
     \\ticket needs from the human: question (Claude asked something), input (a permission
     \\prompt), review (finished, to review), testing (to try), ended (its session went away),
     \\idle (Claude ended its turn with nothing else pending; it waits for a prompt), unparked
-    \\(its park's check passed and it resumed), park-expired (the check never passed).
+    \\(its park's check passed and it resumed), park-expired (the check never passed), pr-closed
+    \\(the PR its park waited on was closed without merging).
     \\`cl ticket list --parked` lists parked tickets; `show` has what each waits on and its checks.
     \\
     \\## Watching Needs You
