@@ -225,10 +225,11 @@ pub const project_usage =
     \\  add <name> <dir> [--prefix <KEY>] [--slots <n>] [--planners <n>] [--mode queue|worktree]
     \\      [--profile <name>] [--after-merge <command>] [--after-merge-claude <steps> | none]
     \\      [--review-skill <skill>] [--auto-review off|on|send] [--push-after-merge <remote>]
+    \\      [--no-repo]
     \\  set <name> [--name <new>] [--dir <dir>] [--prefix <KEY>] [--slots <n>] [--planners <n>]
     \\      [--mode queue|worktree] [--profile <name>] [--after-merge <command>]
     \\      [--after-merge-claude <steps> | none] [--onto <branch>] [--review-skill <skill>]
-    \\      [--auto-review off|on|send] [--push-after-merge <remote>]
+    \\      [--auto-review off|on|send] [--push-after-merge <remote>] [--no-repo | --repo]
     \\  rm <name>                   (refused while it has tickets)
     \\  hide <name> / unhide <name> keep its tickets out of the board's views, Needs You,
     \\                              `cl ticket needs` and `cl ticket list`, or bring them back;
@@ -245,6 +246,14 @@ pub const project_usage =
     \\  push <name>                 push trunk to the --push-after-merge remote now and watch its
     \\                              CI, without the after-merge command
     \\
+    \\--no-repo: a project that isn't a code repo, for work that isn't about code. add
+    \\  makes the directory if it is missing and sets up no jj or git there. Its tickets
+    \\  run in the queue only (no worktrees), get no jj change, branch, target branch,
+    \\  review guide or automated review, and Done just closes them; it has no --onto,
+    \\  --push-after-merge or --after-merge. set --no-repo also sets --mode queue and
+    \\  --auto-review off and clears those three (refused while tickets that aren't done
+    \\  have a worktree, jj change or branch); --repo makes it a code repo again (jj is
+    \\  set up on its next start).
     \\--onto: the branch (jj bookmark or git branch) its tickets start from and merge
     \\  into instead of trunk, like a long-lived feature branch; a ticket's own --onto
     \\  wins. "" (the default): trunk.
@@ -359,6 +368,8 @@ fn boardFail(db: board.Db, err: anyerror, what: []const u8) noreturn {
         error.MergeFailed => fail("jj couldn't merge it: {s}", .{worktree.lastError()}),
         error.SharedSession => fail("another ticket is in progress in its session (a shared queue session, or its parent's), so it can't be stopped without cutting that one off; move or finish that ticket first, or end the session for both with `cl ticket kill`", .{}),
         error.Starting => fail("it is starting right now; try again in a moment", .{}),
+        error.NoRepo => fail("its project isn't a code repo (cl project add/set --no-repo): no worktrees, target branches, automated reviews, push or after-merge command there; its tickets run in the queue", .{}),
+        error.RepoWork => fail("tickets that aren't done have work in the repo (a worktree, jj change or branch): finish them, or move them to the queue with nothing under way, first", .{}),
         error.Sqlite => fail("board database: {s}", .{db.message()}),
         else => fail("{s}: {s}", .{ what, @errorName(err) }),
     }
@@ -436,8 +447,9 @@ pub fn projectMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void
         const ps = board.listProjects(db, a) catch |e| boardFail(db, e, "project");
         if (args.has("--json")) return out(try std.fmt.allocPrint(a, "{f}\n", .{std.json.fmt(ps, .{})}));
         var aw: std.Io.Writer.Allocating = .init(a);
-        for (ps) |p| try aw.writer.print("{s}\t{s}\t{s}\tslots {d}\tplanners {d}\t{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}\n", .{
+        for (ps) |p| try aw.writer.print("{s}\t{s}\t{s}\tslots {d}\tplanners {d}\t{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}\n", .{
             p.name, p.prefix, try ctx.shortenHomeIn(a, p.dir), p.slots, p.planners, @tagName(p.mode),
+            if (p.repo) "" else "\tno repo",
             if (p.onto.len > 0) "\tonto " else "", p.onto,
             if (p.hidden) "\thidden" else "",
             if (p.paused) "\tpaused" else "",
@@ -451,14 +463,12 @@ pub fn projectMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void
         return out(aw.writer.buffered());
     }
     if (std.mem.eql(u8, cmd, "add")) {
-        args.only(&.{ "--prefix", "--slots", "--planners", "--mode", "--profile", "--after-merge", "--after-merge-claude", "--onto", "--review-skill", "--auto-review", "--push-after-merge" }, project_usage);
+        args.only(&.{ "--prefix", "--slots", "--planners", "--mode", "--profile", "--after-merge", "--after-merge-claude", "--onto", "--review-skill", "--auto-review", "--push-after-merge", "--no-repo" }, project_usage);
         if (args.pos.items.len != 2) fail("usage: cl project add <name> <dir> [options]", .{});
-        const dir = try realDir(ctx, a, args.pos.items[1]);
-        try checkProfile(cfg, args.get("--profile"));
-        checkOnto(ctx, a, dir, args.get("--onto"));
-        board.addProject(db, .{
+        const repo = !args.has("--no-repo");
+        var in: board.ProjectInput = .{
             .name = args.pos.items[0],
-            .dir = dir,
+            .dir = "",
             .prefix = args.get("--prefix"),
             .slots = parseSlots(args),
             .planners = parseCount(args, "--planners"),
@@ -470,16 +480,34 @@ pub fn projectMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void
             .review_skill = args.get("--review-skill"),
             .auto_review = parseAutoReview(args),
             .push_after_merge = checkRemote(args.get("--push-after-merge")),
-        }) catch |e| boardFail(db, e, "project (name or prefix)");
+            .repo = repo,
+        };
+        // Everything checked before a directory is made for it.
+        try checkProfile(cfg, args.get("--profile"));
+        board.checkNewProject(db, in) catch |e| boardFail(db, e, "project (name or prefix)");
+        if (!repo) {
+            // Its directory may not exist yet: a place for notes, not a checkout.
+            const expanded = try ctx.expandHome(args.pos.items[1]);
+            defer ctx.gpa.free(expanded);
+            std.Io.Dir.cwd().createDirPath(ctx.io, expanded) catch |e| fail("cannot create {s}: {s}", .{ args.pos.items[1], @errorName(e) });
+        }
+        in.dir = try realDir(ctx, a, args.pos.items[1]);
+        if (repo) checkOnto(ctx, a, in.dir, args.get("--onto"));
+        board.addProject(db, in) catch |e| boardFail(db, e, "project (name or prefix)");
         const p = board.getProject(db, a, args.pos.items[0]) catch |e| boardFail(db, e, "project");
-        const jj = worktree.ensureJj(ctx, a, dir);
+        const jj = repo and worktree.ensureJj(ctx, a, in.dir);
         return out(try std.fmt.allocPrint(a, "{s}: tickets are {s}-1, {s}-2, ...{s}\n", .{ p.name, p.prefix, p.prefix, if (jj) "\n(set up jj alongside git: jj git init --colocate)" else "" }));
     }
     if (std.mem.eql(u8, cmd, "set")) {
-        args.only(&.{ "--prefix", "--slots", "--planners", "--mode", "--profile", "--name", "--dir", "--after-merge", "--after-merge-claude", "--onto", "--review-skill", "--auto-review", "--push-after-merge" }, project_usage);
+        args.only(&.{ "--prefix", "--slots", "--planners", "--mode", "--profile", "--name", "--dir", "--after-merge", "--after-merge-claude", "--onto", "--review-skill", "--auto-review", "--push-after-merge", "--no-repo", "--repo" }, project_usage);
         if (args.pos.items.len != 1) fail("usage: cl project set <name> [options]", .{});
+        if (args.has("--no-repo") and args.has("--repo")) fail("--no-repo or --repo, not both", .{});
         try checkProfile(cfg, args.get("--profile"));
-        if (args.get("--onto") != null) checkOnto(ctx, a, (board.getProject(db, a, args.pos.items[0]) catch |e| boardFail(db, e, "project")).dir, args.get("--onto"));
+        if (args.get("--onto") != null) {
+            const cur = board.getProject(db, a, args.pos.items[0]) catch |e| boardFail(db, e, "project");
+            // Repo-less, updateProject refuses it: no repo to look the branch up in.
+            if ((cur.repo and !args.has("--no-repo")) or args.has("--repo")) checkOnto(ctx, a, cur.dir, args.get("--onto"));
+        }
         board.updateProject(db, args.pos.items[0], .{
             .name = args.get("--name") orelse "",
             .dir = if (args.get("--dir")) |d| try realDir(ctx, a, d) else "",
@@ -494,6 +522,7 @@ pub fn projectMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void
             .review_skill = args.get("--review-skill"),
             .auto_review = parseAutoReview(args),
             .push_after_merge = checkRemote(args.get("--push-after-merge")),
+            .repo = if (args.has("--no-repo")) false else if (args.has("--repo")) true else null,
         }) catch |e| boardFail(db, e, "project (name or prefix)");
         return;
     }
@@ -622,7 +651,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         }
         if (args.get("--onto") != null) {
             const pname = if (project.len > 0) project else (board.getTicket(db, a, parent.?) catch |e| boardFail(db, e, "parent ticket")).project;
-            checkOnto(ctx, a, (board.getProject(db, a, pname) catch |e| boardFail(db, e, "project")).dir, args.get("--onto"));
+            checkProjectOnto(ctx, a, board.getProject(db, a, pname) catch |e| boardFail(db, e, "project"), args.get("--onto"));
         }
         const key = board.createTicket(ctx, db, a, .{
             .project = project,
@@ -722,7 +751,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         try checkProfile(cfg, args.get("--profile"));
         if (args.get("--onto") != null) {
             const cur = board.getTicket(db, a, key) catch |e| boardFail(db, e, "ticket");
-            checkOnto(ctx, a, (board.getProject(db, a, args.get("--project") orelse cur.project) catch |e| boardFail(db, e, "project")).dir, args.get("--onto"));
+            checkProjectOnto(ctx, a, board.getProject(db, a, args.get("--project") orelse cur.project) catch |e| boardFail(db, e, "project"), args.get("--onto"));
         }
         board.updateTicket(ctx, db, a, key, .{
             .project = args.get("--project") orelse "",
@@ -1096,6 +1125,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         }
         const port = review.startGutter(ctx, cfg, db, a, t) catch |e| switch (e) {
             error.GutterMissing => fail("{s}", .{review.not_installed}),
+            error.NoRepo => fail("{s}'s project isn't a code repo, so there is no diff to review in gutter", .{t.key}),
             else => fail("gutter didn't start", .{}),
         };
         return out(try std.fmt.allocPrint(a, "gutter's window is open (http://127.0.0.1:{d}); the review you submit goes to the session\n", .{port}));
@@ -1151,6 +1181,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         const r = autoreview.start(ctx, cfg, db, a, t) catch |e| switch (e) {
             error.NotInReview => fail("{s} is in {s}: only a ticket in review or testing gets an automated review", .{ t.key, @tagName(t.stage) }),
             error.NoChanges => fail("{s} has no changes to review", .{t.key}),
+            error.NoRepo => fail("{s}'s project isn't a code repo (cl project set --repo), so there are no changes to review", .{t.key}),
             error.AlreadyRunning => fail("{s}'s automated review is running already (--stop stops it)", .{t.key}),
             error.StartFailed => fail("couldn't start the reviewer: {s}", .{tmux.lastError()}),
             else => boardFail(db, e, "ticket"),
@@ -1459,6 +1490,13 @@ fn isFlagWord(s: []const u8) bool {
 /// Refuse an --onto that names no branch (jj bookmark or git branch) in the
 /// project's repo at `dir`, so a typo doesn't make every start fail. ""
 /// (back to the default) is fine.
+/// `checkOnto` in `p`'s repo; a project that isn't one has no target branches.
+fn checkProjectOnto(ctx: Ctx, a: std.mem.Allocator, p: board.Project, onto: ?[]const u8) void {
+    const name = onto orelse return;
+    if (!p.repo and name.len > 0) fail("--onto: {s} isn't a code repo, so its tickets have no target branch", .{p.name});
+    if (p.repo) checkOnto(ctx, a, p.dir, onto);
+}
+
 fn checkOnto(ctx: Ctx, a: std.mem.Allocator, dir: []const u8, onto: ?[]const u8) void {
     const name = onto orelse return;
     if (name.len == 0 or worktree.branchExists(ctx, a, dir, name)) return;

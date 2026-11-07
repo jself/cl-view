@@ -695,6 +695,7 @@ Every ticket belongs to a project, which gives it a key prefix:
 ```
 cl project add qa-tool ~/devel/qa-tool --slots 2 --mode worktree   # QA-1, QA-2, ...
 cl project add boats ~/devel/boats --prefix BOAT
+cl project add me ~/todo --no-repo   # not a code repo (see Repo-less projects)
 cl project list | set <name> [options] | rm <name>
 cl project hide boats         # its tickets leave the board, Needs You, needs and list; queued ones still run
 cl project unhide boats
@@ -704,7 +705,8 @@ cl project set qa-tool --after-merge '<command>'   # run on each merge (see Afte
 cl project set cl-wrapper --push-after-merge origin  # push trunk and watch CI (see Push after merge)
 ```
 
-Every project gets jj: adding one, or starting its first ticket, runs
+Every project gets jj (unless it isn't a code repo: Repo-less projects,
+below): adding one, or starting its first ticket, runs
 `jj git init --colocate` when the directory has no jj repo yet. Git keeps
 working, and worktree tickets get `jj workspace`s. A directory inside a bigger
 git repo is left alone, and so is everything when jj isn't installed.
@@ -775,6 +777,37 @@ cl t done QA-1 --summary "Fixed the race"
   when the plan turns out to be only tickets. Once past Planning, `show`
   says `(planned, now an umbrella)` and the board "planned · now an
   umbrella"; the plan stays on the Plan tab and in `cl t show <key> --plan`.
+
+### Repo-less projects
+
+A project for work that isn't about code (todos, errands, research notes) is
+added with `--no-repo`: cl makes its directory if it is missing and sets up no
+jj or git there, even when it sits inside another repo. Claude still runs in
+that directory, and its tickets go through the stages as usual, with less:
+
+- They run in the queue only. `--worktree` (on `cl t new`, `cl t edit`,
+  `cl t relocate` or the project's `--mode`) is refused, and the board offers
+  no Move to a worktree. A ticket moved into such a project goes to the queue,
+  unless it has a worktree, jj change or branch under way (refused: the work
+  would be left behind).
+- They have no target branch (`--onto`), and the project has no
+  `--push-after-merge` or `--after-merge`: cl never pushes or checks out a repo
+  its folder happens to sit in.
+- They get no jj change, bookmark or base, so there is no review guide (the
+  first message doesn't ask for one, nor does an attached session's), no gutter
+  review and no automated review
+  (`cl t autoreview` is refused, `--auto-review` stays off, and the board has
+  no Auto review button).
+- Done just closes them: there is nothing to merge or make a PR of, and the
+  first message says nothing about merging. Planning runs in the project's
+  folder, not a read-only copy.
+
+`cl project set <name> --no-repo` makes an existing project one (it also sets
+`--mode queue` and `--auto-review off` and clears `--onto`, `--push-after-merge`
+and `--after-merge`; refused while its unfinished tickets have a worktree, jj
+change or branch), and `--repo` makes it a code repo again
+(jj is set up on its next start). `cl project list` says `no repo` for them,
+and on the board the project dialog has a Code repo box.
 
 ### Running tickets
 

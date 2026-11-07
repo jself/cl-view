@@ -184,6 +184,8 @@ pub const GutterError = error{ GutterFailed, GutterMissing };
 /// installed (`findGutter`).
 pub fn startGutter(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: board.Ticket) !u16 {
     if (try gutterPort(ctx, a, t.key)) |p| return p;
+    // Nothing to diff (`Project.repo`), and gutter would show a repo around it.
+    if (!t.repo) return error.NoRepo;
     const gutter = findGutter(ctx, a, cfg) orelse return error.GutterMissing;
     const name = try sessionName(a, "clg_", t.key);
     // A gutter that already exited: start a fresh one.

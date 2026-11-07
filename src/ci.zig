@@ -151,7 +151,9 @@ fn writeAtomic(ctx: Ctx, a: std.mem.Allocator, path: []const u8, data: []const u
 /// The board's Push again: refused (error.NoPush) for a project that
 /// doesn't push; otherwise `cl project push` starts, detached.
 pub fn pushFromBoard(ctx: Ctx, db: board.Db, a: std.mem.Allocator, project: []const u8) !void {
-    if ((try board.getProject(db, a, project)).push_after_merge.len == 0) return error.NoPush;
+    const p = try board.getProject(db, a, project);
+    // Not a code repo: a push would be of a repo around its folder.
+    if (p.push_after_merge.len == 0 or !p.repo) return error.NoPush;
     try spawnPush(ctx, project);
 }
 
@@ -159,7 +161,7 @@ pub fn pushFromBoard(ctx: Ctx, db: board.Db, a: std.mem.Allocator, project: []co
 /// and watch its CI, without the after-merge command.
 pub fn pushByHand(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, project: []const u8) !void {
     const p = try board.getProject(db, a, project);
-    if (p.push_after_merge.len == 0) return error.NoPush;
+    if (p.push_after_merge.len == 0 or !p.repo) return error.NoPush;
     pushAndWatch(ctx, cfg, db, a, p, &.{"-"});
 }
 

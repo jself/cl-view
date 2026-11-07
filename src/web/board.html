@@ -385,7 +385,8 @@
   #imgDlg { max-width: 96vw; max-height: 96vh; width: auto; height: auto; background: #000; cursor: zoom-out; }
   #imgDlg img { display: block; max-width: 96vw; max-height: 96vh; object-fit: contain; margin: auto; }
   .form label { display: flex; flex-direction: column; gap: calc(5 * var(--u)); font-size: calc(12.5 * var(--u)); color: var(--muted); }
-  .form label[hidden], .form p[hidden] { display: none; }
+  .form label[hidden], .form p[hidden], .form div[hidden] { display: none; }
+  .form label.inline { flex-direction: row; align-items: center; gap: calc(8 * var(--u)); }
   .form .row2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(calc(200 * var(--u)), 1fr)); gap: calc(12 * var(--u)); }
   .check { display: flex; flex-direction: column; gap: calc(6 * var(--u)); padding: calc(10 * var(--u)) calc(12 * var(--u)); border: 1px solid var(--line); border-radius: calc(10 * var(--u)); }
   .check .pf { display: flex; gap: calc(6 * var(--u)); }
@@ -1108,7 +1109,7 @@ function projectsHtml() {
       return `<tr class="row${p.hidden ? " dim" : ""}" tabindex="-1" data-proj-edit="${n}">
         <td><strong>${n}</strong>${p.paused ? ` <span class="pill f-paused">Paused</span>` : ""}${p.hidden ? ` <span class="pill">Hidden</span>` : ""}</td>
         <td class="mono" style="font-size:calc(12 * var(--u));overflow-wrap:anywhere">${esc(p.dir)}</td>
-        <td class="mono">${esc(p.prefix)}</td><td>${MODE_NAME[p.mode] || esc(p.mode)}</td>
+        <td class="mono">${esc(p.prefix)}</td><td>${MODE_NAME[p.mode] || esc(p.mode)}${p.repo ? "" : ` <span class="pill" title="Not a code repo: no jj or git, its tickets run in the queue and Done just closes them">No repo</span>`}</td>
         <td class="mono">${p.mode === "worktree" ? p.slots : `<span class="muted" title="Slots only limit worktree tickets">${p.slots}</span>`}</td>
         <td>${p.profile ? esc(p.profile) : `<span class="muted">default</span>`}</td>
         <td title="${esc(c.by || "none open")}${c.done ? ` · ${c.done} done` : ""}"><span class="mono">${c.open}</span>${c.needs ? ` <span class="pill f-input">${c.needs} need${c.needs > 1 ? "" : "s"} you</span>` : ""}</td>
@@ -1130,12 +1131,13 @@ function openProject(name) {
       <div class="row2"><label>Name<input type="text" name="name" required value="${esc(p?.name || "")}" autocomplete="off"></label>
         <label>Key prefix<input type="text" name="prefix" value="${esc(p?.prefix || "")}" placeholder="From the name" autocomplete="off" pattern="[A-Za-z0-9]{1,8}" title="Up to 8 letters and digits"></label></div>
       <label>Directory<input type="text" name="dir" class="mono" required value="${esc(p?.dir || "")}" placeholder="~/devel/project" autocomplete="off"></label>
-      <div class="row2"><label>New tickets run as<select name="mode"><option value="queue" ${p?.mode !== "worktree" ? "selected" : ""}>Queue in a session</option><option value="worktree" ${p?.mode === "worktree" ? "selected" : ""}>Their own worktrees</option></select></label>
+      <label class="inline" title="Off for work that isn't about code (todos, notes): cl sets up no jj or git there and makes the directory if it is missing. Its tickets run in the queue, with no changes, branches, review guide or automated review, and Done just closes them"><input type="checkbox" name="repo" ${p?.repo === false ? "" : "checked"}>Code repo</label>
+      <div class="row2" data-repo-only ${p?.repo === false ? "hidden" : ""}><label>New tickets run as<select name="mode"><option value="queue" ${p?.mode !== "worktree" ? "selected" : ""}>Queue in a session</option><option value="worktree" ${p?.mode === "worktree" ? "selected" : ""}>Their own worktrees</option></select></label>
         <label>Worktree slots<input type="number" name="slots" min="1" value="${p ? p.slots : ""}" placeholder="3"></label></div>
       <div class="row2"><label>Profile<select name="profile"><option value="">Default</option>${profiles.map((x) => `<option ${x === p?.profile ? "selected" : ""}>${esc(x)}</option>`).join("")}</select></label>
-        <label>Target branch<input type="text" name="onto" class="mono" value="${esc(p?.onto || "")}" placeholder="Trunk" autocomplete="off" title="A jj bookmark or git branch its tickets start from and merge into instead of trunk; a ticket's own target wins. Merges into it don't run the after-merge steps"></label></div>
-      <label>Push trunk to<input type="text" name="push_after_merge" class="mono" value="${esc(p?.push_after_merge || "")}" placeholder="Nowhere" autocomplete="off" title="A git remote (like origin) cl pushes trunk to after each merge into it, then watches its CI and flags the ticket when it fails. For projects that don't go through PRs"></label>
-      <label>When a ticket reaches Review<select name="auto_review" title="Run the automated review by itself, the first time a ticket gets there, so the ticket reaches Needs you with its findings there">${[["off", "Wait for me to run the automated review"], ["on", "Run the automated review"], ["send", "Run the automated review and send its findings to Claude for one round"]].map(([v, l]) => `<option value="${v}" ${(p?.auto_review || "off") === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>
+        <label data-repo-only ${p?.repo === false ? "hidden" : ""}>Target branch<input type="text" name="onto" class="mono" value="${esc(p?.onto || "")}" placeholder="Trunk" autocomplete="off" title="A jj bookmark or git branch its tickets start from and merge into instead of trunk; a ticket's own target wins. Merges into it don't run the after-merge steps"></label></div>
+      <label data-repo-only ${p?.repo === false ? "hidden" : ""}>Push trunk to<input type="text" name="push_after_merge" class="mono" value="${esc(p?.push_after_merge || "")}" placeholder="Nowhere" autocomplete="off" title="A git remote (like origin) cl pushes trunk to after each merge into it, then watches its CI and flags the ticket when it fails. For projects that don't go through PRs"></label>
+      <label data-repo-only ${p?.repo === false ? "hidden" : ""}>When a ticket reaches Review<select name="auto_review" title="Run the automated review by itself, the first time a ticket gets there, so the ticket reaches Needs you with its findings there">${[["off", "Wait for me to run the automated review"], ["on", "Run the automated review"], ["send", "Run the automated review and send its findings to Claude for one round"]].map(([v, l]) => `<option value="${v}" ${(p?.auto_review || "off") === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>
       ${p ? `<p class="muted" style="margin:0;font-size:calc(12.5 * var(--u))">A new prefix applies to new tickets; existing keys stay as they are.</p>` : ""}
       <p class="formerr" id="projErr" role="alert" hidden></p>
       <div class="actions"><button type="submit" class="btn primary">${p ? "Save" : "Add project"}</button></div></form>`;
@@ -1143,7 +1145,9 @@ function openProject(name) {
 }
 async function submitProject(form) {
   const f = Object.fromEntries(new FormData(form)); const old = form.dataset.name;
-  const body = { name: f.name.trim(), dir: f.dir.trim(), prefix: f.prefix.trim().toUpperCase(), mode: f.mode, profile: f.profile, onto: f.onto.trim(), auto_review: f.auto_review, push_after_merge: f.push_after_merge.trim() };
+  const body = { name: f.name.trim(), dir: f.dir.trim(), prefix: f.prefix.trim().toUpperCase(), mode: f.mode, profile: f.profile, onto: f.onto.trim(), auto_review: f.auto_review, push_after_merge: f.push_after_merge.trim(), repo: !!f.repo };
+  // Not a code repo: only the queue, and nothing to review, target or push (the server refuses them).
+  if (!body.repo) { body.mode = "queue"; body.auto_review = "off"; delete body.onto; delete body.push_after_merge; }
   if (f.slots !== "") body.slots = Number(f.slots);
   // An unchanged directory isn't sent: one that's gone since would refuse the save.
   if (old && body.dir === state.data.projects.find((x) => x.name === old)?.dir) delete body.dir;
@@ -1374,7 +1378,7 @@ function renderDetailInner() {
   const more = [];
   if (!t.park && t.stage !== "done" && !t.umbrella) more.push(item(`data-act="park"`, "Park", "Wait on something outside cl (a PR, a deploy) without a session; a check can wake it"));
   // Moves it (with its change and conversation, once under way) to a worktree of its own or back.
-  if (t.stage !== "done" && !t.umbrella) more.push(t.mode === "queue"
+  if (t.stage !== "done" && !t.umbrella && (t.repo || t.mode !== "queue")) more.push(t.mode === "queue"
     ? item(`data-relocate="worktree"`, "Move to a worktree", "Give it a worktree of its own; Claude goes on there and the queue session is free")
     : item(`data-relocate="queue"`, "Move to the queue", "Go on in the project's main folder, in its session once that is free"));
   if (liveSession) more.push((more.length ? "<hr>" : "") + item(`data-act="kill"`, "Kill", "End its session; it keeps its stage and can be restarted", "danger"));
@@ -1566,7 +1570,8 @@ function reviewTab(d) {
 function autoreviewHtml(d) {
   const t = d.ticket; const r = d.autoreview;
   // Only a ticket in Review or Testing is reviewed (the server says so too).
-  const can = t.stage === "review" || t.stage === "testing";
+  // Not a code repo: there are no changes to review (the server refuses it).
+  const can = t.repo && (t.stage === "review" || t.stage === "testing");
   if (!r && !can) return "";
   const runBtn = (label, primary) => !can ? "" : `<button type="button" class="btn${primary ? " primary" : ""}" data-act="autoreview" title="A separate Claude (profile ${esc(t.profile || "default")} or the project's) reads the changes and reports problems; nothing is sent until you choose">${label}</button>`;
   const head = (what) => `<div class="hd"><strong>Automated review</strong><span class="muted">${what}</span></div>`;
@@ -1790,12 +1795,12 @@ function detailsTab(d) {
     <label>Description<textarea name="body" rows="5" placeholder="Paste or drop screenshots here too">${esc(t.body)}</textarea></label>
     <div class="thumbs">${thumbsHtml(t.body)}</div>
     <div class="row2"><label>Project<select name="project">${state.data.projects.map((p) => `<option ${p.name === t.project ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select></label>
-      <label>Runs as<select name="mode"><option value="queue" ${t.mode === "queue" ? "selected" : ""}>Queue in a session</option><option value="worktree" ${t.mode === "worktree" ? "selected" : ""}>Its own worktree</option></select></label>
+      <label ${t.repo || t.mode !== "queue" ? "" : "hidden"}>Runs as<select name="mode"><option value="queue" ${t.mode === "queue" ? "selected" : ""}>Queue in a session</option><option value="worktree" ${t.mode === "worktree" ? "selected" : ""}>Its own worktree</option></select></label>
       <label>Queue session<select name="target"><option value="">Project default / parent's</option>${sessions.map((s) => `<option value="${esc(s.tmux)}" ${s.tmux === t.target ? "selected" : ""}>${esc(s.name)} (${esc(s.status)})</option>`).join("")}</select></label></div>
     <div class="row2"><label>Plan first<select name="plan"><option value="0">No</option><option value="1" ${t.plan ? "selected" : ""}>Yes</option></select></label>
       <label title="An umbrella is only a container for sub-tickets: it never runs. Queued, it moves to Running when a sub-ticket starts and to Done when they all are">Kind<select name="umbrella"><option value="0">Ticket</option><option value="1" ${t.umbrella ? "selected" : ""}>Umbrella for sub-tickets</option></select></label>
       <label>Planning skill<input type="text" name="skill" value="${esc(t.skill)}" placeholder="grilling, wayfinder"></label></div>
-    <label>Target branch<input type="text" name="onto" class="mono" value="${esc(t.onto_own)}" autocomplete="off" placeholder="${t.onto && !t.onto_own ? "The project's: " + esc(t.onto) : "Trunk"}" title="A jj bookmark or git branch it starts from and merges into instead of trunk, like a long-lived feature branch. Empty: the project's target, else trunk"></label>
+    <label ${t.repo || t.onto_own ? "" : "hidden"}>Target branch<input type="text" name="onto" class="mono" value="${esc(t.onto_own)}" autocomplete="off" placeholder="${t.onto && !t.onto_own ? "The project's: " + esc(t.onto) : "Trunk"}" title="A jj bookmark or git branch it starts from and merges into instead of trunk, like a long-lived feature branch. Empty: the project's target, else trunk"></label>
     <div class="actions"><button type="submit" class="btn primary" value="close">Save and close</button>
       <button type="submit" class="btn">Save</button>
       ${t.worktree && t.stage === "done" ? `<button type="button" class="btn" data-act="cleanup">Remove worktree</button>` : ""}</div></form>`;
@@ -1901,13 +1906,13 @@ function openNew(parentKey, pick = {}) {
       <label>What should happen<textarea name="body" rows="4" placeholder="Paste or drop screenshots here too"></textarea></label>
       <div class="thumbs"></div>
       <div class="row2"><label>When<select name="when"><option value="queued">Start when there's room</option><option value="backlog">Backlog for now</option><option value="planning">Plan first</option></select></label>
-        <label>Runs as<select name="mode"><option value="queue" ${p?.mode !== "worktree" ? "selected" : ""}>Queue in a session</option><option value="worktree" ${p?.mode === "worktree" ? "selected" : ""}>Its own worktree</option></select></label></div>
+        <label data-repo-only>Runs as<select name="mode"><option value="queue" ${p?.mode !== "worktree" ? "selected" : ""}>Queue in a session</option><option value="worktree" ${p?.mode === "worktree" ? "selected" : ""}>Its own worktree</option></select></label></div>
       <div class="row2"><label>Queue session<select name="target"><option value="">Project default / parent's</option>${d.sessions.map((s) => `<option value="${esc(s.tmux)}">${esc(s.name)} (${esc(s.status)})</option>`).join("")}</select></label>
         <label>Planning skill (plan first)<input type="text" name="skill" placeholder="grilling, wayfinder"></label></div>
       <div class="row2"><label>Profile<select name="profile"><option value="">Project's</option>${d.profiles.map((x) => `<option>${esc(x)}</option>`).join("")}</select></label>
         <label title="An umbrella is only a container for sub-tickets: it never runs. Queued, it moves to Running when a sub-ticket starts and to Done when they all are">Kind<select name="umbrella"><option value="0">Ticket</option><option value="1">Umbrella for sub-tickets</option></select></label></div>
       <div class="row2"><label>Sub-ticket of<select name="parent"><option value="">None</option>${d.tickets.filter((r) => r.ticket.stage !== "done").map((r) => `<option value="${esc(r.ticket.key)}" ${r.ticket.key === parentKey ? "selected" : ""}>${esc(r.ticket.key)} ${esc(r.ticket.title)}</option>`).join("")}</select></label>
-        <label>Target branch<input type="text" name="onto" class="mono" autocomplete="off" placeholder="${esc(newOntoHint(d, proj, parentKey))}" title="A jj bookmark or git branch it starts from and merges into instead of trunk, like a long-lived feature branch. Empty: the parent's, else the project's, else trunk"></label></div>
+        <label data-repo-only>Target branch<input type="text" name="onto" class="mono" autocomplete="off" placeholder="${esc(newOntoHint(d, proj, parentKey))}" title="A jj bookmark or git branch it starts from and merges into instead of trunk, like a long-lived feature branch. Empty: the parent's, else the project's, else trunk"></label></div>
       <div class="actions"><button type="submit" class="btn primary" title="Ctrl+Enter">Create</button></div></form>`;
   const form = document.getElementById("newForm");
   for (const k of NEW_KEEP) {
@@ -1919,11 +1924,22 @@ function openNew(parentKey, pick = {}) {
   }
   // Only backlog, planning and queued are choices under When; other columns keep the default.
   if (pick.when && [...form.elements.when.options].some((o) => o.value === pick.when)) form.elements.when.value = pick.when;
+  newRepoFields(form, d, proj);
   // The empty Target branch's hint follows the chosen project and parent.
   form.addEventListener("change", (e) => {
     if (e.target.name === "project" || e.target.name === "parent") form.elements.onto.placeholder = newOntoHint(d, form.elements.project?.value || proj, form.elements.parent.value);
+    if (e.target.name === "project" || e.target.name === "parent") newRepoFields(form, d, proj);
   });
   document.getElementById("newDlg").showModal();
+}
+// A new ticket in a project that isn't a code repo runs in the queue and has
+// no target branch: those fields go (Project.repo).
+function newRepoFields(form, d, proj) {
+  const parent = form.elements.parent.value ? d.tickets.find((r) => r.ticket.key === form.elements.parent.value)?.ticket : null;
+  const name = form.elements.project?.value || parent?.project || proj;
+  const repo = d.projects.find((x) => x.name === name)?.repo !== false;
+  for (const el of form.querySelectorAll("[data-repo-only]")) el.hidden = !repo;
+  if (!repo) { form.elements.mode.value = "queue"; form.elements.onto.value = ""; }
 }
 // What an empty Target branch means for a new ticket: its parent's target,
 // else the project's, else trunk.
@@ -2454,6 +2470,8 @@ document.addEventListener("change", (e) => {
   if (e.target.id === "parkedSw") { state.parked = e.target.checked; store("cl-parked", state.parked ? "1" : "0"); render(); }
   if (e.target.id === "subsSw") { state.subs = e.target.checked; store("cl-subs", state.subs ? "1" : "0"); render(); }
   if (e.target.id === "stageSel" && state.open) moveTo(state.open, e.target.value);
+  // The project dialog's Code repo box: what only a repo has comes and goes with it.
+  if (e.target.name === "repo" && e.target.form?.id === "projForm") for (const el of e.target.form.querySelectorAll("[data-repo-only]")) el.hidden = !e.target.checked;
 });
 document.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && e.target.id === "msg") { e.preventDefault(); document.getElementById("sendMsg").click(); }

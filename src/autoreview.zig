@@ -413,6 +413,8 @@ pub fn start(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t
 /// `start`, recording `auto` (`Review.auto`).
 fn startAs(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: board.Ticket, auto: []const u8) !Review {
     if (t.stage != .review and t.stage != .testing) return error.NotInReview;
+    // No repo, no changes to review (`Project.repo`).
+    if (!t.repo) return error.NoRepo;
     const dir = try review.ticketDir(db, a, t);
     const rev = try worktree.reviewRev(ctx, a, dir, t.base, t.change);
     if (rev.len == 0) return error.NoChanges;

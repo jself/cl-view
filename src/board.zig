@@ -113,6 +113,11 @@ pub const Project = struct {
     /// run cl then watches (`cl project set --push-after-merge`, ci.zig); ""
     /// for none.
     push_after_merge: []const u8 = "",
+    /// A code repo (the default). A project that isn't one (`cl project add
+    /// --no-repo`, for todos that aren't about code) gets no jj or git: its
+    /// tickets have no change, branch, worktree, review guide or automated
+    /// review, run in the queue only, and Done just closes them.
+    repo: bool = true,
 };
 
 pub const Flag = struct {
@@ -203,6 +208,8 @@ pub const Ticket = struct {
     /// The target set on the ticket itself (`cl ticket new/edit --onto`,
     /// or its parent's when it was made), "" to go by the project's.
     onto_own: []const u8 = "",
+    /// Its project is a code repo (`Project.repo`).
+    repo: bool = true,
     /// jj: the change its work goes in (change ids survive rewrites), "" for
     /// none (git, or a sub-ticket going on in its parent's change).
     change: []const u8 = "",
@@ -303,6 +310,13 @@ pub const Error = error{
     OutOfMemory,
     /// The tickets would wait on each other in a circle, so none would start.
     Cycle,
+    /// Asked for what only a code repo has (a worktree, an automated
+    /// review, a target branch, a push or after-merge command) in a
+    /// project that isn't one (`Project.repo`).
+    NoRepo,
+    /// A project can't stop being a code repo while its unfinished tickets
+    /// have work in it (a worktree, a jj change or a branch).
+    RepoWork,
 };
 
 /// Worktree slots a new project gets when none are given.
@@ -332,6 +346,7 @@ const schema =
     \\  review_skill TEXT NOT NULL DEFAULT '',
     \\  auto_review TEXT NOT NULL DEFAULT 'off',
     \\  push_after_merge TEXT NOT NULL DEFAULT '',
+    \\  repo INTEGER NOT NULL DEFAULT 1,
     \\  planners INTEGER NOT NULL DEFAULT
 ++ std.fmt.comptimePrint(" {d}\n", .{default_planners}) ++
     \\);
@@ -539,6 +554,8 @@ pub fn migrate(db: Db) !void {
         try db.execMulti(drift_schema);
         // Pushing trunk after a merge.
         _ = try addColumn(db, "projects", "push_after_merge", "TEXT NOT NULL DEFAULT ''");
+        // Projects that aren't code repos.
+        _ = try addColumn(db, "projects", "repo", "INTEGER NOT NULL DEFAULT 1");
     }
     if (have >= version) return;
     // Version 1 had no sub-tickets, version 2 no planning skill.
@@ -706,6 +723,7 @@ pub const ProjectInput = struct {
     review_skill: ?[]const u8 = null,
     auto_review: ?AutoReview = null,
     push_after_merge: ?[]const u8 = null,
+    repo: ?bool = null,
 };
 
 /// A key prefix from a project name: a short first word as is (`qa-tool` →
@@ -778,30 +796,70 @@ test validRemote {
     try std.testing.expect(!validRemote("origin main"));
 }
 
-pub fn addProject(db: Db, in: ProjectInput) Error!void {
-    if (in.name.len == 0 or in.dir.len == 0) return error.BadInput;
+/// What `addProject` would refuse, without adding it: callers that make the
+/// directory first (`--no-repo`) check before they do. `in.dir` may be left
+/// "" here.
+pub fn checkNewProject(db: Db, in: ProjectInput) Error!void {
+    if (in.name.len == 0) return error.BadInput;
     if (in.push_after_merge) |r| if (!validRemote(r)) return error.BadInput;
     var buf: [8]u8 = undefined;
     const prefix = in.prefix orelse defaultPrefix(&buf, in.name);
     if (!validPrefix(prefix)) return error.BadInput;
+    if (!(in.repo orelse true) and repoOnly(in)) return error.NoRepo;
     if (try db.int("SELECT 1 FROM projects WHERE name = ?1 OR prefix = ?2", .{ in.name, prefix }) != null) return error.Exists;
-    try db.exec("INSERT INTO projects (name, dir, prefix, slots, mode, profile, after_merge, after_merge_claude, planners, onto, review_skill, auto_review, push_after_merge) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)", .{
+}
+
+/// `in` asks for something only a code repo has.
+fn repoOnly(in: ProjectInput) bool {
+    const set = struct {
+        fn f(v: ?[]const u8) bool {
+            return if (v) |x| x.len > 0 else false;
+        }
+    }.f;
+    return in.mode == .worktree or (in.auto_review orelse .off) != .off or set(in.onto) or set(in.push_after_merge) or set(in.after_merge);
+}
+
+pub fn addProject(db: Db, in: ProjectInput) Error!void {
+    if (in.dir.len == 0) return error.BadInput;
+    try checkNewProject(db, in);
+    var buf: [8]u8 = undefined;
+    const prefix = in.prefix orelse defaultPrefix(&buf, in.name);
+    try db.exec("INSERT INTO projects (name, dir, prefix, slots, mode, profile, after_merge, after_merge_claude, planners, onto, review_skill, auto_review, push_after_merge, repo) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)", .{
         in.name,                             in.dir,               prefix,                    in.slots orelse default_slots,
         @tagName(in.mode orelse .queue),     in.profile orelse "", in.after_merge orelse "",  in.after_merge_claude orelse "",
         in.planners orelse default_planners, in.onto orelse "",    in.review_skill orelse "", @tagName(in.auto_review orelse .off),
-        in.push_after_merge orelse "",
+        in.push_after_merge orelse "",       in.repo orelse true,
     });
 }
 
-/// Change the given fields of a project.
+/// Change the given fields of a project. Everything is checked before
+/// anything is written, so a refused change changes nothing.
+/// Making it repo-less (`repo` false) sets its mode to queue and clears what
+/// only a code repo has (automated reviews, target branch, push and
+/// after-merge command); asking for any of them along with that, or of a
+/// repo-less project, is refused (`error.NoRepo`), and so is making it
+/// repo-less while its unfinished tickets have work in the repo
+/// (`error.RepoWork`).
 pub fn updateProject(db: Db, name: []const u8, in: ProjectInput) Error!void {
-    if (try db.int("SELECT 1 FROM projects WHERE name = ?1", .{name}) == null) return error.NotFound;
+    const repo = (try db.int("SELECT repo FROM projects WHERE name = ?1", .{name})) orelse return error.NotFound;
     if (in.push_after_merge) |r| if (!validRemote(r)) return error.BadInput;
+    if (!(in.repo orelse (repo != 0)) and repoOnly(in)) return error.NoRepo;
+    if (in.repo == false and repo != 0 and try db.int(
+        "SELECT 1 FROM tickets WHERE project = ?1 AND stage != 'done' AND (mode = 'worktree' OR worktree != '' OR branch != '' OR change_id != '')",
+        .{name},
+    ) != null) return error.RepoWork;
     if (in.prefix) |p| {
         if (!validPrefix(p)) return error.BadInput;
         if (try db.int("SELECT 1 FROM projects WHERE prefix = ?1 AND name != ?2", .{ p, name }) != null) return error.Exists;
-        try db.exec("UPDATE projects SET prefix = ?2 WHERE name = ?1", .{ name, p });
     }
+    if (in.name.len > 0 and !std.mem.eql(u8, in.name, name)) {
+        if (try db.int("SELECT 1 FROM projects WHERE name = ?1", .{in.name}) != null) return error.Exists;
+    }
+    if (in.repo) |r| {
+        try db.exec("UPDATE projects SET repo = ?2 WHERE name = ?1", .{ name, r });
+        if (!r) try db.exec("UPDATE projects SET mode = 'queue', auto_review = 'off', onto = '', push_after_merge = '', after_merge = '' WHERE name = ?1", .{name});
+    }
+    if (in.prefix) |p| try db.exec("UPDATE projects SET prefix = ?2 WHERE name = ?1", .{ name, p });
     if (in.dir.len > 0) try db.exec("UPDATE projects SET dir = ?2 WHERE name = ?1", .{ name, in.dir });
     if (in.slots) |s| try db.exec("UPDATE projects SET slots = ?2 WHERE name = ?1", .{ name, s });
     if (in.planners) |n| try db.exec("UPDATE projects SET planners = ?2 WHERE name = ?1", .{ name, n });
@@ -815,7 +873,6 @@ pub fn updateProject(db: Db, name: []const u8, in: ProjectInput) Error!void {
     if (in.push_after_merge) |r| try db.exec("UPDATE projects SET push_after_merge = ?2 WHERE name = ?1", .{ name, r });
     // Renaming last, so the lookups above still match.
     if (in.name.len > 0 and !std.mem.eql(u8, in.name, name)) {
-        if (try db.int("SELECT 1 FROM projects WHERE name = ?1", .{in.name}) != null) return error.Exists;
         try db.exec("UPDATE projects SET name = ?2 WHERE name = ?1", .{ name, in.name });
     }
 }
@@ -849,7 +906,7 @@ pub fn removeProject(db: Db, name: []const u8) Error!void {
     try db.exec("DELETE FROM projects WHERE name = ?1", .{name});
 }
 
-const project_cols = "name, dir, prefix, slots, mode, profile, after_merge, after_merge_claude, hidden, planners, paused, onto, review_skill, auto_review, push_after_merge";
+const project_cols = "name, dir, prefix, slots, mode, profile, after_merge, after_merge_claude, hidden, planners, paused, onto, review_skill, auto_review, push_after_merge, repo";
 
 fn readProject(st: sqlite.Stmt, a: std.mem.Allocator) !Project {
     return .{
@@ -868,6 +925,7 @@ fn readProject(st: sqlite.Stmt, a: std.mem.Allocator) !Project {
         .review_skill = try st.dupe(a, 12),
         .auto_review = AutoReview.parse(st.text(13)) orelse .off,
         .push_after_merge = try st.dupe(a, 14),
+        .repo = st.int(15) != 0,
     };
 }
 
@@ -1004,6 +1062,7 @@ pub fn createTicket(ctx: Ctx, db: Db, a: std.mem.Allocator, in: TicketInput) Err
     const parent: ?Ticket = if (in.parent) |k| try getTicket(db, a, k) else null;
     const project = if (in.project.len > 0) in.project else if (parent) |pt| pt.project else return error.BadInput;
     const p = try getProject(db, a, project);
+    if (!p.repo and (in.mode == .worktree or (in.onto orelse @as([]const u8, "")).len > 0)) return error.NoRepo;
     const plan = in.plan orelse false;
     const stage = in.stage orelse (if (plan) Stage.planning else Stage.backlog);
     try db.execMulti("BEGIN IMMEDIATE");
@@ -1019,7 +1078,7 @@ pub fn createTicket(ctx: Ctx, db: Db, a: std.mem.Allocator, in: TicketInput) Err
     try db.exec(
         \\INSERT INTO tickets (key, project, title, body, stage, mode, plan, target, profile, parent, skill, created, updated, rank, umbrella, onto)
         \\VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, (SELECT coalesce(max(rank), 0) + ?13 FROM tickets), ?14, ?15)
-    , .{ key, p.name, title, body, @tagName(stage), @tagName(in.mode orelse p.mode), plan, in.target orelse "", in.profile orelse p.profile, if (parent) |pt| pt.id else null, in.skill orelse "", t, rank_gap, in.umbrella orelse false, in.onto orelse if (parent) |pt| pt.onto_own else "" });
+    , .{ key, p.name, title, body, @tagName(stage), @tagName(in.mode orelse p.mode), plan, in.target orelse "", in.profile orelse p.profile, if (parent) |pt| pt.id else null, in.skill orelse "", t, rank_gap, in.umbrella orelse false, if (!p.repo) @as([]const u8, "") else in.onto orelse if (parent) |pt| pt.onto_own else "" });
     const id = db.lastId();
     try logEvent(ctx, db, id, "created", @tagName(stage));
     if (parent) |pt| {
@@ -1035,7 +1094,8 @@ const ticket_cols = "t.id, t.key, t.project, t.title, t.body, t.stage, t.mode, t
     "coalesce((SELECT p.key FROM tickets p WHERE p.id = t.parent), ''), (SELECT count(*) FROM tickets c WHERE c.parent = t.id), t.skill, t.base, t.finishing, t.change_id, t.rank, t.killed, t.test_plan, t.test_progress, t.custom_close, t.plan_md, t.review_guide, t.asking, t.parallel, " ++
     "EXISTS (SELECT 1 FROM events e WHERE e.ticket = t.id AND e.kind = 'started'), " ++
     "(SELECT count(*) FROM tickets c WHERE c.parent = t.id AND c.stage = 'done'), t.umbrella, " ++
-    "t.onto, coalesce((SELECT p.onto FROM projects p WHERE p.name = t.project), ''), t.autoreview, t.pr_then";
+    "t.onto, coalesce((SELECT p.onto FROM projects p WHERE p.name = t.project), ''), t.autoreview, t.pr_then, " ++
+    "coalesce((SELECT p.repo FROM projects p WHERE p.name = t.project), 1)";
 
 fn readTicket(st: sqlite.Stmt, a: std.mem.Allocator) !Ticket {
     return .{
@@ -1079,6 +1139,7 @@ fn readTicket(st: sqlite.Stmt, a: std.mem.Allocator) !Ticket {
         .onto = if (st.text(36).len > 0) try st.dupe(a, 36) else try st.dupe(a, 37),
         .autoreview = try st.dupe(a, 38),
         .pr_then = try st.dupe(a, 39),
+        .repo = st.int(40) != 0,
     };
 }
 
@@ -1242,6 +1303,19 @@ pub fn isWorking(db: Db, t: Ticket, busy: []const []const u8) Error!bool {
 /// Change the given fields of a ticket.
 pub fn updateTicket(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, in: TicketInput) Error!void {
     const t = try getTicket(db, a, key);
+    // Where it will be: moving to another project goes by that one's repo.
+    const moving = in.project.len > 0 and !std.mem.eql(u8, in.project, t.project);
+    const repo = if (moving) (try getProject(db, a, in.project)).repo else t.repo;
+    if (in.title) |v| if (v.len == 0) return error.BadInput;
+    if (!repo) {
+        if (in.mode == .worktree or (in.onto orelse @as([]const u8, "")).len > 0) return error.NoRepo;
+        // Into a repo-less project: work it has in a repo would be left
+        // behind; with none, it goes to the queue, with no target branch.
+        if (moving and t.repo) {
+            if (t.stage != .done and (t.worktree.len > 0 or t.branch.len > 0 or t.change.len > 0)) return error.RepoWork;
+            try db.exec("UPDATE tickets SET mode = 'queue', onto = '' WHERE id = ?1", .{t.id});
+        }
+    }
     if (in.title) |v| {
         if (v.len == 0) return error.BadInput;
         try db.exec("UPDATE tickets SET title = ?2 WHERE id = ?1", .{ t.id, v });
@@ -2417,6 +2491,129 @@ test "projects, tickets, flags, comments, done" {
     _ = try removeTicket(ctx, db, a, k1);
     _ = try removeTicket(ctx, db, a, k2);
     try removeProject(db, "qa-tool");
+}
+
+test "a project that isn't a code repo runs its tickets in the queue, with no automated review" {
+    const ctx = testCtx();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try Db.open(":memory:");
+    defer db.close();
+    try migrate(db);
+    // Projects are code repos unless told otherwise; their tickets say which.
+    try addProject(db, .{ .name = "qa", .dir = "/x/qa", .mode = .worktree, .auto_review = .on });
+    try testing.expect((try getProject(db, a, "qa")).repo);
+    try testing.expect((try getTicket(db, a, try createTicket(ctx, db, a, .{ .project = "qa", .title = "Code", .mode = .queue }))).repo);
+
+    // Not one: no worktrees or automated reviews, from the start.
+    try testing.expectError(error.NoRepo, addProject(db, .{ .name = "me", .dir = "/x/me", .repo = false, .mode = .worktree }));
+    try testing.expectError(error.NoRepo, addProject(db, .{ .name = "me", .dir = "/x/me", .repo = false, .auto_review = .send }));
+    try addProject(db, .{ .name = "me", .dir = "/x/me", .repo = false });
+    const p = try getProject(db, a, "me");
+    try testing.expect(!p.repo);
+    try testing.expectEqual(Mode.queue, p.mode);
+    try testing.expectError(error.NoRepo, updateProject(db, "me", .{ .name = "", .dir = "", .mode = .worktree }));
+    try testing.expectError(error.NoRepo, updateProject(db, "me", .{ .name = "", .dir = "", .auto_review = .on }));
+    // Its tickets: the queue only.
+    try testing.expectError(error.NoRepo, createTicket(ctx, db, a, .{ .project = "me", .title = "Call the bank", .mode = .worktree }));
+    const k = try createTicket(ctx, db, a, .{ .project = "me", .title = "Call the bank" });
+    const t = try getTicket(db, a, k);
+    try testing.expect(!t.repo);
+    try testing.expectEqual(Mode.queue, t.mode);
+    try testing.expectError(error.NoRepo, updateTicket(ctx, db, a, k, .{ .mode = .worktree, .title = "Changed" }));
+    // Refused whole: nothing else in the edit was made either.
+    try testing.expectEqualStrings("Call the bank", (try getTicket(db, a, k)).title);
+
+    // Made a code repo again, it can have them.
+    try updateProject(db, "me", .{ .name = "", .dir = "", .repo = true, .mode = .worktree });
+    try testing.expect((try getProject(db, a, "me")).repo);
+    try updateTicket(ctx, db, a, k, .{ .mode = .worktree });
+
+    // A code repo made repo-less goes to the queue and drops its automated reviews.
+    try updateProject(db, "qa", .{ .name = "", .dir = "", .repo = false });
+    const q = try getProject(db, a, "qa");
+    try testing.expect(!q.repo);
+    try testing.expectEqual(Mode.queue, q.mode);
+    try testing.expectEqual(AutoReview.off, q.auto_review);
+    // Asking for a worktree with it is refused, and changes nothing.
+    try testing.expectError(error.NoRepo, updateProject(db, "me", .{ .name = "", .dir = "", .repo = false, .mode = .worktree }));
+    try testing.expect((try getProject(db, a, "me")).repo);
+}
+
+test "what only a code repo has is refused, cleared or carried off when a project isn't one" {
+    const ctx = testCtx();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try Db.open(":memory:");
+    defer db.close();
+    try migrate(db);
+    // Target branch, push and after-merge command: none for a repo-less project.
+    for ([_]ProjectInput{
+        .{ .name = "me", .dir = "/x/me", .repo = false, .onto = "feature" },
+        .{ .name = "me", .dir = "/x/me", .repo = false, .push_after_merge = "origin" },
+        .{ .name = "me", .dir = "/x/me", .repo = false, .after_merge = "make install" },
+    }) |in| {
+        try testing.expectError(error.NoRepo, checkNewProject(db, in));
+        try testing.expectError(error.NoRepo, addProject(db, in));
+    }
+    try addProject(db, .{ .name = "me", .dir = "/x/me", .repo = false, .onto = "", .push_after_merge = "" });
+    try testing.expectError(error.NoRepo, updateProject(db, "me", .{ .name = "", .dir = "", .onto = "feature" }));
+    try testing.expectError(error.NoRepo, updateProject(db, "me", .{ .name = "", .dir = "", .push_after_merge = "origin" }));
+    // checkNewProject checks before anything exists: a name taken is refused.
+    try testing.expectError(error.Exists, checkNewProject(db, .{ .name = "me", .dir = "" }));
+    // Its tickets get no target branch, given or inherited.
+    try testing.expectError(error.NoRepo, createTicket(ctx, db, a, .{ .project = "me", .title = "Errand", .onto = "feature" }));
+    const k = try createTicket(ctx, db, a, .{ .project = "me", .title = "Errand" });
+    try testing.expectError(error.NoRepo, updateTicket(ctx, db, a, k, .{ .onto = "feature" }));
+
+    // A code repo with all of them, made repo-less: they're cleared.
+    try addProject(db, .{ .name = "qa", .dir = "/x/qa", .onto = "feature", .push_after_merge = "origin", .after_merge = "make" });
+    const sub = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Code", .onto = "feature" });
+    // A refused change changes nothing: here the prefix is taken.
+    try testing.expectError(error.Exists, updateProject(db, "qa", .{ .name = "", .dir = "", .repo = false, .prefix = "ME" }));
+    try testing.expect((try getProject(db, a, "qa")).repo);
+    // Unfinished work in the repo holds it back (a worktree ticket here).
+    const w = try createTicket(ctx, db, a, .{ .project = "qa", .title = "In a worktree", .mode = .worktree });
+    try testing.expectError(error.RepoWork, updateProject(db, "qa", .{ .name = "", .dir = "", .repo = false }));
+    try db.exec("UPDATE tickets SET stage = 'done' WHERE key = ?1", .{w});
+    try db.exec("UPDATE tickets SET onto = '' WHERE key = ?1", .{sub});
+    try updateProject(db, "qa", .{ .name = "", .dir = "", .repo = false });
+    const q = try getProject(db, a, "qa");
+    try testing.expectEqualStrings("", q.onto);
+    try testing.expectEqualStrings("", q.push_after_merge);
+    try testing.expectEqualStrings("", q.after_merge);
+    try testing.expectEqualStrings("", (try getTicket(db, a, sub)).onto);
+
+    // Moving a ticket into a repo-less project goes by that project's repo.
+    try addProject(db, .{ .name = "code", .dir = "/x/code", .prefix = "CO" });
+    const c1 = try createTicket(ctx, db, a, .{ .project = "code", .title = "Worktree one", .mode = .worktree, .onto = "feature" });
+    try testing.expectError(error.NoRepo, updateTicket(ctx, db, a, c1, .{ .project = "me", .mode = .worktree }));
+    try testing.expectEqualStrings("code", (try getTicket(db, a, c1)).project);
+    // Without work under way it goes to the queue, with no target branch.
+    try updateTicket(ctx, db, a, c1, .{ .project = "me" });
+    const moved = try getTicket(db, a, c1);
+    try testing.expectEqualStrings("me", moved.project);
+    try testing.expectEqual(Mode.queue, moved.mode);
+    try testing.expectEqualStrings("", moved.onto);
+    try testing.expect(!moved.repo);
+    // With a jj change of its own, it is refused: the work would be left behind.
+    const c2 = try createTicket(ctx, db, a, .{ .project = "code", .title = "Has a change" });
+    try db.exec("UPDATE tickets SET change_id = 'abc' WHERE key = ?1", .{c2});
+    try testing.expectError(error.RepoWork, updateTicket(ctx, db, a, c2, .{ .project = "me" }));
+}
+
+test "an older board's projects are code repos" {
+    const db = try Db.open(":memory:");
+    defer db.close();
+    try migrate(db);
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    try addProject(db, .{ .name = "qa", .dir = "/x/qa" });
+    try db.execMulti("ALTER TABLE projects DROP COLUMN repo");
+    try migrate(db);
+    try testing.expect((try getProject(db, arena_state.allocator(), "qa")).repo);
 }
 
 test "hidden projects: their tickets leave the shown lists, not the dispatcher's" {

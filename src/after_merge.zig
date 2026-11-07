@@ -58,7 +58,8 @@ pub fn start(ctx: Ctx, db: board.Db, a: std.mem.Allocator, project: []const u8, 
 
 /// The project has something to run after a merge: a command, or a push.
 pub fn runs(p: board.Project) bool {
-    return p.after_merge.len > 0 or p.push_after_merge.len > 0;
+    // Not a code repo: nothing merges, and its folder may be in another repo.
+    return p.repo and (p.after_merge.len > 0 or p.push_after_merge.len > 0);
 }
 
 /// Run `cl project after-merge <project> --run` detached (`Ctx.detach`), so

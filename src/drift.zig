@@ -82,6 +82,7 @@ pub fn checkAll(ctx: Ctx, db: board.Db, a: std.mem.Allocator) !void {
 }
 
 fn checkProject(ctx: Ctx, db: board.Db, a: std.mem.Allocator, p: board.Project, tickets: []const board.Ticket) !void {
+    if (!p.repo) return;
     if ((worktree.detect(ctx, a, p.dir) catch return) != .jj) return;
     const trunk = trunkOf(ctx, a, p.dir) orelse "";
     // Each target's commit, read once.

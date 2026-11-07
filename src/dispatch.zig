@@ -60,14 +60,18 @@ fn sessionFailed(err: anyerror, dir: []const u8) error{SessionFailed} {
 pub fn failureReason(err: anyerror) []const u8 {
     if (err == error.SessionFailed and why_len > 0) return why_buf[0..why_len];
     if (err == error.WorktreeFailed and worktree.lastError().len > 0) return worktree.lastError();
+    if (err == error.NoRepo) return "its project isn't a code repo, so it can't have a worktree; move it to the queue (cl ticket relocate <key> queue)";
     return @errorName(err);
 }
 
 /// What the ticket's session is told first. The key is spelled out, so the
 /// instructions work in sessions cl didn't start (no CL_TICKET). `gutter_rev`:
 /// gutter is installed, so Claude writes a review guide for it and checks it
-/// against this revision (gutter's -r, "" for its default).
-pub fn prompt(a: std.mem.Allocator, t: board.Ticket, notes: []const board.Comment, gutter_rev: ?[]const u8) ![]const u8 {
+/// against this revision (gutter's -r, "" for its default). A ticket of a
+/// project that isn't a code repo gets neither, nor anything about merging
+/// or a target branch (`Project.repo`), whatever the caller passes.
+pub fn prompt(a: std.mem.Allocator, t: board.Ticket, notes: []const board.Comment, gutter_rev_in: ?[]const u8) ![]const u8 {
+    const gutter_rev = if (t.repo) gutter_rev_in else null;
     var aw: std.Io.Writer.Allocating = .init(a);
     const w = &aw.writer;
     try w.print("Ticket {s}: {s}\n", .{ t.key, t.title });
@@ -99,11 +103,7 @@ pub fn prompt(a: std.mem.Allocator, t: board.Ticket, notes: []const board.Commen
         \\     (a heredoc, not a file): steps the board walks me through one at a time, with buttons
         \\     to run a command (`run:`, from this directory) and open a page (`open:`), and checks
         \\     ("- [ ] what I should see"). `cl ticket testplan --format` shows the format.
-        \\  If its work shouldn't be merged (or made a PR) as it is, say so first with
-        \\  `cl ticket custom-close "<what to do with it instead>"`; the board then offers only that.
-        \\  If something will be left to do once its PR merges (a deploy, a backfill), suggest it with
-        \\  `cl ticket custom-close --then "<steps>"`: finished with a PR, a follow-up ticket does it.
-        \\  Don't run it while you still need anything from me. When I send feedback, finish the same way.
+        \\{s}  Don't run it while you still need anything from me. When I send feedback, finish the same way.
         \\
     , .{
         t.key,
@@ -112,13 +112,22 @@ pub fn prompt(a: std.mem.Allocator, t: board.Ticket, notes: []const board.Commen
         if (t.change.len == 0 and t.mode == .worktree) "Commit your work on this branch (the review shows commits and new files that way). " else "",
         t.key,
         @as(u8, if (gutter_rev != null) 3 else 2),
+        // Not a code repo: nothing gets merged or made a PR (`Project.repo`).
+        if (t.repo)
+            \\  If its work shouldn't be merged (or made a PR) as it is, say so first with
+            \\  `cl ticket custom-close "<what to do with it instead>"`; the board then offers only that.
+            \\  If something will be left to do once its PR merges (a deploy, a backfill), suggest it with
+            \\  `cl ticket custom-close --then "<steps>"`: finished with a PR, a follow-up ticket does it.
+            \\
+        else
+            "",
     });
     if (t.change.len > 0) try w.print(
         \\- This is a jj repo, and your work goes into the ticket's jj change {s}{s}{s} by itself:
         \\  don't commit (git or jj), start other changes or switch branches. When it's done, cl merges it.
         \\
     , .{ t.change[0..@min(t.change.len, 12)], if (t.branch.len > 0) ", bookmark " else "", t.branch });
-    if (t.onto.len > 0) try w.print(
+    if (t.repo and t.onto.len > 0) try w.print(
         \\- This ticket targets the branch {s}, not trunk: {s}. Don't merge it into trunk
         \\  (master/main) or base it there; when {s} goes into trunk is my decision, not this ticket's.
         \\
@@ -153,6 +162,8 @@ pub const PlanDir = union(enum) {
     trunk: []const u8,
     /// The project's checkout (no workspace could be made).
     checkout,
+    /// The project's directory, which isn't a code repo (`Project.repo`).
+    folder,
 };
 
 /// What a planning session is told first: plan only, then hand the plan in
@@ -175,6 +186,7 @@ pub fn planPrompt(a: std.mem.Allocator, t: board.Ticket, notes: []const board.Co
     switch (where) {
         .trunk => |rev| try w.print("You're in a read-only copy of the project at {s}, for reading the code; it goes away when planning ends.\n", .{rev}),
         .checkout => try w.writeAll("You're in the project's checkout, which may hold another ticket's unfinished work: read it as the code to plan against, but its files may not be what is merged.\n"),
+        .folder => try w.writeAll("You're in the project's folder (it isn't a code repo); read what's there as you need.\n"),
     }
     try w.writeAll("\nAsk me with AskUserQuestion until the plan is clear");
     if (t.skill.len > 0) try w.print(" (use the {s} skill for the interview)", .{t.skill});
@@ -452,18 +464,23 @@ fn startPlanning(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocato
     const p = try board.getProject(db, a, t.project);
     if (!try board.claimStart(db, t.id)) return error.AlreadyStarted;
     errdefer board.releaseStart(db, t.id) catch {};
-    _ = worktree.ensureJj(ctx, a, p.dir);
-    // On its target: the code it will be built on.
-    const trunk = worktree.target(ctx, a, p.dir, t.onto) orelse if (t.onto.len > 0) t.onto else null;
-    const path = try worktree.planPath(ctx, a, cfg, p.name, t.key);
-    var dir = path;
-    var where: PlanDir = .{ .trunk = trunk orelse "HEAD" };
-    worktree.createPlan(ctx, a, p.dir, path, trunk) catch |err| {
-        if (err == error.OutOfMemory) return err;
-        try board.logEvent(ctx, db, t.id, "no planning workspace", worktree.lastError());
-        dir = p.dir;
-        where = .checkout;
-    };
+    var dir = p.dir;
+    var where: PlanDir = .folder;
+    // Not a code repo: it plans in the project's directory.
+    if (p.repo) {
+        _ = worktree.ensureJj(ctx, a, p.dir);
+        // On its target: the code it will be built on.
+        const trunk = worktree.target(ctx, a, p.dir, t.onto) orelse if (t.onto.len > 0) t.onto else null;
+        const path = try worktree.planPath(ctx, a, cfg, p.name, t.key);
+        dir = path;
+        where = .{ .trunk = trunk orelse "HEAD" };
+        worktree.createPlan(ctx, a, p.dir, path, trunk) catch |err| {
+            if (err == error.OutOfMemory) return err;
+            try board.logEvent(ctx, db, t.id, "no planning workspace", worktree.lastError());
+            dir = p.dir;
+            where = .checkout;
+        };
+    }
     const resume_id = resumeId(ctx, cfg, a, t, dir, t.profile);
     const notes = try board.unsentNotes(db, a, t.id);
     const text = if (resume_id != null) try resumePrompt(a, t, notes) else try planPrompt(a, t, notes, where);
@@ -565,6 +582,8 @@ pub const Relocated = enum {
 /// is queued or beyond (`startSwitched`), not on the dispatcher's next pass.
 pub fn relocate(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: board.Ticket, to: board.Mode) !Relocated {
     if (t.mode == to) return .mode;
+    // Nothing to make a worktree of (`Project.repo`).
+    if (to == .worktree and !t.repo) return error.NoRepo;
     const r = try relocateMode(ctx, cfg, db, a, t, to);
     if (r != .mode or to != .worktree) return r;
     return startSwitched(ctx, cfg, db, a, t.key);
@@ -712,17 +731,20 @@ fn startIn(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: 
     // when forced, or another ticket's conversation would be cut off.
     const can_force = force and (resume_id == null or open_here);
     if (t.mode == .queue and !can_force and !free and (live or busy)) return error.TargetBusy;
+    if (!p.repo and t.mode == .worktree) return error.NoRepo;
     if (!try board.claimStart(db, t.id)) return error.AlreadyStarted;
     errdefer board.releaseStart(db, t.id) catch {};
+    // A project that isn't a code repo (`Project.repo`) gets none of what
+    // follows: no jj, base, change or worktree.
     // Projects added before jj was set up on add get it on their first start.
-    if (worktree.ensureJj(ctx, a, p.dir)) try board.logEvent(ctx, db, t.id, "jj init", p.dir);
+    if (p.repo and worktree.ensureJj(ctx, a, p.dir)) try board.logEvent(ctx, db, t.id, "jj init", p.dir);
     // What gutter will diff against: the repo as it is now.
-    const base = worktree.baseRev(ctx, a, p.dir, t.onto);
+    const base = if (p.repo) worktree.baseRev(ctx, a, p.dir, t.onto) else "";
     try board.setBase(db, t.id, base);
     // jj: the ticket's own change, on top of trunk (or its target branch). A
     // queue ticket takes the project's checkout over only when it gets the
     // session to itself.
-    const trunk = worktree.target(ctx, a, p.dir, t.onto);
+    const trunk = if (p.repo) worktree.target(ctx, a, p.dir, t.onto) else null;
     if (trunk != null) worktree.excludeClFiles(ctx, a, p.dir);
     const desc = try std.fmt.allocPrint(a, "{s}: {s}", .{ t.key, t.title });
     var tc = t;
@@ -761,7 +783,7 @@ fn startIn(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: 
         },
     }
     const notes = try board.unsentNotes(db, a, t.id);
-    const body = if (resume_id != null) try resumePrompt(a, tc, notes) else try prompt(a, tc, notes, if (review.findGutter(ctx, a, cfg) != null)
+    const body = if (resume_id != null) try resumePrompt(a, tc, notes) else try prompt(a, tc, notes, if (p.repo and review.findGutter(ctx, a, cfg) != null)
         try worktree.reviewRev(ctx, a, if (wt.path.len > 0) wt.path else p.dir, base, tc.change)
     else
         null);
@@ -943,6 +965,8 @@ const restarted_suffix = " (restarted with its hooks)";
 /// the commit below it. Without one, finishing it can only close it.
 /// Returns the change taken, or "".
 fn attachChange(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, repo: []const u8) ![]const u8 {
+    // Not a code repo: nothing to take (`Project.repo`).
+    if (!t.repo) return "";
     var taken: []const u8 = "";
     if (t.change.len == 0) if (worktree.target(ctx, a, repo, t.onto)) |trunk| {
         if (worktree.unclaimedWork(ctx, a, repo, trunk)) |c| {
@@ -2164,6 +2188,82 @@ test "a ticket with a target branch starts on it, queued or in a worktree, and i
     // A ticket on trunk hears nothing of the kind.
     t.onto = "";
     try std.testing.expect(std.mem.indexOf(u8, try prompt(a, t, &.{}, null), "targets the branch") == null);
+}
+
+test "a ticket of a project that isn't a code repo gets no jj, base or change, and its session no review guide or merge" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    // perm: what a session start keeps (its name) goes with the arena.
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = a, .env = undefined, .home = "/tmp", .tmux_blocked = true };
+    const sh = struct {
+        fn run(c: Ctx, al: std.mem.Allocator, argv: []const []const u8) ![]const u8 {
+            const r = try std.process.run(al, c.io, .{ .argv = argv });
+            if (r.term != .exited or r.term.exited != 0) return error.CommandFailed;
+            return std.mem.trim(u8, r.stdout, " \n");
+        }
+    }.run;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = try tmp.dir.realPathFileAlloc(ctx.io, ".", a);
+    // Inside a git repo, as a notes folder in a dotfiles repo might be: cl
+    // must leave that repo alone, not take it for the project's.
+    _ = sh(ctx, a, &.{ "git", "init", "-q", "-b", "master", base }) catch return error.SkipZigTest;
+    _ = try sh(ctx, a, &.{ "git", "-C", base, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init" });
+    const dir = try std.fmt.allocPrint(a, "{s}/todo", .{base});
+    try std.Io.Dir.cwd().createDirPath(ctx.io, dir);
+
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "me", .dir = dir, .repo = false });
+    var profiles = [_]config.Profile{.{ .name = "work", .config_dir = "/h/.claude-work" }};
+    const cfg: config.Config = .{ .profiles = &profiles, .default = "work", .operator = "work" };
+    const k = try board.createTicket(ctx, db, a, .{ .project = "me", .title = "Book the venue", .stage = .queued });
+
+    // No worktree to move to.
+    try std.testing.expectError(error.NoRepo, relocate(ctx, cfg, db, a, try board.getTicket(db, a, k), .worktree));
+
+    // Started (its session can't, tmux being blocked here): no jj set up,
+    // no base for a review, no change.
+    const none: View = .{ .sessions = &.{}, .statuses = .empty };
+    try std.testing.expectError(error.SessionFailed, startIn(ctx, cfg, db, a, try board.getTicket(db, a, k), false, none, false));
+    const t = try board.getTicket(db, a, k);
+    try std.testing.expectEqualStrings("", t.base);
+    try std.testing.expectEqualStrings("", t.change);
+    try std.testing.expect(!try board.hasEvent(db, t.id, "jj init"));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(ctx.io, try std.fmt.allocPrint(a, "{s}/.jj", .{base}), .{}));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(ctx.io, try std.fmt.allocPrint(a, "{s}/.jj", .{dir}), .{}));
+
+    // What its session is told: how to finish, with nothing about merging or PRs.
+    const text = try prompt(a, t, &.{}, null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Run `cl ticket done QA-1") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "1. Run `cl ticket done ME-1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "custom-close") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "review guide") == null);
+    // Whatever a caller passes (attaching a session does its own): no review
+    // guide, and no target branch, even one set on it from before.
+    var onto = t;
+    onto.onto = "feature";
+    const passed = try prompt(a, onto, &.{}, "");
+    try std.testing.expect(std.mem.indexOf(u8, passed, "review guide") == null);
+    try std.testing.expect(std.mem.indexOf(u8, passed, "targets the branch") == null);
+    var code = onto;
+    code.repo = true;
+    const code_text = try prompt(a, code, &.{}, "");
+    for ([_][]const u8{ "custom-close", "review guide", "targets the branch feature" }) |want| try std.testing.expect(std.mem.indexOf(u8, code_text, want) != null);
+
+    // Planning: in the project's folder, no workspace or jj, and told it's a folder.
+    var planCfg = cfg;
+    planCfg.board.worktrees = try std.fmt.allocPrint(a, "{s}/wt", .{base});
+    const kp = try board.createTicket(ctx, db, a, .{ .project = "me", .title = "Plan the trip", .plan = true });
+    try std.testing.expectError(error.SessionFailed, startPlanning(ctx, planCfg, db, a, try board.getTicket(db, a, kp)));
+    try std.testing.expect(!try board.hasEvent(db, (try board.getTicket(db, a, kp)).id, "no planning workspace"));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(ctx.io, planCfg.board.worktrees, .{}));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(ctx.io, try std.fmt.allocPrint(a, "{s}/.jj", .{base}), .{}));
+    const plan_text = try planPrompt(a, t, &.{}, .folder);
+    try std.testing.expect(std.mem.indexOf(u8, plan_text, "isn't a code repo") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plan_text, "unfinished work") == null);
 }
 
 test "attach refuses another ticket's session and a ticket with a live one" {

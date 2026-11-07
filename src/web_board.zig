@@ -198,6 +198,8 @@ pub fn handle(ctx: Ctx, cfg: config.Config, req: *std.http.Server.Request, path:
             error.MergeFailed => .{ .internal_server_error, worktree.lastError() },
             error.SharedSession => .{ .conflict, "another ticket is in progress in its session, so stopping it would cut that one off; move or finish that ticket first, or kill the session for both" },
             error.Starting => .{ .conflict, "it is starting right now; try again in a moment" },
+            error.NoRepo => .{ .conflict, "its project isn't a code repo: no worktrees, target branches or automated reviews there; its tickets run in the queue" },
+            error.RepoWork => .{ .conflict, "it has work in a code repo (a worktree, jj change or branch), which a project that isn't one can't take; finish it first" },
             error.Sqlite => .{ .internal_server_error, db.message() },
             error.VoiceOff, error.SpeechFailed => .{ voiceStatus(err), voiceDetail(a, err, "voice.tts") catch voiceMessage(err) },
             else => .{ .internal_server_error, @errorName(err) },
@@ -257,6 +259,8 @@ const Body = struct {
     /// Project: whether a ticket reaching Review gets an automated review by itself.
     auto_review: ?board.AutoReview = null,
     push_after_merge: ?[]const u8 = null,
+    /// Project: a code repo (`board.Project.repo`); false for one that isn't.
+    repo: ?bool = null,
     /// Ticket or project: the branch it targets ("" for trunk / the project's).
     onto: ?[]const u8 = null,
     /// finish "tell": what Claude should do first.
@@ -356,7 +360,10 @@ fn route(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: 
             const adopt_ctx: AdoptCtx = .{ .ctx = ctx, .cfg = cfg };
             if (nonEmpty(b.onto)) |o| {
                 const pname = if (nonEmpty(b.project)) |pn| pn else (try board.getTicket(db, a, nonEmpty(b.parent) orelse return error.BadInput)).project;
-                try checkOnto(ctx, a, (try board.getProject(db, a, pname)).dir, o);
+                const tp = try board.getProject(db, a, pname);
+                // Repo-less, createTicket refuses it: no repo to look it up in.
+                if (!tp.repo) return error.NoRepo;
+                try checkOnto(ctx, a, tp.dir, o);
             }
             const key = try board.createTicket(ctx, db, a, .{
                 .project = b.project orelse "",
@@ -424,11 +431,10 @@ fn route(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: 
     }
     if (std.mem.eql(u8, what, "project")) {
         if (name.len == 0) {
-            const dir = try realDir(ctx, a, b.dir orelse return error.BadInput);
-            if (nonEmpty(b.onto)) |o| try checkOnto(ctx, a, dir, o);
-            board.addProject(db, .{
+            const repo = b.repo orelse true;
+            var in: board.ProjectInput = .{
                 .name = b.name orelse "",
-                .dir = dir,
+                .dir = "",
                 .prefix = nonEmpty(b.prefix),
                 .slots = b.slots,
                 .planners = b.planners,
@@ -440,14 +446,28 @@ fn route(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: 
                 .auto_review = b.auto_review,
                 .onto = b.onto,
                 .push_after_merge = b.push_after_merge,
-            }) catch |e| return projectFail(req, e);
-            _ = worktree.ensureJj(ctx, a, dir);
+                .repo = repo,
+            };
+            // Everything checked before a directory is made for it.
+            board.checkNewProject(db, in) catch |e| return projectFail(req, e);
+            // Not a code repo: its directory is made if it is missing.
+            if (!repo) if (nonEmpty(b.dir)) |d| {
+                const expanded = try ctx.expandHome(d);
+                defer ctx.gpa.free(expanded);
+                std.Io.Dir.cwd().createDirPath(ctx.io, expanded) catch return error.NoSuchDir;
+            };
+            in.dir = try realDir(ctx, a, b.dir orelse return error.BadInput);
+            const dir = in.dir;
+            if (repo) if (nonEmpty(b.onto)) |o| try checkOnto(ctx, a, dir, o);
+            board.addProject(db, in) catch |e| return projectFail(req, e);
+            if (repo) _ = worktree.ensureJj(ctx, a, dir);
             return ok(req, a, .{ .ok = true });
         }
         if (std.mem.eql(u8, action, "set")) {
             if (nonEmpty(b.onto)) |o| {
                 const cur = try board.getProject(db, a, name);
-                if (!std.mem.eql(u8, o, cur.onto)) try checkOnto(ctx, a, if (b.dir) |d| try realDir(ctx, a, d) else cur.dir, o);
+                // Repo-less, updateProject refuses it: no repo to look it up in.
+                if (!std.mem.eql(u8, o, cur.onto) and (b.repo orelse cur.repo)) try checkOnto(ctx, a, if (b.dir) |d| try realDir(ctx, a, d) else cur.dir, o);
             }
             board.updateProject(db, name, .{
                 .name = b.name orelse "",
@@ -463,6 +483,7 @@ fn route(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: 
                 .auto_review = b.auto_review,
                 .onto = b.onto,
                 .push_after_merge = b.push_after_merge,
+                .repo = b.repo,
             }) catch |e| return projectFail(req, e);
         } else if (std.mem.eql(u8, action, "after-merge")) {
             if (!after_merge.runs(try board.getProject(db, a, name))) return error.BadInput;
@@ -540,6 +561,8 @@ fn projectFail(req: *std.http.Server.Request, err: board.Error) !void {
     return switch (err) {
         error.Exists => fail(req, .conflict, "another project already has that name or key prefix"),
         error.BadInput => fail(req, .bad_request, "a project needs a name and a directory, and a key prefix is up to 8 capital letters and digits"),
+        error.NoRepo => fail(req, .bad_request, "a project that isn't a code repo runs its tickets in the queue, with no automated review, target branch, push or after-merge command"),
+        error.RepoWork => fail(req, .conflict, "tickets that aren't done have work in the repo (a worktree, jj change or branch): finish them first"),
         else => err,
     };
 }
@@ -567,7 +590,12 @@ fn ticketAction(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator
         if (nonEmpty(b.onto)) |o| {
             const cur = try board.getTicket(db, a, key);
             // Unchanged: no need to look again.
-            if (!std.mem.eql(u8, o, cur.onto_own)) try checkOnto(ctx, a, (try board.getProject(db, a, nonEmpty(b.project) orelse cur.project)).dir, o);
+            if (!std.mem.eql(u8, o, cur.onto_own)) {
+                const tp = try board.getProject(db, a, nonEmpty(b.project) orelse cur.project);
+                // Repo-less, updateTicket refuses it: no repo to look it up in.
+                if (!tp.repo) return error.NoRepo;
+                try checkOnto(ctx, a, tp.dir, o);
+            }
         }
         try board.updateTicket(ctx, db, a, key, .{
             .project = b.project orelse "",
@@ -1092,7 +1120,7 @@ fn getTicket(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, r
         .autoreview_message = if (ar) |r| (if (std.mem.eql(u8, r.status, "done")) try autoreview.message(a, r) else "") else "",
         .autoreview_session = try autoreview.sessionName(a, t.key),
         // gutter is installed: the board offers it for review.
-        .gutter = review.findGutter(ctx, a, cfg) != null,
+        .gutter = t.repo and review.findGutter(ctx, a, cfg) != null,
         .main_branch = if (t.branch.len > 0 or t.change.len > 0) worktree.mergeBranch(ctx, a, (try board.getProject(db, a, t.project)).dir, t.onto) else "",
     });
 }
