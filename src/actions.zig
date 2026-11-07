@@ -903,11 +903,6 @@ pub fn gutterSubmitted(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []cons
 /// a gutter review and kept as a comment, which starts another round.
 /// error.NoFindings unless a finished review has some (or your edit).
 pub fn autoreviewSend(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8) !CommentResult {
-    return sendFindings(ctx, db, a, key, false);
-}
-
-/// `autoreviewSend`; `by_cl` records that cl sent them itself (`Review.auto_sent`).
-fn sendFindings(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, by_cl: bool) !CommentResult {
     const t = try board.getTicket(db, a, key);
     var r = autoreview.load(a, t) orelse return error.NoFindings;
     if (!autoreview.usable(r)) return error.NoFindings;
@@ -916,7 +911,6 @@ fn sendFindings(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, b
     const msg = try autoreview.message(a, r);
     try tmux.pasteText(ctx, s, msg);
     r.sent = ctx.nowSeconds();
-    r.auto_sent = by_cl;
     // Marked sent only if it is still the review that was sent (not a new
     // one started meanwhile).
     _ = try board.setAutoreviewIf(db, t.id, try std.fmt.allocPrint(a, "{f}", .{std.json.fmt(r, .{})}), t.autoreview);
@@ -934,7 +928,7 @@ pub fn afterAutoreview(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []cons
     const t = board.getTicket(db, a, key) catch return;
     const r = autoreview.load(a, t) orelse return;
     if (!autoreview.sendsItself(r, t)) return;
-    if (sendFindings(ctx, db, a, key, true)) |_| {
+    if (autoreviewSend(ctx, db, a, key)) |_| {
         board.logEvent(ctx, db, t.id, "autoreview sent by itself", "") catch {};
         return;
     } else |e| board.logEvent(ctx, db, t.id, "autoreview not sent", switch (e) {

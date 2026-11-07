@@ -1708,6 +1708,11 @@ fn touch(ctx: Ctx, db: Db, id: i64) Error!void {
     try db.exec("UPDATE tickets SET updated = ?2 WHERE id = ?1", .{ id, now(ctx) });
 }
 
+/// Whether the ticket's log has an event of `kind`.
+pub fn hasEvent(db: Db, id: i64, kind: []const u8) Error!bool {
+    return (try db.int("SELECT 1 FROM events WHERE ticket = ?1 AND kind = ?2 LIMIT 1", .{ id, kind })) != null;
+}
+
 pub fn logEvent(ctx: Ctx, db: Db, id: i64, kind: []const u8, detail: []const u8) Error!void {
     try db.exec("INSERT INTO events (ticket, kind, detail, at) VALUES (?1, ?2, ?3, ?4)", .{ id, kind, detail, now(ctx) });
 }

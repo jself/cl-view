@@ -1113,12 +1113,14 @@ done for it), the review starts right away, so the ticket reaches Needs You with
 instead of waiting for you to press Auto review. `--auto-review send` also
 sends what it finds to Claude, as Send findings would, for one round; when
 Claude finishes that round, the ticket waits for you with the old findings and
-Claude's answer, and isn't reviewed again by itself (so the two don't go back
-and forth with nobody looking). A review with no findings sends nothing.
-Either way it runs once per round: not again when Claude says done twice in
-one round, but again in a round you start (your comment, or findings you sent
-yourself). A ticket with no changes, or one whose reviewer can't start, is
-skipped (its log says why) and is in Needs You as usual; so are findings cl
+Claude's answer. A review with no findings sends nothing.
+Either way it runs only the first time a ticket reaches Review: not again when
+it comes back (Claude says done twice, answers the findings, or finishes a
+round you started with a comment), so the two don't go back and forth with
+nobody looking. Auto review still runs one whenever you press it. A ticket
+with no changes, or one whose reviewer can't start, is skipped (its log says
+why, and the next time it reaches Review tries again; so does one whose
+automatic review failed) and is in Needs You as usual; so are findings cl
 couldn't send because the ticket's session is gone. With send, the ticket
 only comes back to Needs You if cl couldn't send them, or once Claude has
 answered. If you approve or send the
