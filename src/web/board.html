@@ -104,6 +104,8 @@
          border-radius: calc(12 * var(--u)); padding: calc(12 * var(--u)); display: flex; flex-direction: column; gap: calc(8 * var(--u)); }
   .ask .what { font-size: calc(12.5 * var(--u)); color: var(--dim); line-height: 1.45; overflow-wrap: anywhere;
                display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
+  /* Its top line is a card's: key, then a live session's shell icon and the age at the right. */
+  .ask-top { display: flex; align-items: center; gap: calc(8 * var(--u)); font: calc(11.5 * var(--u)) var(--mono); color: var(--muted); } .ask-top .grow { flex: 1; }
   .ask .acts { display: flex; flex-wrap: wrap; gap: calc(6 * var(--u)); margin-top: auto; }
   .ask[data-ask] { cursor: pointer; } .ask[data-ask] .acts { cursor: default; }
   .ask[data-ask]:hover { border-color: #3a3c42; }
@@ -1000,15 +1002,15 @@ function renderNeeds() {
       : f.kind === "idle" ? `<button type="button" class="btn primary" data-open="${esc(t.key)}" data-tab="session">Open session</button>`
       : f.kind === "ready-to-close" ? `<button type="button" class="btn primary" data-to-done="${esc(t.key)}" title="Move it to Done (it asks how to finish when it has a branch of its own)">Move to Done</button>`
       : `<button type="button" class="btn primary" data-open="${esc(t.key)}" data-tab="needs">Open</button>`;
-    const shell = t.tmux && r.status && r.status !== "gone" ? `<a class="btn" href="${shellHref(t)}">Shell</a>` : "";
     // Hiding keeps the flags (the card still shows them); a new flag brings it back.
     const hide = isHidden ? `<button type="button" class="btn" data-unhide="${esc(t.key)}" title="Put it back in Needs you">Unhide</button>`
       : `<button type="button" class="btn" data-hide="${esc(t.key)}" title="Take it out of Needs you until it raises a new flag; its card keeps the flag">Hide</button>`;
     const dismiss = dismissable(f) ? `<button type="button" class="btn" data-dismiss="${esc(t.key)}" data-kind="${esc(f.kind)}" title="${DISMISS_TIP}">Dismiss</button>` : "";
     // Its text (not its buttons) opens the ticket, as its card does.
-    return `<div class="ask${isHidden ? " hidden" : ""}" tabindex="-1" data-ask="${esc(t.key)}"><div class="pills"><span class="pill ${flagClass(f.kind)}">${esc(flagLabel(f))}</span>${isHidden ? `<span class="pill">Hidden</span>` : ""}${f.kind === "review" || f.kind === "testing" ? reviewNote(t) : ""}<span class="mono muted" style="font-size:calc(11.5 * var(--u))">${esc(t.key)} · ${ago(f.at)}</span></div>
+    return `<div class="ask${isHidden ? " hidden" : ""}" tabindex="-1" data-ask="${esc(t.key)}"><div class="ask-top"><span>${esc(t.key)}</span><span class="grow"></span>${shellIcon(r, true)}<span>${ago(f.at)}</span></div>
+      <div class="pills"><span class="pill ${flagClass(f.kind)}">${esc(flagLabel(f))}</span>${isHidden ? `<span class="pill">Hidden</span>` : ""}${f.kind === "review" || f.kind === "testing" ? reviewNote(t) : ""}</div>
       <div style="font-weight:500">${esc(t.title)}</div><div class="what" title="${esc(askText(t, f))}">${esc(askLine(t, f, quick))}</div>
-      ${quick ? `<div class="acts">${quick}</div>` : ""}<div class="acts">${main}${shell}${hide}${dismiss}</div></div>`;
+      ${quick ? `<div class="acts">${quick}</div>` : ""}<div class="acts">${main}${hide}${dismiss}</div></div>`;
   }).join(""));
   // Dismiss all: one button per kind that can be dismissed, when two or more cards shown have it.
   const byKind = {};
