@@ -378,6 +378,15 @@ pub fn strayWork(ctx: Ctx, a: std.mem.Allocator, dir: []const u8, trunk: []const
     return if (hit.len == 1) hit[0] else null;
 }
 
+/// The working copy's change when no one has claimed it yet: no
+/// description, not in trunk (empty or not). A session attached to a ticket
+/// works there, so that is the ticket's change.
+pub fn unclaimedWork(ctx: Ctx, a: std.mem.Allocator, dir: []const u8, trunk: []const u8) ?[]const u8 {
+    const revs = std.fmt.allocPrint(a, "@ & description(exact:\"\") & ~::{s}", .{sym(a, trunk) catch return null}) catch return null;
+    const hit = changes(ctx, a, dir, revs) catch return null;
+    return if (hit.len == 1) hit[0] else null;
+}
+
 /// Make the working copy's change a ticket's own: describe it `desc` and
 /// put `bookmark` on it (see `mark`).
 pub fn adoptChange(ctx: Ctx, a: std.mem.Allocator, dir: []const u8, desc: []const u8, bookmark: []const u8) Error!Change {

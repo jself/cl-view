@@ -772,6 +772,244 @@ fn startIn(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: 
     try board.logEvent(ctx, db, t.id, "started", now_t.tmux);
 }
 
+pub const AttachError = error{
+    /// No cl session by that name.
+    NoSuchSession,
+    /// Its pane is dead: there's no Claude there to attach.
+    PaneDead,
+    /// The session runs outside the ticket's project.
+    OtherProject,
+    Finished,
+    Planning,
+    Umbrella,
+    /// The dispatcher (or a start) is starting it right now.
+    Starting,
+    /// It has a live session of its own already, another one.
+    AlreadyStarted,
+    /// Another unfinished ticket's session (`attachOwner` says which).
+    SessionTaken,
+};
+
+pub const Attached = struct {
+    /// The session's tmux name.
+    session: []const u8,
+    /// Claude was restarted there, resuming its conversation (or a new one),
+    /// with the ticket's hooks and CL_TICKET, and told about the ticket.
+    restarted: bool,
+    /// It resumed the conversation it had there (else, having none yet, a new one).
+    resumed: bool = false,
+    /// It was the ticket's session already, with its hooks, and Claude had
+    /// been told the ticket in this conversation: nothing to restart.
+    told: bool = false,
+    /// What Claude was doing there when it wasn't restarted.
+    status: claude.Status,
+    /// It was the ticket's session already.
+    again: bool,
+    /// The jj change it took as the ticket's ("" none).
+    adopted: []const u8 = "",
+};
+
+/// The session `name` (cl name or tmux name) in `view`.
+fn findSession(view: View, name: []const u8) ?tmux.Session {
+    for (view.sessions) |s| if (std.mem.eql(u8, s.name, name) or std.mem.eql(u8, s.tmux_name, name)) return s;
+    return null;
+}
+
+/// The unfinished ticket other than `id` that session `tmux_name` belongs
+/// to, if any: a session is one ticket's at a time.
+pub fn attachOwner(db: board.Db, a: std.mem.Allocator, tmux_name: []const u8, id: i64) !?[]const u8 {
+    var st = try db.query("SELECT key FROM tickets WHERE tmux = ?1 AND id != ?2 AND stage != 'done' ORDER BY id LIMIT 1", .{ tmux_name, id });
+    defer st.finalize();
+    return if (try st.step()) try a.dupe(u8, st.text(0)) else null;
+}
+
+/// `dir` is `under` or inside it.
+fn within(dir: []const u8, under: []const u8) bool {
+    if (under.len == 0 or !std.mem.startsWith(u8, dir, under)) return false;
+    return dir.len == under.len or dir[under.len] == '/' or under[under.len - 1] == '/';
+}
+
+/// A session in `dir` works on project `p`: in its checkout (or below), the
+/// ticket's worktree, or one of the project's worktrees (`wt_root`, the
+/// board's worktrees folder).
+fn inProject(dir: []const u8, p: board.Project, t: board.Ticket, wt_root: []const u8) bool {
+    if (within(dir, p.dir) or within(dir, t.worktree)) return true;
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const pw = std.fmt.bufPrint(&buf, "{s}/{s}", .{ std.mem.trimEnd(u8, wt_root, "/"), p.name }) catch return false;
+    return within(dir, pw);
+}
+
+/// Whether `t` may take session `s` (in `view`): the refusals of `attach`.
+/// `in_project`: the session runs in the ticket's project (`inProject`).
+fn attachCheck(db: board.Db, a: std.mem.Allocator, t: board.Ticket, view: View, s: tmux.Session, in_project: bool) !void {
+    if (t.stage == .done) return error.Finished;
+    if (t.stage == .planning) return error.Planning;
+    if (t.umbrella) return error.Umbrella;
+    if (s.pane_dead) return error.PaneDead;
+    if (!in_project) return error.OtherProject;
+    if (t.tmux.len > 0 and t.tmux[0] == '(') return error.Starting;
+    if (t.tmux.len > 0 and !std.mem.eql(u8, t.tmux, s.tmux_name) and view.alive(t.tmux)) return error.AlreadyStarted;
+    if (try attachOwner(db, a, s.tmux_name, t.id) != null) return error.SessionTaken;
+}
+
+/// Take session `tmux_name` for ticket `id`, checking in the same write that
+/// no other unfinished ticket has it (two attaches at once can't both win),
+/// and that no start has claimed the ticket meanwhile.
+fn claimSession(db: board.Db, a: std.mem.Allocator, id: i64, tmux_name: []const u8, old: []const u8) !void {
+    try db.exec(
+        \\UPDATE tickets SET tmux = ?2 WHERE id = ?1 AND (tmux = ?2 OR tmux = ?3)
+        \\  AND NOT EXISTS (SELECT 1 FROM tickets o WHERE o.tmux = ?2 AND o.id != ?1 AND o.stage != 'done')
+    , .{ id, tmux_name, old });
+    if (db.changes() == 1) return;
+    return if (try attachOwner(db, a, tmux_name, id) != null) error.SessionTaken else error.Starting;
+}
+
+/// What attach does with Claude in the session.
+const AttachPlan = struct {
+    /// Restart Claude there with the ticket's hooks (and tell it the ticket).
+    restart: bool,
+    /// The conversation to resume (null: a new one).
+    resume_id: ?[]const u8,
+    /// The conversation the ticket records ("" unknown).
+    conversation: []const u8,
+};
+
+/// Decide what attach does. A restart only when Claude is idle there (a
+/// background task counts as busy: the restart would end it), cl knows its
+/// conversation, and Claude runs in the session's directory (where the
+/// restart runs it and finds transcripts); and not when `told` (it has the
+/// hooks and the ticket already). `resumable`: Claude has that
+/// conversation's transcript; one with none said nothing yet, so a new
+/// conversation loses nothing.
+fn attachPlan(status: claude.Status, info: ?claude.Info, dir: []const u8, resumable: bool, told: bool) AttachPlan {
+    const i = info orelse return .{ .restart = false, .resume_id = null, .conversation = "" };
+    const known = i.session_id.len == 36 and (i.cwd.len == 0 or std.mem.eql(u8, i.cwd, dir));
+    return .{
+        .restart = status == .idle and known and !told,
+        .resume_id = if (known and resumable) i.session_id else null,
+        .conversation = i.session_id,
+    };
+}
+
+/// `t` was already told in session `tmux_name`'s conversation `conversation`,
+/// with its hooks: cl started it there, or attach restarted it there, last.
+fn toldHere(db: board.Db, a: std.mem.Allocator, t: board.Ticket, tmux_name: []const u8, conversation: []const u8) !bool {
+    if (!std.mem.eql(u8, t.tmux, tmux_name) or conversation.len == 0 or !std.mem.eql(u8, t.session_id, conversation)) return false;
+    var st = try db.query("SELECT kind, detail FROM events WHERE ticket = ?1 AND kind IN ('started', 'attached') ORDER BY id DESC LIMIT 1", .{t.id});
+    defer st.finalize();
+    if (!try st.step()) return false;
+    const kind = st.text(0);
+    const detail = st.text(1);
+    if (std.mem.eql(u8, kind, "started")) return std.mem.eql(u8, detail, tmux_name);
+    return std.mem.eql(u8, detail, try std.fmt.allocPrint(a, "{s}{s}", .{ tmux_name, restarted_suffix }));
+}
+
+const restarted_suffix = " (restarted with its hooks)";
+
+/// Give an attached ticket with no change of its own the one its session
+/// works in (jj): the working copy's change, when it is undescribed, not in
+/// trunk and no other ticket's (`unclaimedWork`), described and bookmarked
+/// as a started ticket's is. Its base (what gutter diffs against) becomes
+/// the commit below it. Without one, finishing it can only close it.
+/// Returns the change taken, or "".
+fn attachChange(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, repo: []const u8) ![]const u8 {
+    var taken: []const u8 = "";
+    if (t.change.len == 0) if (worktree.target(ctx, a, repo, t.onto)) |trunk| {
+        if (worktree.unclaimedWork(ctx, a, repo, trunk)) |c| {
+            if ((try db.int("SELECT 1 FROM tickets WHERE change_id = ?1 AND id != ?2", .{ c, t.id })) == null) {
+                const desc = try std.fmt.allocPrint(a, "{s}: {s}", .{ t.key, t.title });
+                if (worktree.adoptChange(ctx, a, repo, desc, try worktree.slug(a, t.key, t.title))) |ch| {
+                    try board.setChange(db, t.id, ch.id, ch.bookmark);
+                    try board.logEvent(ctx, db, t.id, "adopted change", ch.id);
+                    taken = ch.id;
+                } else |_| try board.logEvent(ctx, db, t.id, "no change", worktree.lastError());
+            }
+        }
+    };
+    if (t.base.len == 0) {
+        const base = worktree.baseRev(ctx, a, repo, t.onto);
+        if (base.len > 0) try board.setBase(db, t.id, base);
+    }
+    return taken;
+}
+
+/// Make a running cl session `name` the ticket's session, as if cl had
+/// started it there: the board follows its status, flags and Needs You by
+/// it, and `cl ticket kill`, merging and the rest act on it. A ticket with no
+/// jj change of its own takes the one the session works in (`attachChange`).
+/// An idle Claude is restarted resuming its own conversation (a new one if
+/// it had none yet: nothing said, no transcript), with the ticket's hooks
+/// and CL_TICKET, and told about the ticket (its description and how to
+/// finish), unless it was told already (`toldHere`). A busy one (or one idle
+/// with a background task, which a restart would end) is left as it is: the
+/// session is recorded, and attaching it again once it is idle adds the
+/// rest. A ticket in Backlog or Queued moves to Running; one in Review or
+/// Testing stays there. Refused for a session outside the ticket's project
+/// or another unfinished ticket's, and for a ticket with a live session of
+/// its own (another one), done, being planned, or an umbrella.
+pub fn attach(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: board.Ticket, name: []const u8) !Attached {
+    const view = try View.read(ctx, a, cfg);
+    const s = findSession(view, name) orelse return error.NoSuchSession;
+    return attachTo(ctx, cfg, db, a, t, view, s);
+}
+
+fn attachTo(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: board.Ticket, view: View, s: tmux.Session) !Attached {
+    const p = try board.getProject(db, a, t.project);
+    try attachCheck(db, a, t, view, s, inProject(s.dir, p, t, try worktree.root(ctx, a, cfg)));
+    const again = std.mem.eql(u8, t.tmux, s.tmux_name);
+    // Its old session is gone (attachCheck): it lets go of it.
+    try claimSession(db, a, t.id, s.tmux_name, t.tmux);
+    errdefer if (!again) db.exec("UPDATE tickets SET tmux = ?3 WHERE id = ?1 AND tmux = ?2", .{ t.id, s.tmux_name, t.tmux }) catch {};
+    const status = claude.statusFor(ctx, view.statuses, s);
+    const info = view.statuses.get(s.tmux_name);
+    const conversation = if (info) |i| i.session_id else "";
+    const resumable = if (info) |i| conversation.len == 36 and i.config_dir.len > 0 and claude.canResume(ctx, a, i.config_dir, s.dir, conversation) else false;
+    const told = try toldHere(db, a, t, s.tmux_name, conversation);
+    const plan = attachPlan(status, info, s.dir, resumable, told);
+    // jj runs at the repo's root: the project's checkout for a session in
+    // it (or below), else its own worktree.
+    const adopted = try attachChange(ctx, db, a, t, if (within(s.dir, p.dir)) p.dir else s.dir);
+    const tc = try board.getTicket(db, a, t.key);
+    var sid: [36]u8 = undefined;
+    if (plan.restart) {
+        const notes = try board.unsentNotes(db, a, t.id);
+        const gutter_rev: ?[]const u8 = if (review.findGutter(ctx, a, cfg) != null)
+            try worktree.reviewRev(ctx, a, if (tc.worktree.len > 0) tc.worktree else p.dir, tc.base, tc.change)
+        else
+            null;
+        const text = try std.mem.concat(a, u8, &.{ try attachNote(a, t.key), try prompt(a, tc, notes, gutter_rev) });
+        try freshConversation(ctx, cfg, db, a, t, s, text, &sid, plan.resume_id);
+        try board.setSession(ctx, db, t.id, s.tmux_name, &sid, tc.worktree, tc.branch);
+        try board.markNotesSent(db, t.id);
+    } else {
+        try board.setSession(ctx, db, t.id, s.tmux_name, plan.conversation, tc.worktree, tc.branch);
+    }
+    try board.clearFlagId(ctx, db, t.id, "start-failed");
+    try board.clearFlagId(ctx, db, t.id, "ended");
+    if (t.stage == .backlog or t.stage == .queued) try board.moveTicket(ctx, db, t, .running);
+    try board.logEvent(ctx, db, t.id, "attached", try std.fmt.allocPrint(a, "{s}{s}", .{ s.tmux_name, if (plan.restart) restarted_suffix else "" }));
+    return .{
+        .session = s.tmux_name,
+        .restarted = plan.restart,
+        .resumed = plan.restart and plan.resume_id != null,
+        .told = told,
+        .status = status,
+        .again = again,
+        .adopted = adopted,
+    };
+}
+
+/// What an attached session is told before the ticket itself.
+fn attachNote(a: std.mem.Allocator, key: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(a,
+        \\cl attached this session to ticket {s}: from now on the board follows this session for it
+        \\(its status, questions and Needs You), and this conversation goes on as {s}'s. If you
+        \\were already working on it, carry on from where you are.
+        \\
+        \\
+    , .{ key, key });
+}
+
 /// Put the project's checkout `dir` on the ticket's change: its own when it
 /// has one still open, else a new one on top of `trunk`. A ticket that ran
 /// before tickets had changes takes the checkout's undescribed work as its
@@ -1855,4 +2093,196 @@ test "a ticket with a target branch starts on it, queued or in a worktree, and i
     // A ticket on trunk hears nothing of the kind.
     t.onto = "";
     try std.testing.expect(std.mem.indexOf(u8, try prompt(a, t, &.{}, null), "targets the branch") == null);
+}
+
+test "attach refuses another ticket's session and a ticket with a live one" {
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp" };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "qa", .dir = "/x/qa-tool" });
+    const mk = struct {
+        fn s(tmux_name: []const u8, name: []const u8) tmux.Session {
+            return .{ .tmux_name = tmux_name, .name = name, .dir = "/x/qa-tool", .profile = "", .created = 1, .pane_title = "", .pane_dead = false, .activity = 0, .role = "", .alert = "" };
+        }
+    }.s;
+    var sessions = [_]tmux.Session{ mk("cl_qa-tool_1", "qa-tool"), mk("cl_other_2", "other") };
+    const view: View = .{ .sessions = &sessions, .statuses = .empty };
+    try std.testing.expectEqualStrings("cl_qa-tool_1", findSession(view, "qa-tool").?.tmux_name);
+    try std.testing.expectEqualStrings("cl_other_2", findSession(view, "cl_other_2").?.tmux_name);
+    try std.testing.expect(findSession(view, "nope") == null);
+
+    const k1 = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Owner", .stage = .running });
+    const k2 = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Stray", .stage = .queued });
+    try db.exec("UPDATE tickets SET tmux = 'cl_qa-tool_1' WHERE key = ?1", .{k1});
+    const t2 = try board.getTicket(db, a, k2);
+
+    // QA-1 is in progress in qa-tool: it isn't QA-2's to take.
+    try std.testing.expectError(error.SessionTaken, attachCheck(db, a, t2, view, sessions[0], true));
+    try std.testing.expectEqualStrings(k1, (try attachOwner(db, a, "cl_qa-tool_1", t2.id)).?);
+    // Its owner can attach it again (to add the hooks once it is idle).
+    try attachCheck(db, a, try board.getTicket(db, a, k1), view, sessions[0], true);
+    // Any unfinished ticket holds it, not only one in progress.
+    try db.exec("UPDATE tickets SET stage = 'backlog' WHERE key = ?1", .{k1});
+    try std.testing.expectError(error.SessionTaken, attachCheck(db, a, t2, view, sessions[0], true));
+    // Done, it lets go.
+    try db.exec("UPDATE tickets SET stage = 'done' WHERE key = ?1", .{k1});
+    try attachCheck(db, a, t2, view, sessions[0], true);
+
+    // A ticket whose own session is alive keeps it; a dead one is replaced.
+    try db.exec("UPDATE tickets SET tmux = 'cl_other_2' WHERE key = ?1", .{k2});
+    try std.testing.expectError(error.AlreadyStarted, attachCheck(db, a, try board.getTicket(db, a, k2), view, sessions[0], true));
+    try db.exec("UPDATE tickets SET tmux = 'cl_gone_9' WHERE key = ?1", .{k2});
+    try attachCheck(db, a, try board.getTicket(db, a, k2), view, sessions[0], true);
+    try db.exec("UPDATE tickets SET tmux = '(starting)' WHERE key = ?1", .{k2});
+    try std.testing.expectError(error.Starting, attachCheck(db, a, try board.getTicket(db, a, k2), view, sessions[0], true));
+
+    // Done, planning and dead panes are refused.
+    try db.exec("UPDATE tickets SET tmux = '', stage = 'done' WHERE key = ?1", .{k2});
+    try std.testing.expectError(error.Finished, attachCheck(db, a, try board.getTicket(db, a, k2), view, sessions[0], true));
+    try db.exec("UPDATE tickets SET stage = 'planning' WHERE key = ?1", .{k2});
+    try std.testing.expectError(error.Planning, attachCheck(db, a, try board.getTicket(db, a, k2), view, sessions[0], true));
+    try db.exec("UPDATE tickets SET stage = 'queued' WHERE key = ?1", .{k2});
+    var dead = sessions[1];
+    dead.pane_dead = true;
+    try std.testing.expectError(error.PaneDead, attachCheck(db, a, try board.getTicket(db, a, k2), view, dead, true));
+    try std.testing.expectError(error.OtherProject, attachCheck(db, a, try board.getTicket(db, a, k2), view, sessions[0], false));
+
+    // Two attaches at once: the write itself refuses the second.
+    try db.exec("UPDATE tickets SET tmux = '' WHERE key = ?1", .{k2});
+    try db.exec("UPDATE tickets SET tmux = 'cl_other_2', stage = 'running' WHERE key = ?1", .{k1});
+    try std.testing.expectError(error.SessionTaken, claimSession(db, a, t2.id, "cl_other_2", ""));
+    // A start claimed the ticket meanwhile.
+    try db.exec("UPDATE tickets SET tmux = '(starting)' WHERE key = ?1", .{k2});
+    try std.testing.expectError(error.Starting, claimSession(db, a, t2.id, "cl_qa-tool_1", ""));
+    try db.exec("UPDATE tickets SET tmux = 'cl_gone_9' WHERE key = ?1", .{k2});
+    try claimSession(db, a, t2.id, "cl_qa-tool_1", "cl_gone_9");
+    try std.testing.expectEqualStrings("cl_qa-tool_1", (try board.getTicket(db, a, k2)).tmux);
+}
+
+test "a session attaches only within the ticket's project" {
+    const p: board.Project = .{ .name = "qa", .dir = "/x/qa-tool", .prefix = "QA", .slots = 3, .mode = .queue, .profile = "" };
+    const t: board.Ticket = .{
+        .id = 1, .key = "QA-3", .project = "qa", .title = "Retry", .body = "", .stage = .queued,
+        .mode = .worktree, .plan = false, .skill = "", .target = "", .worktree = "/y/qa-3", .branch = "", .profile = "",
+        .tmux = "", .session_id = "", .summary = "", .round = 1, .created = 0, .updated = 0, .parent = "", .children = 0,
+    };
+    try std.testing.expect(inProject("/x/qa-tool", p, t, "/wt"));
+    try std.testing.expect(inProject("/x/qa-tool/web", p, t, "/wt"));
+    try std.testing.expect(!inProject("/x/qa-tool-old", p, t, "/wt"));
+    try std.testing.expect(inProject("/y/qa-3", p, t, "/wt"));
+    try std.testing.expect(inProject("/wt/qa/qa-1-other", p, t, "/wt/"));
+    try std.testing.expect(!inProject("/wt/qb/qb-1", p, t, "/wt"));
+    try std.testing.expect(!inProject("/x/cl-wrapper", p, t, "/wt"));
+}
+
+test attachPlan {
+    const sid = "11111111-2222-3333-4444-555555555555";
+    const info: claude.Info = .{ .status = .idle, .name = "", .status_since_ms = 0, .updated_ms = 0, .summary = "", .session_id = sid, .cwd = "/x/qa" };
+    // Idle and known: restarted, resuming when Claude has the transcript.
+    const p1 = attachPlan(.idle, info, "/x/qa", true, false);
+    try std.testing.expect(p1.restart);
+    try std.testing.expectEqualStrings(sid, p1.resume_id.?);
+    // Nothing said yet: a new conversation.
+    try std.testing.expect(attachPlan(.idle, info, "/x/qa", false, false).resume_id == null);
+    // Busy, or a background task running: recorded, with its conversation.
+    for ([_]claude.Status{ .busy, .shell, .waiting, .blocked, .unknown }) |st| {
+        const p = attachPlan(st, info, "/x/qa", true, false);
+        try std.testing.expect(!p.restart);
+        try std.testing.expectEqualStrings(sid, p.conversation);
+    }
+    // Told already, Claude elsewhere, or no status at all: no restart.
+    try std.testing.expect(!attachPlan(.idle, info, "/x/qa", true, true).restart);
+    try std.testing.expect(!attachPlan(.idle, info, "/x/other", true, false).restart);
+    const none = attachPlan(.idle, null, "/x/qa", true, false);
+    try std.testing.expect(!none.restart);
+    try std.testing.expectEqualStrings("", none.conversation);
+}
+
+test "attaching a busy session records it, and the ticket runs there" {
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp" };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const cfg: config.Config = .{ .profiles = &.{}, .default = "", .operator = "", .board = .{ .worktrees = "/wt" } };
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "qa", .dir = "/x/qa-tool" });
+    const sid = "11111111-2222-3333-4444-555555555555";
+    const mk = struct {
+        fn s(tmux_name: []const u8, name: []const u8) tmux.Session {
+            return .{ .tmux_name = tmux_name, .name = name, .dir = "/x/qa-tool", .profile = "", .created = 1, .pane_title = "", .pane_dead = false, .activity = 0, .role = "", .alert = "" };
+        }
+    }.s;
+    var sessions = [_]tmux.Session{ mk("cl_qa-tool_1", "qa-tool"), mk("cl_qa-2_2", "qa-2") };
+    var statuses: claude.StatusMap = .empty;
+    for (sessions) |s| try statuses.put(a, s.tmux_name, .{ .status = .busy, .name = "", .status_since_ms = 0, .updated_ms = 0, .summary = "", .session_id = sid, .cwd = "/x/qa-tool" });
+    const view: View = .{ .sessions = &sessions, .statuses = statuses };
+
+    // Queued, its last start failed and its old session is gone (QA-6).
+    const kq = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Stray", .stage = .queued });
+    try db.exec("UPDATE tickets SET tmux = 'cl_gone_9' WHERE key = ?1", .{kq});
+    const tq = try board.getTicket(db, a, kq);
+    try board.setFlagId(ctx, db, tq.id, "start-failed", "auto", "");
+    try board.setFlagId(ctx, db, tq.id, "ended", "auto", "");
+    const r = try attachTo(ctx, cfg, db, a, tq, view, sessions[0]);
+    try std.testing.expect(!r.restarted and !r.again);
+    try std.testing.expectEqual(claude.Status.busy, r.status);
+    const after = try board.getTicket(db, a, kq);
+    try std.testing.expectEqualStrings("cl_qa-tool_1", after.tmux);
+    try std.testing.expectEqualStrings(sid, after.session_id);
+    try std.testing.expectEqual(board.Stage.running, after.stage);
+    try std.testing.expectEqual(@as(usize, 0), after.flags.len);
+    // Again: the same session, still busy.
+    try std.testing.expect((try attachTo(ctx, cfg, db, a, after, view, sessions[0])).again);
+
+    // In Review it stays there.
+    const kr = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Reviewed", .stage = .review });
+    _ = try attachTo(ctx, cfg, db, a, try board.getTicket(db, a, kr), view, sessions[1]);
+    try std.testing.expectEqual(board.Stage.review, (try board.getTicket(db, a, kr)).stage);
+    // The first one's session isn't another's to take.
+    const kb = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Other", .stage = .backlog });
+    try std.testing.expectError(error.SessionTaken, attachTo(ctx, cfg, db, a, try board.getTicket(db, a, kb), view, sessions[0]));
+    try std.testing.expectEqualStrings("", (try board.getTicket(db, a, kb)).tmux);
+    // Nor is a session in another project.
+    var elsewhere = sessions[1];
+    elsewhere.tmux_name = "cl_cl-wrapper_3";
+    elsewhere.dir = "/x/cl-wrapper";
+    try std.testing.expectError(error.OtherProject, attachTo(ctx, cfg, db, a, try board.getTicket(db, a, kb), view, elsewhere));
+}
+
+test "an attached session already told the ticket isn't restarted" {
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp" };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "qa", .dir = "/x/qa-tool" });
+    const sid = "11111111-2222-3333-4444-555555555555";
+    const k = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "T", .stage = .running });
+    try db.exec("UPDATE tickets SET tmux = 'cl_s_1', session_id = ?2 WHERE key = ?1", .{ k, sid });
+    const t = try board.getTicket(db, a, k);
+    // Started there by cl: told.
+    try board.logEvent(ctx, db, t.id, "started", "cl_s_1");
+    try std.testing.expect(try toldHere(db, a, t, "cl_s_1", sid));
+    // Another conversation there now (/clear): not this one.
+    try std.testing.expect(!try toldHere(db, a, t, "cl_s_1", "99999999-2222-3333-4444-555555555555"));
+    // Attached while busy: not told.
+    try board.logEvent(ctx, db, t.id, "attached", "cl_s_1");
+    try std.testing.expect(!try toldHere(db, a, t, "cl_s_1", sid));
+    // Attached and restarted: told.
+    try board.logEvent(ctx, db, t.id, "attached", "cl_s_1" ++ restarted_suffix);
+    try std.testing.expect(try toldHere(db, a, t, "cl_s_1", sid));
+}
+
+test attachNote {
+    const text = try attachNote(std.testing.allocator, "QA-6");
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.startsWith(u8, text, "cl attached this session to ticket QA-6"));
 }

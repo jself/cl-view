@@ -112,6 +112,15 @@ pub const ticket_usage =
     \\  kill <key>                  end its session, as cl kill does; it keeps its stage, raises
     \\                              no flag, and waits for start to restart it. A queue
     \\                              project's session is shared: other tickets on it let go too
+    \\  attach <key> <session>      make a running cl session (cl name or tmux name) the ticket's,
+    \\                              as if cl had started it there: its status, flags and Needs You
+    \\                              follow it. An idle Claude restarts, resuming its conversation,
+    \\                              with the ticket's hooks and told the ticket; a busy one is only
+    \\                              recorded (attach again once it is idle). Backlog or queued, it
+    \\                              moves to running. With no jj change of its own it takes the
+    \\                              session's unclaimed working-copy change. Refused if the session
+    \\                              is outside its project or another unfinished ticket's, or the
+    \\                              ticket has a live session of its own
     \\  park [<key>] --reason <text> [--until <shell command> | --pr <url | #n>] [--every <interval>]
     \\      [--max <time>]
     \\                              wait on something outside cl (a PR review, a deploy): end its
@@ -870,6 +879,39 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         if (r.others.len > 0) try aw.writer.print("it was shared: {s} let go of it too\n", .{try std.mem.join(a, ", ", r.others)});
         return out(aw.writer.buffered());
     }
+    if (std.mem.eql(u8, cmd, "attach")) {
+        args.only(&.{}, ticket_usage);
+        if (pos.len != 2) fail("usage: cl ticket attach <key> <session>", .{});
+        const t = board.getTicket(db, a, pos[0]) catch |e| boardFail(db, e, "ticket");
+        const r = dispatch.attach(ctx, cfg, db, a, t, pos[1]) catch |e| switch (e) {
+            error.NoSuchSession => fail("no running cl session named {s} (`cl ls --plain` lists them)", .{pos[1]}),
+            error.PaneDead => fail("{s}'s pane is dead; there's no Claude there to attach", .{pos[1]}),
+            error.OtherProject => fail("{s} runs in {s}, not in {s}'s project {s} ({s})", .{ pos[1], sessionDir(ctx, a, pos[1]), t.key, t.project, projectDir(db, a, t.project) }),
+            error.Finished => fail("{s} is done; there's nothing to attach", .{t.key}),
+            error.Planning => fail("{s} is being planned; its planning session is cl's own", .{t.key}),
+            error.Umbrella => fail("{s} is an umbrella: its sub-tickets run, not it", .{t.key}),
+            error.Starting => fail("{s} is starting right now; try again in a moment", .{t.key}),
+            error.AlreadyStarted => fail("{s} already has a live session: {s} (`cl ticket kill {s}` ends it)", .{ t.key, t.tmux, t.key }),
+            error.SessionTaken => fail("{s} belongs to {s}, which isn't done; finish or move it first", .{ pos[1], takenBy(ctx, db, a, pos[1], t.id) }),
+            error.SessionFailed => fail("cannot restart Claude there: {s}", .{dispatch.failureReason(e)}),
+            else => boardFail(db, e, "ticket"),
+        };
+        const after = board.getTicket(db, a, t.key) catch |e| boardFail(db, e, "ticket");
+        var aw: std.Io.Writer.Allocating = .init(a);
+        try aw.writer.print("{s} attached to {s} ({s})\n", .{ t.key, r.session, @tagName(after.stage) });
+        if (r.adopted.len > 0) try aw.writer.print("its jj change is now {s}{s}{s}, the one the session works in\n", .{ r.adopted[0..@min(r.adopted.len, 12)], if (after.branch.len > 0) ", bookmark " else "", after.branch });
+        if (r.restarted)
+            try aw.writer.print("Claude restarted there with {s}'s hooks, {s}, and was told the ticket\n", .{ t.key, if (r.resumed) "resuming its conversation" else "in a new conversation (its own had nothing in it yet)" })
+        else if (r.told)
+            try aw.writer.print("it was {s}'s session already, with its hooks, and Claude knows the ticket: nothing to restart\n", .{t.key})
+        else if (r.again)
+            try aw.writer.print("it was {s}'s session already; Claude {s}, so it was left as it is (try again once it is idle to restart it with the ticket's hooks)\n", .{ t.key, attachStatus(r.status) })
+        else
+            try aw.writer.print("Claude {s}, so it was left as it is: it has no hooks for {s} and wasn't told the ticket. `cl ticket attach {s} {s}` again once it is idle adds them\n", .{ attachStatus(r.status), t.key, t.key, pos[1] });
+        if (after.change.len == 0 and after.branch.len == 0)
+            try aw.writer.print("note: {s} has no change or branch of its own (the session's working copy isn't one cl can take: described, in trunk, another ticket's, or not jj), so finishing it only closes it; merge its work yourself\n", .{t.key});
+        return out(aw.writer.buffered());
+    }
     if (std.mem.eql(u8, cmd, "park")) {
         args.only(&.{ "--reason", "--until", "--pr", "--every", "--max" }, ticket_usage);
         const usage = "cl ticket park [<key>] --reason <text> [--until <shell command> | --pr <url | #n>] [--every <interval>] [--max <time>]";
@@ -1291,6 +1333,36 @@ fn logLine(text: []const u8) void {
     var buf: [512]u8 = undefined;
     const line = std.fmt.bufPrint(&buf, "{s}\n", .{text}) catch return;
     std.Io.File.stderr().writeStreamingAll(std.Io.Threaded.global_single_threaded.io(), line) catch {};
+}
+
+/// The unfinished ticket session `name` belongs to, for attach's refusal.
+fn takenBy(ctx: Ctx, db: board.Db, a: std.mem.Allocator, name: []const u8, id: i64) []const u8 {
+    const s = (tmux.find(ctx, a, name) catch null) orelse return "another ticket";
+    return (dispatch.attachOwner(db, a, s.tmux_name, id) catch null) orelse "another ticket";
+}
+
+/// Session `name`'s directory, for attach's refusal.
+fn sessionDir(ctx: Ctx, a: std.mem.Allocator, name: []const u8) []const u8 {
+    const s = (tmux.find(ctx, a, name) catch null) orelse return "another directory";
+    return ctx.shortenHomeIn(a, s.dir) catch s.dir;
+}
+
+/// Project `name`'s checkout, for attach's refusal.
+fn projectDir(db: board.Db, a: std.mem.Allocator, name: []const u8) []const u8 {
+    const p = board.getProject(db, a, name) catch return "?";
+    return p.dir;
+}
+
+/// Why attach left Claude as it was, by its status there.
+fn attachStatus(st: claude.Status) []const u8 {
+    return switch (st) {
+        .shell => "is idle there with a background task running, which a restart would end",
+        .blocked, .waiting => "is waiting on something there",
+        .idle => "is idle there, but cl can't tell which conversation it has",
+        .starting => "is starting there",
+        .busy => "is working there",
+        .gone, .unknown => "is running there, but cl can't tell what it is doing (no status from Claude)",
+    };
 }
 
 /// The key at `pos[i]`, or $CL_TICKET when it is missing.

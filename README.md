@@ -846,6 +846,31 @@ menu is open, even where Claude Code writes the call to the transcript only
 once it is answered. A ticket whose session goes away gets `ended`;
 `cl t start` starts it again.
 
+A session cl didn't start for the ticket (one you told about it with `cl
+send`, or the one it went on in after its own ended) can be made its session
+with `cl t attach <key> <session>` (a cl name, or tmux name). The board then
+follows that session for the ticket, as if cl had started it there: its
+status, flags and Needs You, and `cl t kill` and the rest act on it. A ticket
+with no jj change of its own takes the one the session works in, when that
+is unclaimed work (the working copy's change, undescribed and not in trunk,
+and no other ticket's): it is described and bookmarked like a started
+ticket's, so finishing it merges it, and its base (what gutter diffs
+against) is the commit below it. When there is none to take (a shared
+checkout on another ticket's change, or git), attach says so: finishing it
+then only closes it, and merging its work is yours to do. When Claude is
+idle there, it is restarted resuming the same conversation (a new one if it
+hasn't said anything yet), with the ticket's hooks and `CL_TICKET`, and told
+the ticket (its description and how to finish); not when it was told already
+(cl started it there, or an earlier attach restarted it, in the conversation
+it still has). When it is busy, waiting on you, or idle with a background
+task (a dev server) a restart would end, it is left as it is: the session is
+recorded, and attaching it again once it is idle adds the rest. A ticket in
+Backlog or Queued moves to Running; one in Review or Testing stays put. It is
+refused for a session outside the ticket's project (its checkout, the
+ticket's worktree or the project's worktrees), when the session belongs to
+another ticket that isn't done, and when the ticket has a live session of its
+own (`cl t kill` it first). There is no board action for it yet.
+
 ### Pausing
 
 `cl project pause <name>` (or `--all`, or **Pause** in the web board's
