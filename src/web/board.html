@@ -22,6 +22,10 @@
     --review: #9cc6ff; --review-bg: #11294a; --testing: #7ee6d6; --testing-bg: #0f3330;
     --other: #d6d7da; --other-bg: #2c2e33; --finishing: #b6e3a0; --finishing-bg: #1b3317; --parked: #c4b5fd; --parked-bg: #2a2342;
     --conflict: #ffb4b4; --conflict-bg: #3d1a1a;
+    /* One color per board column (stage): a stage badge and its column header's dot. */
+    --st-backlog: #8b8e94; --st-backlog-bg: #26282c; --st-planning: #cdb8ff; --st-planning-bg: #2c2440; --st-queued: #93c5fd; --st-queued-bg: #172437;
+    --st-running: #facc15; --st-running-bg: #352c08; --st-review: #9cc6ff; --st-review-bg: #11294a; --st-testing: #7ee6d6; --st-testing-bg: #0f3330;
+    --st-done: #86efac; --st-done-bg: #14301d;
     --lane-a: var(--panel); --lane-a-line: #222428; --lane-b: #1a1f28; --lane-b-line: #2a3241; /* the lanes view's zebra stripes */
     --mono: ui-monospace, SFMono-Regular, Menlo, "DejaVu Sans Mono", monospace;
     --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
@@ -165,7 +169,31 @@
   .status { display: inline-flex; align-items: center; gap: calc(7 * var(--u)); font-size: calc(12.5 * var(--u)); color: var(--sc, #d6d7da); }
   .status.s-none { color: #d6d7da; }
   .dot { width: calc(8 * var(--u)); height: calc(8 * var(--u)); border-radius: calc(4 * var(--u)); flex: none; display: inline-block; background: var(--sc, #5d6168); }
-  .s-none .dot { background: transparent; border: 1px solid #5d6168; }
+  .s-none .dot, .s-nosession .dot { background: transparent; border: 1px solid #5d6168; }
+  .s-nosession { --sc: #a0a3a8; } .status.s-nosession { color: #d6d7da; }
+  /* Stages: a badge naming the board column, a dot in a column header, and the
+     segments of a parent's sub-ticket progress bar, all in the stage's color. */
+  .st-backlog { --stc: var(--st-backlog); --stbg: var(--st-backlog-bg); } .st-planning { --stc: var(--st-planning); --stbg: var(--st-planning-bg); }
+  .st-queued { --stc: var(--st-queued); --stbg: var(--st-queued-bg); } .st-running { --stc: var(--st-running); --stbg: var(--st-running-bg); }
+  .st-review { --stc: var(--st-review); --stbg: var(--st-review-bg); } .st-testing { --stc: var(--st-testing); --stbg: var(--st-testing-bg); }
+  .st-done { --stc: var(--st-done); --stbg: var(--st-done-bg); }
+  .badge { display: inline-flex; align-items: center; height: calc(20 * var(--u)); padding: 0 calc(8 * var(--u)); border-radius: calc(5 * var(--u)); font-size: calc(11.5 * var(--u)); font-weight: 600;
+           white-space: nowrap; color: var(--stc); background: var(--stbg); }
+  .sd { width: calc(8 * var(--u)); height: calc(8 * var(--u)); border-radius: 50%; flex: none; background: var(--stc); }
+  .bar { display: flex; gap: calc(2 * var(--u)); height: calc(6 * var(--u)); border-radius: calc(3 * var(--u)); overflow: hidden; background: var(--line); }
+  .bar > span { background: var(--stc); }
+  .prog { display: flex; flex-direction: column; gap: calc(6 * var(--u)); margin-bottom: calc(12 * var(--u)); }
+  .prog .sum, .mini { font-size: calc(13 * var(--u)); color: var(--dim); } .prog .sum strong, .mini strong { color: var(--fg); font-weight: 600; }
+  .mini { display: inline-flex; align-items: center; gap: calc(8 * var(--u)); } .mini .bar { width: calc(60 * var(--u)); flex: none; }
+  /* The Sub-tickets tab: one row per sub-ticket (key, title, then flags, live dot and stage). */
+  .subrows { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: calc(10 * var(--u)); overflow: hidden; }
+  .subrow { display: grid; grid-template-columns: calc(60 * var(--u)) minmax(0, 1fr) auto; align-items: center; gap: calc(4 * var(--u)) calc(10 * var(--u)); width: 100%;
+            min-height: calc(42 * var(--u)); padding: calc(8 * var(--u)) calc(12 * var(--u)); border: 0; border-top: 1px solid var(--line2); background: var(--card); text-align: left; cursor: pointer; }
+  .subrow:first-child { border-top: 0; } .subrow:hover { background: #26282d; }
+  .subrow .k { font: calc(12 * var(--u)) var(--mono); color: var(--muted); }
+  .subrow .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+  .subrow.done .t { font-weight: 400; color: var(--dim); }
+  .subrow .r { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: calc(8 * var(--u)); }
   .pills { display: flex; flex-wrap: wrap; gap: calc(5 * var(--u)); }
   .pill { display: inline-flex; align-items: center; height: calc(22 * var(--u)); padding: 0 calc(8 * var(--u)); border-radius: calc(11 * var(--u)); font-size: calc(11.5 * var(--u));
           background: var(--other-bg); color: var(--other); white-space: nowrap; }
@@ -344,6 +372,11 @@
     .lanes { --lane: calc(104 * var(--u)); --stage: calc(100vw - var(--lane) - calc(48 * var(--u))); }
     dialog { width: 100vw; max-width: 100vw; height: 100dvh; max-height: 100dvh; border-radius: 0; margin: 0; }
     .dlg { padding: calc(14 * var(--u)); }
+    /* A sub-ticket row: the title wraps, and flags, live dot and stage go on a line of their own under it. */
+    .subrow { grid-template-columns: calc(52 * var(--u)) minmax(0, 1fr); align-items: start; }
+    .subrow .k { line-height: calc(20 * var(--u)); }
+    .subrow .t { white-space: normal; }
+    .subrow .r { grid-column: 2; justify-content: flex-start; }
   }
   /* The smallest phones: "Quick" and "New" alone, so the four actions fit on one row. */
   @media (max-width: 420px) { header .acts .long { display: none; } }
@@ -428,7 +461,7 @@
 const STAGES = ["backlog", "planning", "queued", "running", "review", "testing", "done"];
 const STAGE_NAME = { backlog: "Backlog", planning: "Planning", queued: "Queued", running: "Running", review: "Review", testing: "Testing", done: "Done" };
 const FLAG_NAME = { input: "Needs input", question: "Question", review: "Ready for review", testing: "Needs testing", ended: "Session ended", "start-failed": "Didn't start", conflict: "Conflicts", "after-merge": "After-merge failed", "merge-failed": "Didn't land", unmerged: "Not merged", unparked: "Woke from park", "park-expired": "Park expired", idle: "Idle" };
-const STATUS_NAME = { paused: "Paused", busy: "Working", waiting: "Waiting on you", blocked: "Waiting on you", idle: "Idle", shell: "Idle · background task", starting: "Starting", gone: "Session ended", killed: "Killed · restart it", parked: "Parked", unknown: "Unknown" };
+const STATUS_NAME = { paused: "Paused", busy: "Working", waiting: "Waiting on you", blocked: "Waiting on you", idle: "Idle", shell: "Idle · background task", starting: "Starting", gone: "Session ended", nosession: "No session", killed: "Killed · restart it", parked: "Parked", unknown: "Unknown" };
 
 const store = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch { return null; } };
 const state = {
@@ -575,17 +608,37 @@ const pills = (t) => cardFlags(t).length || t.finishing || t.custom_close || t.p
 // A Backlog or Queued ticket whose session is gone hasn't ended: it's waiting to start.
 // A killed one waits for you to restart it.
 // A queued one in a paused project waits for it to resume, not for a slot.
+// One in Running, Review or Testing that never had a session has "No session" (it was moved there by hand).
 const statusOf = (row) => row.status || (row.ticket.tmux.startsWith("(") ? "starting" : row.ticket.park ? "parked" : row.ticket.killed ? "killed" : row.ticket.tmux && !["backlog", "queued"].includes(row.ticket.stage) ? "gone"
-  : row.ticket.stage === "queued" && projectPaused(row.ticket.project) ? "paused" : "none");
-const statusHtml = (row) => { const s = statusOf(row); const label = s === "none" ? (row.ticket.stage === "queued" ? "Waiting for a slot" : "Not started") : (STATUS_NAME[s] || s);
+  : row.ticket.stage === "queued" && projectPaused(row.ticket.project) ? "paused" : ["running", "review", "testing"].includes(row.ticket.stage) ? "nosession" : "none");
+// A Done ticket has no status unless its session is still live: "Not started" or "Session ended" says nothing about finished work.
+const statusHtml = (row) => { const s = statusOf(row); if (row.ticket.stage === "done" && (!row.status || row.status === "gone")) return "";
+  const label = s === "none" ? (row.ticket.stage === "queued" ? "Waiting for a slot" : "Not started") : (STATUS_NAME[s] || s);
   return `<span class="status s-${esc(s)}"><span class="dot"></span>${esc(label)}</span>`; };
+const stageBadge = (stage) => `<span class="badge st-${esc(stage)}">${esc(STAGE_NAME[stage] || stage)}</span>`;
+// A parent's progress from its sub-tickets' stages: "4/6 done · 1 running · 1 review" over a bar with a
+// segment per sub-ticket, Done first and then the furthest along. mini is the header's one-line chip.
+function subProgress(subs, mini) {
+  const n = {}; for (const r of subs) n[r.ticket.stage] = (n[r.ticket.stage] || 0) + 1;
+  const rest = STAGES.filter((s) => s !== "done" && n[s]).map((s) => ` · ${n[s]} ${STAGE_NAME[s].toLowerCase()}`).join("");
+  const sum = `<strong>${n.done || 0}/${subs.length}${mini ? " sub-tickets" : ""} done</strong>${rest}`;
+  const label = STAGES.filter((s) => n[s]).map((s) => `${n[s]} ${STAGE_NAME[s]}`).join(", ");
+  const bar = `<span class="bar" role="img" aria-label="${esc(label)}" title="${esc(label)}">${[...STAGES].reverse().filter((s) => n[s]).map((s) => `<span class="st-${s}" style="flex:${n[s]}"></span>`).join("")}</span>`;
+  return mini ? `<span class="mini">${bar}<span>${sum}</span></span>` : `<div class="prog"><div class="sum">${sum}</div>${bar}</div>`;
+}
+// One sub-ticket in its parent's Sub-tickets tab: no parent, project or workspace (its own view has those).
+function subRowHtml(row) {
+  const t = row.ticket; const s = statusOf(row); const live = `Live session: ${STATUS_NAME[s] || s}`;
+  return `<button type="button" class="subrow${t.stage === "done" ? " done" : ""}" data-open="${esc(t.key)}"><span class="k">${esc(t.key)}</span><span class="t" title="${esc(t.title)}">${esc(t.title)}</span>
+    <span class="r">${pills(t)}${liveRow(row) ? `<span class="s-${esc(s)}" style="display:inline-flex" title="${esc(live)}" aria-label="${esc(live)}"><span class="dot"></span></span>` : ""}${stageBadge(t.stage)}</span></button>`;
+}
 // A live session's shell icon. In a card (a button) it's a span the click handler follows.
 const SHELL_SVG = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><path d="M4.5 6l2 2-2 2M8.5 10.5h3"/></svg>`;
 const liveRow = (row) => row.ticket.tmux && row.status && row.status !== "gone";
 const shellIcon = (row, link) => !liveRow(row) ? "" : link
   ? `<a class="shell-ic" href="${shellHref(row.ticket)}" title="Open shell" aria-label="Open ${esc(row.ticket.key)}'s shell">${SHELL_SVG}</a>`
   : `<span class="shell-ic" data-shell="${shellHref(row.ticket)}" title="Open shell" aria-label="Open ${esc(row.ticket.key)}'s shell">${SHELL_SVG}</span>`;
-const where = (t) => t.worktree || t.branch ? t.branch || "worktree" : t.mode === "worktree" ? "worktree on start" : t.target ? "queue: " + t.target : "queue";
+const where = (t) => t.worktree || t.branch ? t.branch || "worktree" : t.mode === "worktree" ? "worktree on start" : t.target ? "project folder: " + t.target : "project folder";
 
 // ---- board data ----
 // Redraws from the 3-second refresh must not move anything: each scrolled
@@ -820,7 +873,7 @@ const inColumn = (rows, stage) => { const cs = rows.filter((r) => r.ticket.stage
   return stage === "done" ? cs : cs.sort((a, b) => a.ticket.rank - b.ticket.rank || a.ticket.id - b.ticket.id); };
 function boardHtml(rows) {
   return `<div class="cols">${columns().map((s) => { const cs = inColumn(rows, s);
-    return `<section class="col" data-drop="${s}"><h2>${STAGE_NAME[s]}<span class="n">${cs.length}</span></h2>${cs.map((r) => cardHtml(r)).join("")}<button type="button" class="add" data-new-when="${s}" aria-label="New ticket in ${STAGE_NAME[s]}">+</button></section>`; }).join("")}</div>`;
+    return `<section class="col" data-drop="${s}"><h2><span class="sd st-${s}"></span>${STAGE_NAME[s]}<span class="n">${cs.length}</span></h2>${cs.map((r) => cardHtml(r)).join("")}<button type="button" class="add" data-new-when="${s}" aria-label="New ticket in ${STAGE_NAME[s]}">+</button></section>`; }).join("")}</div>`;
 }
 // A grid rather than a table, so the headers and project names can stick
 // (see .lanes in the CSS). Headers count the stage's cards in the lanes shown.
@@ -828,7 +881,7 @@ function lanesHtml(rows) {
   const projects = state.data.projects.filter((p) => state.project ? p.name === state.project : projectShown(p.name));
   const lanes = projects.map((p) => [p, rows.filter((r) => r.ticket.project === p.name)]);
   const count = (s) => lanes.reduce((n, [, mine]) => n + mine.filter((r) => r.ticket.stage === s).length, 0);
-  return `<div class="lanes" style="--n:${columns().length}"><div class="lhd corner"></div>${columns().map((s) => `<div class="lhd"><h2>${STAGE_NAME[s]}<span class="n">${count(s)}</span></h2></div>`).join("")}
+  return `<div class="lanes" style="--n:${columns().length}"><div class="lhd corner"></div>${columns().map((s) => `<div class="lhd"><h2><span class="sd st-${s}"></span>${STAGE_NAME[s]}<span class="n">${count(s)}</span></h2></div>`).join("")}
     ${lanes.map(([p, mine], i) => {
       const alt = i % 2 ? " alt" : "";
       const running = mine.filter((r) => r.ticket.stage === "running" && r.status && r.status !== "gone").length;
@@ -1099,6 +1152,12 @@ function renderDetailInner() {
   if (t.stage !== "done") acts.push(t.mode === "queue"
     ? `<button type="button" class="btn" data-relocate="worktree" title="Give it a worktree of its own; Claude goes on there and the queue session is free">Move to a worktree</button>`
     : `<button type="button" class="btn" data-relocate="queue" title="Go on in the project's main folder, in its session once that is free">Move to the queue</button>`);
+  // The status line: a parent without a session of its own shows its sub-tickets' progress instead; one with a session shows both.
+  // A Done ticket that never had a worktree or branch doesn't name its workspace.
+  const own = { ticket: t, status: d.status }; const subs = d.subtickets || [];
+  const status = subs.length && (["none", "nosession"].includes(statusOf(own)) || !statusHtml(own)) ? subProgress(subs, true)
+    : statusHtml(own) + (subs.length ? subProgress(subs, true) : "");
+  const ws = t.stage === "done" && !t.worktree && !t.branch ? "" : `<span class="mono">${esc(where(t))}</span>`;
   const parent = t.parent ? `<button type="button" class="btn" data-open="${esc(t.parent)}">Parent ${esc(t.parent)}</button>` : "";
   document.getElementById("ticketBody").innerHTML = `
     <div class="head"><span class="mono muted">${esc(t.key)} · ${esc(t.project)}</span>${pills(t)}<span style="flex:1"></span>
@@ -1106,7 +1165,7 @@ function renderDetailInner() {
         <select id="stageSel">${STAGES.map((s) => `<option value="${s}" ${s === t.stage ? "selected" : ""}>${STAGE_NAME[s]}</option>`).join("")}</select></label>
       <button type="button" class="btn" id="closeDlg">Close</button></div>
     <h1>${esc(t.title)}</h1>
-    <div class="facts">${statusHtml({ ticket: t, status: d.status })}<span class="mono">${esc(where(t))}</span>${t.tmux ? `<span class="mono">${esc(t.tmux)}</span>` : ""}
+    <div class="facts">${status}${ws}${t.tmux ? `<span class="mono">${esc(t.tmux)}</span>` : ""}
       ${t.round > 1 ? `<span>round ${t.round}</span>` : ""}${t.plan ? `<span>plan first${t.skill ? " · " + esc(t.skill) : ""}</span>` : ""}${parent}</div>
     <div class="actions">${acts.join("")}</div>${parkBox(t)}
     <div class="tabs" role="tablist">${tabs.map(([k, l]) => `<button type="button" role="tab" class="${state.tab === k ? "on" : ""}" aria-selected="${state.tab === k}" data-tab="${k}">${esc(l)}</button>`).join("")}</div>
@@ -1131,7 +1190,8 @@ function tabHtml(d) {
       ${t.tmux && d.status && d.status !== "gone" ? `<a class="maximize" href="${shellHref(t)}" title="Open the shell" aria-label="Open the shell"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 2.5h4v4M6.5 13.5h-4v-4M13.5 2.5l-4.5 4.5M2.5 13.5 7 9"/></svg></a>` : ""}
       <button type="button" class="tobottom" id="toBottom" hidden>Scroll to bottom ↓</button></div>
       ${t.tmux ? `<div style="display:flex;gap:calc(8 * var(--u));margin-top:calc(10 * var(--u))"><input type="text" id="msg" placeholder="Message Claude" style="flex:1;min-width:0"><button type="button" class="btn primary" id="sendMsg">Send</button></div>` : ""}`;
-    case "subs": return `<div style="display:flex;flex-direction:column;gap:calc(8 * var(--u))">${d.subtickets.map((r) => cardHtml(r)).join("")}</div>`;
+    case "subs": { const subs = [...d.subtickets].sort((a, b) => a.ticket.id - b.ticket.id);
+      return `${subProgress(subs)}<div class="subrows">${subs.map(subRowHtml).join("")}</div>`; }
     case "activity": return `<ol class="muted" style="margin:0;padding-left:calc(20 * var(--u));display:flex;flex-direction:column;gap:calc(4 * var(--u))">${d.events.map((e) =>
       `<li>${esc(e.kind)}${e.detail ? " · " + esc(e.detail) : ""} <span class="mono" style="font-size:calc(11.5 * var(--u))">${new Date(e.at * 1000).toLocaleString()}</span></li>`).join("")}</ol>`;
     case "details": return detailsTab(d);
