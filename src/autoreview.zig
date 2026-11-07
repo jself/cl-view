@@ -447,6 +447,10 @@ test "check: a reviewer that died is recorded as failed, but findings that came 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
+    // Skip without tmux on PATH (the macOS CI runner has none): tmux that
+    // can't run at all makes state() say .unknown, not .gone, so nothing
+    // here would be recorded as failed.
+    _ = std.process.run(a, std.testing.io, .{ .argv = &.{ "tmux", "-V" } }) catch return error.SkipZigTest;
     var env: std.process.Environ.Map = .init(a);
     // A tmux socket where no server runs (never made: asking tmux doesn't
     // start one): no reviewer is alive here.
