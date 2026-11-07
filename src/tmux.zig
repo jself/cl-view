@@ -394,13 +394,39 @@ pub fn newSession(ctx: Ctx, opts: NewOptions) ![]const u8 {
 /// it) and repaints, then passes Ctrl-L on to Claude. Left is dropped in
 /// Claude's own pane when the cursor is at the start of the prompt, where it
 /// would open Claude's agents view (which can't be turned off); everywhere
-/// else, shells and other panes included, it is a normal Left. Idempotent.
+/// else, shells and other panes included, it is a normal Left.
+/// Alt+` or Ctrl+Shift+Space there runs `cl dictate` on the session
+/// (README, "Dictating from a terminal"). Alt+` is for terminals like
+/// Konsole that send Ctrl+Shift+Space as Ctrl+Space (which this doesn't
+/// catch). Idempotent.
 pub fn ensureDetachBinding(ctx: Ctx) !void {
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const exe = ctx.exePath(&exe_buf) catch "cl";
+    const dictate = try dictateCommand(ctx.gpa, exe);
+    defer ctx.gpa.free(dictate);
     try runQuiet(ctx, &.{
         "bind-key", "-n", "C-q", "if-shell", "-F", "#{m:cl_*,#{session_name}}", "detach-client", "", ";",
         "bind-key", "-n", "C-l", "if-shell", "-F", "#{m:cl_*,#{session_name}}", "resize-window -A ; set-option window-size latest ; refresh-client ; send-keys C-l", "send-keys C-l", ";",
-        "bind-key", "-n", "Left", "if-shell", "-F", agents_guard, "", "send-keys Left",
+        "bind-key", "-n", "Left", "if-shell", "-F", agents_guard, "", "send-keys Left", ";",
+        "bind-key", "-n", "C-S-Space", "if-shell", "-F", "#{m:cl_*,#{session_name}}", dictate, "send-keys C-S-Space", ";",
+        "bind-key", "-n", "M-`", "if-shell", "-F", "#{m:cl_*,#{session_name}}", dictate, "send-keys M-`",
     });
+}
+
+/// The tmux command the dictate keys run: `cl dictate` on this session, in
+/// the background (it waits for the transcript), on this server (the
+/// server's own environment may not name its socket). It reports on the
+/// status line, so its output is dropped: run-shell would show it in the
+/// pane. A cl that is gone (a ticket's build, its worktree removed) can't
+/// report anything, so the binding says so itself.
+fn dictateCommand(a: std.mem.Allocator, exe: []const u8) ![]u8 {
+    return std.fmt.allocPrint(a, "run-shell -b \"CL_TMUX_SOCKET=#{{q:socket_path}} '{s}' dictate #{{q:session_name}} >/dev/null 2>&1 || [ -x '{s}' ] || tmux -S #{{q:socket_path}} display-message -c #{{q:client_name}} -l 'cl dictate: {s} is gone; attach again with cl attach to bind the key to your cl'\"", .{ exe, exe, exe });
+}
+
+test dictateCommand {
+    const c = try dictateCommand(std.testing.allocator, "/home/u/.local/bin/cl");
+    defer std.testing.allocator.free(c);
+    try std.testing.expectEqualStrings("run-shell -b \"CL_TMUX_SOCKET=#{q:socket_path} '/home/u/.local/bin/cl' dictate #{q:session_name} >/dev/null 2>&1 || [ -x '/home/u/.local/bin/cl' ] || tmux -S #{q:socket_path} display-message -c #{q:client_name} -l 'cl dictate: /home/u/.local/bin/cl is gone; attach again with cl attach to bind the key to your cl'\"", c);
 }
 
 /// In a cl_* session's Claude pane with the cursor at column 2 or less (just
@@ -632,7 +658,7 @@ pub fn pasteText(ctx: Ctx, tmux_name: []const u8, text: []const u8) !void {
 }
 
 /// Paste `text` into the session as one bracketed paste, loaded from a file.
-fn paste(ctx: Ctx, tmux_name: []const u8, text: []const u8) !void {
+pub fn paste(ctx: Ctx, tmux_name: []const u8, text: []const u8) !void {
     // A buffer per session, so two pastes into different sessions can't mix.
     var buf_name: [128]u8 = undefined;
     const buf = std.fmt.bufPrint(&buf_name, "cl-paste-{s}", .{tmux_name}) catch "cl-paste";

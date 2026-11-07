@@ -612,13 +612,48 @@ page sees the key go up, which a terminal inside tmux never passes on.
 
 - It's the browser's microphone, so the HTTPS rule above applies: `cl
   window`, a browser on this machine, or a phone through `tailscale serve`.
-- Not in a plain terminal attached to tmux (`cl attach` in Konsole, say):
-  there's no page to record. Claude Code's own `/voice` is the one for that.
-  It records with SoX or `arecord` on the machine Claude runs on (so not a
-  phone's mic, and not here until one of them is installed: `/voice` says so)
-  and transcribes on Anthropic's servers, not locally. If holding Space
-  doesn't work through tmux, `"voice": {"mode": "tap"}` in Claude's
-  settings makes it a toggle.
+- In a plain terminal attached to tmux there's no page to record from:
+  see the next section.
+
+### Dictating from a terminal
+
+In a terminal attached to a session (`cl attach` in Konsole, say), press
+**Alt+`** (backtick), speak, and press it again: the words land at Claude's
+prompt the same way, unsent. It's a toggle, not a hold, because a terminal
+never says when a key goes up. While it records, the session's status line
+shows "● dictating" at the right; messages there say it's working out the
+words, and why when it fails.
+
+It's `cl dictate`, which you can also run yourself or bind elsewhere:
+
+    cl dictate [name]     start recording, or stop and type the words in
+    cl dictate --cancel   stop without typing anything
+
+- It records this machine's mic with `pw-record` (PipeWire), into a WAV
+  under `$XDG_RUNTIME_DIR`, and runs `voice.stt` on it, so it needs both.
+- There's one recording at a time: the second press types into the session
+  the first one started in, wherever you pressed it. A recording left
+  running stops itself after 4 minutes; the next press still types it in.
+  Presses less than a second apart count as one, so holding the key down
+  (its autorepeat) starts one recording and doesn't stop it.
+- Without a name it dictates into the session it runs in, or else the one
+  the most recently used tmux client shows. So a desktop hotkey (KDE's
+  Shortcuts, say) bound to `~/.local/bin/cl dictate` works whatever has
+  the focus.
+- Ctrl+Shift+Space, the web page's key, works too in a terminal that
+  tells it from Ctrl+Space through tmux's extended keys (which cl turns
+  on). Konsole doesn't: it sends Ctrl+Space, which goes to the session as
+  usual, so use Alt+` there. For another key, add a tmux binding of your
+  own (`bind-key -n M-v run-shell -b "cl dictate '#{session_name}' >/dev/null 2>&1"`,
+  with cl on the tmux server's PATH) or a desktop hotkey.
+- The binding names the `cl` that set it, as cl's hooks do: whatever last
+  launched or attached a session, or started `cl web` (the main server,
+  not a second one on `CL_PORT`). So after a merge, the restarted `cl web`
+  points it at the new build, terminals already attached included. If
+  that `cl` is gone (a ticket's build, its worktree removed), the key says
+  so on the status line; attaching again binds it to yours.
+- Claude Code's own `/voice` is the other way: it records with SoX or
+  `arecord` and transcribes on Anthropic's servers, not locally.
 
 ## Board
 

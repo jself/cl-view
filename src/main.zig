@@ -33,6 +33,9 @@ const usage =
     \\  cl alert <text> | --clear  alert the human from this session (the operator's outside one):
     \\                            the chooser and the web board's Needs You show it
     \\  cl say <text>             the operator's short spoken answer to a voice message (voice.*)
+    \\  cl dictate [name] | --cancel
+    \\                            push-to-talk into a session from a terminal: start recording,
+    \\                            or stop and type the words in (voice.stt; Alt+` in tmux)
     \\  cl web                    serve the chooser to a browser (see web.* in the config)
     \\  cl web password | start | stop | install | uninstall
     \\                            set the web password, or run the server in the background
@@ -54,6 +57,7 @@ const usage =
 
 const launch = @import("launch.zig");
 const voice = @import("voice.zig");
+const dictate = @import("dictate.zig");
 pub const LaunchOptions = launch.Options;
 
 pub fn main(init: std.process.Init) !void {
@@ -90,6 +94,7 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, cmd, "board")) return cmdBoard(ctx, cfg, argv[1..]);
         if (std.mem.eql(u8, cmd, "alert")) return cmdAlert(ctx, argv[1..]);
         if (std.mem.eql(u8, cmd, "say")) return cmdSay(ctx, argv[1..]);
+        if (std.mem.eql(u8, cmd, "dictate")) return dictate.main(ctx, cfg, argv[1..]);
         if (std.mem.eql(u8, cmd, "web")) return web.main(ctx, cfg, argv[1..]);
         if (std.mem.eql(u8, cmd, "window")) return window.main(ctx, cfg, argv[1..]);
         if (std.mem.eql(u8, cmd, "ticket") or std.mem.eql(u8, cmd, "t")) return ticket_cli.ticketMain(ctx, cfg, argv[1..]);
@@ -407,6 +412,7 @@ test {
     std.testing.refAllDecls(@import("dispatch.zig"));
     std.testing.refAllDecls(@import("worktree.zig"));
     std.testing.refAllDecls(@import("signals.zig"));
+    std.testing.refAllDecls(dictate);
     std.testing.refAllDecls(@import("actions.zig"));
     std.testing.refAllDecls(@import("review.zig"));
     std.testing.refAllDecls(@import("autoreview.zig"));

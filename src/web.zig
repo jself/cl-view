@@ -87,6 +87,11 @@ fn serve(ctx: Ctx, cfg: config.Config) !void {
             if (started) logf("started the tmux server in a systemd scope of its own, so restarting {s} leaves the sessions alone", .{web_service.unit_name});
         } else |err| logf("couldn't start the tmux server outside {s} ({s}: {s}); restarting the service may close sessions it started", .{ web_service.unit_name, @errorName(err), tmux.lastError() });
     }
+    // The main server restarts after every merge (README, "After merge"):
+    // point cl's tmux keys (Ctrl-Q, Alt+` for `cl dictate`, ...) at this
+    // build, so terminals attached before it get them too. Not a second
+    // server, which runs a branch's build.
+    if (cfg.web.port == null and ctx.env.get("CL_TEST_WEB") == null) tmux.ensureDetachBinding(ctx) catch {};
 
     // One listener per comma-separated address. Mistakes in the config stop us
     // here; an address that is not available yet (tailscale) is retried.
