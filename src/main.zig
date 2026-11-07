@@ -30,9 +30,11 @@ const usage =
     \\  cl watch                  print a line whenever a session's status changes
     \\  cl closed                 closed sessions, most recently closed first (R in the chooser)
     \\  cl operator               attach to the operator session (o in the chooser)
+    \\  cl operator --voice       attach to the voice operator, which answers the board's mic
+    \\                            on voice.model (haiku by default)
     \\  cl alert <text> | --clear  alert the human from this session (the operator's outside one):
     \\                            the chooser and the web board's Needs You show it
-    \\  cl say <text>             the operator's short spoken answer to a voice message (voice.*)
+    \\  cl say <text>             the voice operator's short spoken answer to a voice message (voice.*)
     \\  cl dictate [name] | --cancel
     \\                            push-to-talk into a session from a terminal: start recording,
     \\                            or stop and type the words in (voice.stt; Alt+` in tmux)
@@ -97,7 +99,7 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, cmd, "output")) return cmdOutput(ctx, cfg, argv[1..]);
         if (std.mem.eql(u8, cmd, "watch")) return cmdWatch(ctx, cfg);
         if (std.mem.eql(u8, cmd, "closed")) return cmdClosed(ctx, cfg);
-        if (std.mem.eql(u8, cmd, "operator")) return cmdOperator(ctx, cfg);
+        if (std.mem.eql(u8, cmd, "operator")) return cmdOperator(ctx, cfg, argv[1..]);
         if (std.mem.eql(u8, cmd, "board")) return cmdBoard(ctx, cfg, argv[1..]);
         if (std.mem.eql(u8, cmd, "alert")) return cmdAlert(ctx, argv[1..]);
         if (std.mem.eql(u8, cmd, "say")) return cmdSay(ctx, argv[1..]);
@@ -386,7 +388,14 @@ fn cmdSay(ctx: Ctx, argv: []const []const u8) !void {
     var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    const op = (try tmux.operator(ctx, a)) orelse fail("the operator is not running", .{});
+    // The board only waits for the voice operator's `cl say`: from any other
+    // session (the chat operator, a ticket's) nobody would hear it, so say so
+    // rather than look like it worked. Outside a session, it goes to the voice
+    // operator.
+    const op = if (try tmux.callerSession(ctx, a)) |c| blk: {
+        if (!std.mem.eql(u8, c.role, tmux.voice_role)) fail("cl say: only the voice operator's answers are spoken (the board's mic talks to it); nothing was said. Write your answer instead.", .{});
+        break :blk c;
+    } else (try tmux.voiceOperator(ctx, a)) orelse fail("the voice operator is not running", .{});
     try voice.say(ctx, a, op.tmux_name, argv[0]);
 }
 
@@ -401,9 +410,12 @@ fn cmdBoard(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void {
     try ui.runBoard(ctx, cfg);
 }
 
-fn cmdOperator(ctx: Ctx, cfg: config.Config) !void {
+fn cmdOperator(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void {
+    const voice_op = argv.len == 1 and std.mem.eql(u8, argv[0], "--voice");
+    if (argv.len > 0 and !voice_op) fail("usage: cl operator [--voice]", .{});
     autostartWeb(ctx, cfg);
-    const tmux_name = operator.ensure(ctx, cfg) catch |err| switch (err) {
+    const ensured = if (voice_op) operator.ensureVoice(ctx, cfg) else operator.ensure(ctx, cfg);
+    const tmux_name = ensured catch |err| switch (err) {
         error.NoSuchProfile => fail("operator profile not found: {s}", .{cfg.operator}),
         else => return err,
     };

@@ -18,7 +18,7 @@ pub const Session = struct {
     pane_title: []const u8,
     pane_dead: bool,
     activity: i64,
-    /// "operator" or "web" for cl's own hidden sessions, "" for Claude sessions.
+    /// "operator", "voice" or "web" for cl's own hidden sessions, "" for Claude sessions.
     role: []const u8,
     /// The session's pending alert for the human (@cl_alert, from `cl alert`),
     /// "" if none.
@@ -32,6 +32,8 @@ pub const Session = struct {
 };
 
 pub const operator_role = "operator";
+/// The voice operator (operator.zig): answers the board's mic, on its own model.
+pub const voice_role = "voice";
 pub const web_role = "web";
 
 pub const Error = error{ TmuxFailed, NoTmuxSocket };
@@ -544,6 +546,11 @@ pub fn list(ctx: Ctx, arena: std.mem.Allocator) ![]Session {
 /// The operator session, if it is running.
 pub fn operator(ctx: Ctx, arena: std.mem.Allocator) !?Session {
     return findRole(ctx, arena, operator_role);
+}
+
+/// The voice operator session, if it is running.
+pub fn voiceOperator(ctx: Ctx, arena: std.mem.Allocator) !?Session {
+    return findRole(ctx, arena, voice_role);
 }
 
 pub fn findRole(ctx: Ctx, arena: std.mem.Allocator, role: []const u8) !?Session {

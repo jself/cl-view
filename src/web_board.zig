@@ -412,7 +412,7 @@ fn route(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: 
     // The Quick Ticket button: hand the human's words to the operator.
     if (std.mem.eql(u8, what, "operator") and std.mem.eql(u8, name, "quick-ticket")) {
         const text = try operator.quickTicketText(a, b.text orelse "");
-        const started = operator.sendInBackground(ctx, cfg, text) catch return error.OperatorFailed;
+        const started = operator.sendInBackground(ctx, cfg, .chat, text) catch return error.OperatorFailed;
         return ok(req, a, .{ .ok = true, .started = started });
     }
     // Pause or resume every project: /api/projects/pause, /api/projects/resume.
@@ -985,13 +985,13 @@ fn voiceDetail(a: std.mem.Allocator, err: anyerror, setting: []const u8) ![]cons
 }
 
 /// POST /api/voice/ask with a WAV: transcribe it and type it into the
-/// operator. `since` is the time to poll /api/voice/reply/<since> from.
+/// voice operator (operator.zig), which runs on `voice.model`. `since` is the time to poll /api/voice/reply/<since> from.
 fn voiceAsk(ctx: Ctx, cfg: config.Config, a: std.mem.Allocator, req: *std.http.Server.Request) !void {
     const wav = try readWav(a, req);
     if (cfg.voice.stt.len == 0) return error.VoiceOff;
     const words = try voice.transcribe(ctx, a, cfg, wav);
     const since = voice.nowMs(ctx);
-    const started = operator.sendInBackground(ctx, cfg, try voice.message(a, words)) catch return error.OperatorFailed;
+    const started = operator.sendInBackground(ctx, cfg, .voice, try voice.message(a, words)) catch return error.OperatorFailed;
     return ok(req, a, .{ .text = words, .since = since, .started = started });
 }
 
@@ -1014,14 +1014,14 @@ fn readWav(a: std.mem.Allocator, req: *std.http.Server.Request) ![]u8 {
     return wav;
 }
 
-/// GET /api/voice/reply/<since>: the operator's `cl say` if it is newer than
+/// GET /api/voice/reply/<since>: the voice operator's `cl say` if it is newer than
 /// `since` (ms), its status, and the first sentence of its written reply
 /// (for when it answered without `cl say`). A long poll: it answers as soon
 /// as a fresh `cl say` lands (checked every 150 ms, so the board can start
 /// speaking right away) or the operator's status changes, else after 10 s.
 fn voiceReply(ctx: Ctx, cfg: config.Config, a: std.mem.Allocator, req: *std.http.Server.Request, since_s: []const u8) !void {
     const since = std.fmt.parseInt(i64, since_s, 10) catch return error.BadInput;
-    const op = (try tmux.operator(ctx, a)) orelse return ok(req, a, .{ .status = "gone" });
+    const op = (try tmux.voiceOperator(ctx, a)) orelse return ok(req, a, .{ .status = "gone" });
     const first = try operatorStatus(ctx, cfg, a, op);
     var status = first.status;
     var tick: usize = 0;

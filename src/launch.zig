@@ -41,13 +41,18 @@ pub fn operatorDir(ctx: Ctx, a: std.mem.Allocator) ![]const u8 {
 /// other Claude sessions, finding it by name, message it instead of the real
 /// one. A bare `cl` run by the operator itself (its folder is its cwd) made
 /// six of them in a day. `op_dir` is `operatorDir`, resolved like `dir`.
+/// The voice operator's folder, under the operator's, is reserved the same way.
 pub fn reservedForOperator(dir: []const u8, name: []const u8, role: []const u8, op_dir: []const u8) bool {
-    if (std.mem.eql(u8, role, tmux.operator_role)) return false;
-    return std.mem.eql(u8, name, operator_name) or std.mem.eql(u8, dir, op_dir);
+    if (std.mem.eql(u8, role, tmux.operator_role) or std.mem.eql(u8, role, tmux.voice_role)) return false;
+    if (std.mem.eql(u8, name, operator_name) or std.mem.eql(u8, name, voice_name)) return true;
+    return std.mem.startsWith(u8, dir, op_dir) and (dir.len == op_dir.len or dir[op_dir.len] == '/');
 }
 
 /// The operator's session name (`operator.name`).
 pub const operator_name = "operator";
+/// The voice operator's session name and its folder under `operatorDir`.
+pub const voice_name = "voice-operator";
+pub const voice_subdir = "voice";
 
 test reservedForOperator {
     const op = "/home/u/.config/cl/operator";
@@ -56,6 +61,10 @@ test reservedForOperator {
     try std.testing.expect(reservedForOperator("/home/u/devel/x", "operator", "", op));
     try std.testing.expect(!reservedForOperator(op, "operator", tmux.operator_role, op));
     try std.testing.expect(!reservedForOperator("/home/u/devel/operator-ui", "operator-ui", "", op));
+    try std.testing.expect(reservedForOperator(op ++ "/voice", "voice", "", op));
+    try std.testing.expect(reservedForOperator("/home/u/devel/x", "voice-operator", "", op));
+    try std.testing.expect(!reservedForOperator(op ++ "/voice", "voice-operator", tmux.voice_role, op));
+    try std.testing.expect(!reservedForOperator(op ++ "-old", "x", "", op));
 }
 
 /// `operatorDir`, with symlinks resolved when it exists (as `create` resolves

@@ -253,6 +253,7 @@
       document.title = (key ? key + " · " : "") + title;
     };
     if (attach === "operator") show("", "Chat with the operator");
+    else if (attach === "voice") show("", "Voice operator");
     else if (!ticket) show("", attach);
     else {
       show(ticket, "");

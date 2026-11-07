@@ -28,6 +28,7 @@
 //!   voice.tts_voice = en_GB-alba-medium  (with a server: which of its voices)
 //!   voice.tts_speed = 1.2               (speaking speed; 1 is normal)
 //!   voice.tts_pitch = 1.08              (a bit higher; the board shifts it)
+//!   voice.model = haiku                 (the voice operator's model; the default)
 //!                                        (talking to the operator from the board: see voice.zig)
 //!
 //! `default`, `operator` and dotted keys are settings; every other key is a
@@ -149,6 +150,10 @@ pub const Voice = struct {
     /// without keeping its pitch (1.08 is about a semitone up). With a URL
     /// `tts`, the speech is made that much slower first, so `tts_speed` holds.
     tts_pitch: f32 = 1,
+    /// The voice operator's Claude model (`--model`): voice messages go to a
+    /// session of their own (operator.zig), so the chat keeps `operator.model`.
+    /// "" for the profile's default.
+    model: []const u8 = "haiku",
 };
 
 pub fn load(ctx: Ctx) !Config {
@@ -220,6 +225,8 @@ fn loadFile(ctx: Ctx) !Config {
             voice.stt = val;
         } else if (std.mem.eql(u8, key, "voice.tts")) {
             voice.tts = val;
+        } else if (std.mem.eql(u8, key, "voice.model")) {
+            voice.model = val;
         } else if (std.mem.eql(u8, key, "voice.tts_voice")) {
             voice.tts_voice = val;
         } else if (std.mem.eql(u8, key, "voice.tts_speed")) {
@@ -249,9 +256,11 @@ fn loadFile(ctx: Ctx) !Config {
     if (ctx.env.get("CLAUDE_CONFIG_DIR")) |env_dir| {
         default = try fromEnv(ctx, &profiles, env_dir);
     }
+    // Before toOwnedSlice, which empties `profiles`.
+    const default_profile = default orelse profiles.items[0].name;
     return .{
         .profiles = try profiles.toOwnedSlice(ctx.perm),
-        .default = default orelse profiles.items[0].name,
+        .default = default_profile,
         .operator = operator_profile,
         .operator_model = operator_model,
         .review_model = review_model,
@@ -331,4 +340,28 @@ fn expandHomePerm(ctx: Ctx, path: []const u8) ![]const u8 {
         return std.fmt.allocPrint(ctx.perm, "{s}{s}", .{ ctx.home, path[1..] });
     }
     return path;
+}
+
+test "voice.model: haiku by default, set or emptied in the file" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+    var env: std.process.Environ.Map = .init(a);
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = a, .env = &env, .home = home };
+    try tmp.dir.createDirPath(std.testing.io, ".config/cl");
+    const cases = [_]struct { file: []const u8, model: []const u8 }{
+        .{ .file = "w = /tmp/w\noperator.model = opus\n", .model = "haiku" },
+        .{ .file = "w = /tmp/w\noperator.model = opus\nvoice.model = sonnet\n", .model = "sonnet" },
+        .{ .file = "w = /tmp/w\noperator.model = opus\nvoice.model =\n", .model = "" },
+    };
+    for (cases) |c| {
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".config/cl/config", .data = c.file });
+        const cfg = try loadFile(ctx);
+        try std.testing.expectEqualStrings(c.model, cfg.voice.model);
+        try std.testing.expectEqualStrings("w", cfg.default);
+        try std.testing.expectEqualStrings("opus", cfg.operator_model);
+    }
 }

@@ -13,7 +13,7 @@ const board = @import("board.zig");
 pub const Alert = struct {
     /// The tmux session that raised it.
     tmux: []const u8,
-    /// Who raised it: "operator", or the session's name.
+    /// Who raised it: "operator", "the voice operator", or the session's name.
     from: []const u8,
     operator: bool,
     text: []const u8,
@@ -44,7 +44,9 @@ pub fn list(ctx: Ctx, db: board.Db, a: std.mem.Allocator, hidden_projects: bool)
         }
         try out.append(a, .{
             .tmux = s.tmux_name,
-            .from = if (is_op) "operator" else s.name,
+            // The voice operator's opens like any session's (its own tmux),
+            // but says who it is rather than its session name.
+            .from = if (is_op) "operator" else if (std.mem.eql(u8, s.role, tmux.voice_role)) "the voice operator" else s.name,
             .operator = is_op,
             .text = s.alert,
             .at = s.alert_at,

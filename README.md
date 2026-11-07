@@ -235,8 +235,9 @@ rather than starting a session in the current folder, and `cl <dir>` without
 `review.model` does the same for the automated review (Review and testing).
 
 `operator.model = sonnet` (any `claude --model` value) runs the operator on
-another model than the profile's default: faster answers, voice ones
-included. It takes effect the next time the operator starts (`/exit` in Chat).
+another model than the profile's default. It takes effect the next time the
+operator starts (`/exit` in Chat). Voice messages go to the voice operator,
+which has its own `voice.model` (haiku by default; see Voice).
 
 ## Web
 
@@ -499,12 +500,26 @@ when you use it.
 With it on, the board has a mic button next to Chat. Click it, speak, and
 click again (or hold **V**, outside text boxes, and let go; Esc cancels).
 `cl web` turns the recording into text with `voice.stt` and types it into the
-operator as `[voice] <what you said>`, the way Quick ticket does (starting
-the operator if it isn't running). The operator handles it as usual, and its
-instructions tell it to end with `cl say "<a sentence or two>"`, written to
-be heard. The board waits for that, shows it in a box at the bottom right
-(↻ says it again, × stops), and speaks it. If the operator finishes without
-`cl say`, the board speaks the first sentence of its written reply.
+voice operator as `[voice] <what you said>`, the way Quick ticket does
+(starting it if it isn't running). The voice operator handles it as the
+operator would, and its instructions tell it to end with `cl say "<a sentence
+or two>"`, written to be heard. The board waits for that, shows it in a box at
+the bottom right (↻ says it again, ↗ opens the voice operator, × stops), and
+speaks it. If it finishes without `cl say`, the board speaks the first
+sentence of its written reply.
+
+The voice operator is a second operator, apart from the one Chat opens, so
+voice can run on a quicker, cheaper model without changing Chat's:
+
+```
+voice.model = haiku     (the default; empty for the profile's own)
+```
+
+It has the operator's instructions and shares its notes, but it keeps a
+conversation of its own (in `~/.config/cl/operator/voice`), so it doesn't
+see what you typed in Chat. It leaves watching Needs You and raising alerts
+to the Chat operator. `cl operator --voice` (or ↗) opens it; `/exit` there
+restarts it with a new `voice.model` the next time you speak.
 
 ```
 voice.stt = whisper-cli -m ~/.local/share/whisper/ggml-base.en.bin -nt -np -f
@@ -608,9 +623,10 @@ Then restart the server (`cl web stop`) and reload the board.
 - Quiet recordings aren't sent: whisper turns silence into words like "you".
 - The operator runs the `cl` that started it (by full path), so its commands
   match its instructions. Both are fixed when it starts: after upgrading cl,
-  `/exit` in Chat restarts it with the new ones the next time it's needed.
+  `/exit` in Chat restarts it with the new ones the next time it's needed
+  (`/exit` in the voice operator, `cl operator --voice`, does the same for it).
 - Where the time goes: whisper (2–4 s), the operator's turn, and Piper. For a
-  quicker turn, set `operator.model` (above); for quicker speech, run Piper
+  quicker turn, set `voice.model` (above); for quicker speech, run Piper
   as a server. The board hears about `cl say` within ~150 ms (a long poll).
 
 ### Dictating into a session

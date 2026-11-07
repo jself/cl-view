@@ -423,6 +423,7 @@
   #voiceBar[hidden] { display: none; }
   #voiceBar .txt { flex: 1; white-space: pre-wrap; overflow-wrap: anywhere; }
   #voiceBar .heard { color: #b4b6ba; font-size: .9em; }
+  #voiceBar a { color: inherit; text-decoration: none; font-size: 1.1em; line-height: 1; padding: 0 calc(2 * var(--u)); }
   #voiceBar button { background: none; border: 0; color: inherit; cursor: pointer; font-size: 1.1em; line-height: 1; padding: 0 calc(2 * var(--u)); }
   #reloadBar { display: flex; align-items: center; gap: calc(10 * var(--u)); margin: calc(10 * var(--u)) calc(20 * var(--u)) 0; padding: calc(8 * var(--u)) calc(12 * var(--u));
                border: 1px solid var(--line, #3a3d44); border-radius: calc(10 * var(--u)); flex-wrap: wrap; }
@@ -587,7 +588,7 @@
   </table>
   <p class="muted">Single keys don't fire while you type in a box, and of these only <kbd>s</kbd>, <kbd>Ctrl</kbd>+<kbd>K</kbd> and <kbd>?</kbd> work with a dialog open. Dialogs have their own: <kbd>Ctrl</kbd>+<kbd>Enter</kbd> creates the ticket in New ticket, and in a ticket's Test tab, <kbd>p</kbd> <kbd>f</kbd> <kbd>n</kbd> <kbd>c</kbd> walk the test plan.</p></div></dialog>
 <div id="toast" role="status" popover="manual"></div>
-<div id="voiceBar" hidden role="status"><div class="txt"><div class="heard" id="voiceHeard"></div><div id="voiceText"></div></div><button type="button" id="voiceReplay" title="Say it again" aria-label="Say it again" hidden>&#8635;</button><button type="button" id="voiceClose" title="Stop and close" aria-label="Stop and close">&times;</button></div>
+<div id="voiceBar" hidden role="status"><div class="txt"><div class="heard" id="voiceHeard"></div><div id="voiceText"></div></div><a id="voiceOpen" href="/?attach=voice" title="Open the voice operator (it runs on voice.model, apart from Chat)" aria-label="Open the voice operator" hidden>&#8599;</a><button type="button" id="voiceReplay" title="Say it again" aria-label="Say it again" hidden>&#8635;</button><button type="button" id="voiceClose" title="Stop and close" aria-label="Stop and close">&times;</button></div>
 
 <script src="/xterm.js"></script>
 <script src="/addon-fit.js"></script>
@@ -2477,6 +2478,8 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && e.target.id === "msg") { e.preventDefault(); document.getElementById("sendMsg").click(); }
 });
 // ---- voice (voice.* in the config; src/voice.zig): talk to the operator ----
+// The mic talks to the voice operator, a session of its own on voice.model
+// (haiku by default), not to the Chat one; ↗ in the box opens it.
 // The mic button (or holding V) records; cl web transcribes it with voice.stt
 // and types it into the operator as "[voice] ...". The operator answers with
 // `cl say`, which this polls for and speaks: voice.tts's WAV, or the
@@ -2493,6 +2496,7 @@ function voiceBar(heard, text, done) {
   document.getElementById("voiceHeard").textContent = heard;
   document.getElementById("voiceText").textContent = text;
   document.getElementById("voiceReplay").hidden = !done;
+  document.getElementById("voiceOpen").hidden = !done;
   bar.hidden = false;
 }
 // Close the box `ms` after now (0: don't). While the mouse is over it or a
@@ -2564,7 +2568,7 @@ async function micStop(cancel) {
     const j = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(j.error || res.statusText);
     const heard = "You: " + j.text;
-    voiceBar(heard, j.started ? "Starting the operator…" : "Waiting for the operator…");
+    voiceBar(heard, j.started ? "Starting the voice operator…" : "Waiting for the voice operator…");
     await voiceWait(j.since, heard);
   } catch (e) {
     // A failed request (transcribing, reaching cl web) stays until closed.
@@ -2582,12 +2586,12 @@ async function voiceWait(since, heard) {
     let r; try { r = await api("voice/reply/" + since); } catch { await sleep(1000); continue; }
     if (id !== voice.poll) return;
     if (r.said) return voiceSay(heard, r.said);
-    if (r.status === "gone") return voiceSay(heard, "The operator isn't running.");
+    if (r.status === "gone") return voiceSay(heard, "The voice operator isn't running.");
     if (["busy", "starting", "unknown"].includes(r.status)) { busy = busy || r.status === "busy"; done = false; continue; }
     // idle, shell (its cl watch runs in the background), blocked, waiting:
-    if (!busy) { if (Date.now() - t0 > 20_000) return voiceSay(heard, "The operator didn't pick that up. Check the chat."); continue; }
+    if (!busy) { if (Date.now() - t0 > 20_000) return voiceSay(heard, "The voice operator didn't pick that up. Open it to check."); continue; }
     if (!done) { done = true; continue; } // one more poll: its cl say may still be landing
-    return voiceSay(heard, r.status === "blocked" ? "The operator is waiting on you in the chat." : (r.reply || "The operator answered in the chat."));
+    return voiceSay(heard, r.status === "blocked" ? "The voice operator is waiting on you. Open it to answer." : (r.reply || "The voice operator answered in writing. Open it to read."));
   }
 }
 // "Two tickets need you: CL-39 has a question. CL-41 is ready." -> one piece
@@ -3093,6 +3097,7 @@ function palCommands() {
     { label: "New ticket", hint: "n", run: () => openNew(null) },
     { label: "Quick ticket", hint: "q", run: () => openQuick() },
     { label: "Chat with the operator", hint: "o", run: () => document.getElementById("chatBtn").click() },
+    { label: "Open the voice operator", run: () => { location.href = "/?attach=voice"; } },
     { label: "Search tickets", hint: "/", run: searchFocus },
     view("board", "Board"), view("lanes", "Lanes"), view("list", "List"), view("projects", "Projects"),
     sw("doneSw", "done tickets"), sw("parkedSw", "parked tickets"), sw("subsSw", "sub-tickets"),

@@ -2,6 +2,11 @@
 //! through the cl CLI. It is created the first time you press `o` in the
 //! chooser (or run `cl operator`, or Chat on the web board) and stays running
 //! after that. Restarted, it continues its last conversation.
+//!
+//! Voice messages from the board go to a second one, the voice operator: the
+//! same instructions and notes, on `voice.model` (haiku by default), in a
+//! folder of its own so each keeps its own conversation. The chat's model
+//! (`operator.model`) is left alone.
 const std = @import("std");
 const Ctx = @import("ctx.zig");
 const config = @import("config.zig");
@@ -329,9 +334,50 @@ const tickets_skill =
 
 pub const name = launch.operator_name;
 
+/// Which operator: the chat one, or the one the board's mic talks to.
+pub const Kind = enum { chat, voice };
+
+/// Added to the voice operator's instructions.
+const voice_instructions =
+    \\
+    \\
+    \\You are the voice operator. The human talks to you only by voice from the web board, so
+    \\every message starts with `[voice]`; answer each with `cl say` as described under Voice,
+    \\which is how they hear you. Keep turns quick: look up only what the question needs.
+    \\Another operator handles their typed chat and watches Needs You, so, unlike the above:
+    \\don't run `cl ticket watch` or `cl watch`, and raise a `cl alert` only when the human asks.
+    \\You share that operator's notes: they are in `../notes/` (its folder is the one above
+    \\yours), not in your own folder. Read them there as described under Notes, but change
+    \\them only when the human asks you to remember or change something. That operator may
+    \\be editing them too: read a file again right before you edit it, and change only the
+    \\lines you mean to.
+;
+
 /// Return the operator's tmux name, creating the session if it is not running.
 pub fn ensure(ctx: Ctx, cfg: config.Config) ![]const u8 {
-    return (try ensureNoting(ctx, cfg)).name;
+    return (try ensureNoting(ctx, cfg, .chat)).name;
+}
+
+/// `ensure` for the voice operator.
+pub fn ensureVoice(ctx: Ctx, cfg: config.Config) ![]const u8 {
+    return (try ensureNoting(ctx, cfg, .voice)).name;
+}
+
+/// The running operator of `kind`, if any.
+pub fn find(ctx: Ctx, arena: std.mem.Allocator, kind: Kind) !?tmux.Session {
+    return switch (kind) {
+        .chat => tmux.operator(ctx, arena),
+        .voice => tmux.voiceOperator(ctx, arena),
+    };
+}
+
+/// The folder the operator of `kind` runs in. Caller owns the result.
+fn dirOf(ctx: Ctx, a: std.mem.Allocator, kind: Kind) ![]const u8 {
+    const dir = try launch.operatorDir(ctx, a);
+    return switch (kind) {
+        .chat => dir,
+        .voice => std.fmt.allocPrint(a, "{s}/" ++ launch.voice_subdir, .{dir}),
+    };
 }
 
 const Ensured = struct {
@@ -349,15 +395,15 @@ const Ensured = struct {
 pub const skill_changed_note = "(cl was updated and the cl-tickets skill changed since you last loaded it: load it again before acting on this.)\n\n";
 
 /// `ensure`, also saying whether the skill had to be rewritten.
-fn ensureNoting(ctx: Ctx, cfg: config.Config) !Ensured {
+fn ensureNoting(ctx: Ctx, cfg: config.Config, kind: Kind) !Ensured {
     var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const dir = try launch.operatorDir(ctx, ctx.perm);
+    const dir = try dirOf(ctx, ctx.perm, kind);
     _ = try writeSkill(ctx, arena, dir);
     const changed = if (std.Io.Dir.cwd().access(ctx.io, try markerPath(arena, dir), .{})) |_| true else |_| false;
-    if (try tmux.operator(ctx, arena)) |s| return .{ .name = try ctx.perm.dupe(u8, s.tmux_name), .dir = dir, .skill_changed = changed };
-    return .{ .name = try start(ctx, cfg, arena, dir), .dir = dir, .skill_changed = changed };
+    if (try find(ctx, arena, kind)) |s| return .{ .name = try ctx.perm.dupe(u8, s.tmux_name), .dir = dir, .skill_changed = changed };
+    return .{ .name = try start(ctx, cfg, arena, dir, kind), .dir = dir, .skill_changed = changed };
 }
 
 /// Left by `writeSkill` when the skill changed, until a message to the
@@ -409,20 +455,46 @@ test writeSkill {
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(ctx.io, try markerPath(a, dir), .{}));
 }
 
-/// Start the operator's session in `dir`.
-fn start(ctx: Ctx, cfg: config.Config, arena: std.mem.Allocator, dir: []const u8) ![]const u8 {
-    // --continue keeps the chat going across restarts (a fresh one the first time).
+/// Start the session of the operator of `kind` in `dir`.
+fn start(ctx: Ctx, cfg: config.Config, arena: std.mem.Allocator, dir: []const u8, kind: Kind) ![]const u8 {
+    // --continue keeps the chat going across restarts (a fresh one the first
+    // time). The voice operator's own folder keeps its conversation apart.
     var extra: std.ArrayList([]const u8) = .empty;
-    try extra.appendSlice(arena, &.{ "--append-system-prompt", try withSelfPath(ctx, arena) });
-    if (cfg.operator_model.len > 0) try extra.appendSlice(arena, &.{ "--model", cfg.operator_model });
+    try extra.appendSlice(arena, &.{ "--append-system-prompt", try withSelfPath(ctx, arena, kind) });
+    const model = modelFor(cfg, kind);
+    if (model.len > 0) try extra.appendSlice(arena, &.{ "--model", model });
     return launch.create(ctx, cfg, .{
         .dir = dir,
-        .name = name,
+        .name = switch (kind) {
+            .chat => name,
+            .voice => launch.voice_name,
+        },
         .profile = cfg.operator,
-        .role = tmux.operator_role,
+        .role = switch (kind) {
+            .chat => tmux.operator_role,
+            .voice => tmux.voice_role,
+        },
         .continue_flag = true,
         .extra = extra.items,
     });
+}
+
+/// The `--model` the operator of `kind` starts with ("" for the profile's).
+pub fn modelFor(cfg: config.Config, kind: Kind) []const u8 {
+    return switch (kind) {
+        .chat => cfg.operator_model,
+        .voice => cfg.voice.model,
+    };
+}
+
+test modelFor {
+    const cfg: config.Config = .{ .profiles = &.{}, .default = "", .operator = "", .operator_model = "opus" };
+    try std.testing.expectEqualStrings("opus", modelFor(cfg, .chat));
+    try std.testing.expectEqualStrings("haiku", modelFor(cfg, .voice));
+    var c2 = cfg;
+    c2.voice.model = "sonnet";
+    try std.testing.expectEqualStrings("sonnet", modelFor(c2, .voice));
+    try std.testing.expectEqualStrings("opus", modelFor(c2, .chat));
 }
 
 /// The instructions, plus where this cl is. Claude's Bash tool takes PATH
@@ -430,15 +502,22 @@ fn start(ctx: Ctx, cfg: config.Config, arena: std.mem.Allocator, dir: []const u8
 /// may have another build): without the path, the operator spent its first
 /// tool calls looking for cl. Naming this binary also means an operator
 /// started by a branch's test server runs that branch's commands.
-fn withSelfPath(ctx: Ctx, a: std.mem.Allocator) ![]const u8 {
+fn withSelfPath(ctx: Ctx, a: std.mem.Allocator, kind: Kind) ![]const u8 {
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const exe = ctx.exePath(&exe_buf) catch return instructions;
-    return selfPathText(a, exe);
+    const exe = ctx.exePath(&exe_buf) catch return instructionsFor(kind);
+    return selfPathText(a, exe, kind);
 }
 
-fn selfPathText(a: std.mem.Allocator, exe: []const u8) ![]const u8 {
+fn instructionsFor(kind: Kind) []const u8 {
+    return switch (kind) {
+        .chat => instructions,
+        .voice => instructions ++ voice_instructions,
+    };
+}
+
+fn selfPathText(a: std.mem.Allocator, exe: []const u8, kind: Kind) ![]const u8 {
     return std.mem.concat(a, u8, &.{
-        instructions,
+        instructionsFor(kind),
         "\n\nWhere it says `cl`, run `",
         exe,
         "`: that is the cl these instructions belong to. `cl` on\nPATH may be missing or a different build.",
@@ -447,26 +526,34 @@ fn selfPathText(a: std.mem.Allocator, exe: []const u8) ![]const u8 {
 
 test selfPathText {
     const a = std.testing.allocator;
-    const s = try selfPathText(a, "/home/u/.local/bin/cl");
+    const s = try selfPathText(a, "/home/u/.local/bin/cl", .chat);
     defer a.free(s);
     try std.testing.expect(std.mem.endsWith(u8, s, "run `/home/u/.local/bin/cl`: that is the cl these instructions belong to. `cl` on\nPATH may be missing or a different build."));
+    try std.testing.expect(std.mem.indexOf(u8, s, "voice operator") == null);
+    const v = try selfPathText(a, "/home/u/.local/bin/cl", .voice);
+    defer a.free(v);
+    try std.testing.expect(std.mem.startsWith(u8, v, instructions));
+    try std.testing.expect(std.mem.indexOf(u8, v, "You are the voice operator.") != null);
+    try std.testing.expect(std.mem.endsWith(u8, v, "PATH may be missing or a different build."));
 }
 
-/// Type `text` into the operator and press Enter, starting it first if it
-/// isn't running (the board's Quick Ticket button). Multi-line text arrives
+/// Type `text` into the operator of `kind` and press Enter, starting it first
+/// if it isn't running (the board's Quick Ticket button, and its mic). Multi-line text arrives
 /// as one message. Starting it happens here, so a failure to start is
 /// reported; waiting for its prompt and typing happen on a thread of their
 /// own, so the caller doesn't wait. Returns whether it had to be started.
-pub fn sendInBackground(ctx: Ctx, cfg: config.Config, text: []const u8) !bool {
+pub fn sendInBackground(ctx: Ctx, cfg: config.Config, kind: Kind, text: []const u8) !bool {
     var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);
     defer arena_state.deinit();
-    const was_running = (try tmux.operator(ctx, arena_state.allocator())) != null;
-    const e = try ensureNoting(ctx, cfg);
+    const was_running = (try find(ctx, arena_state.allocator(), kind)) != null;
+    const e = try ensureNoting(ctx, cfg, kind);
     const tmux_name = e.name;
     const owned = if (e.skill_changed) try std.mem.concat(ctx.gpa, u8, &.{ skill_changed_note, text }) else try ctx.gpa.dupe(u8, text);
     errdefer ctx.gpa.free(owned);
     const noted: ?[]const u8 = if (e.skill_changed) e.dir else null;
-    const t = try std.Thread.spawn(.{}, deliver, .{ ctx, tmux_name, owned, !was_running, noted });
+    // The voice operator's folder is cl's own and new to Claude: say yes to
+    // its trust dialog rather than leave the first voice message waiting on it.
+    const t = try std.Thread.spawn(.{}, deliver, .{ ctx, tmux_name, owned, !was_running, kind == .voice, noted });
     t.detach();
     return !was_running;
 }
@@ -477,7 +564,7 @@ pub fn send(ctx: Ctx, cfg: config.Config, text: []const u8) !void {
     var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);
     defer arena_state.deinit();
     const was_running = (try tmux.operator(ctx, arena_state.allocator())) != null;
-    const e = try ensureNoting(ctx, cfg);
+    const e = try ensureNoting(ctx, cfg, .chat);
     const tmux_name = e.name;
     if (!was_running) {
         try claude.waitForPrompt(ctx, tmux_name, false);
@@ -487,10 +574,10 @@ pub fn send(ctx: Ctx, cfg: config.Config, text: []const u8) !void {
     if (e.skill_changed) skillNoted(ctx, e.dir);
 }
 
-fn deliver(ctx: Ctx, tmux_name: []const u8, text: []const u8, fresh: bool, noted: ?[]const u8) void {
+fn deliver(ctx: Ctx, tmux_name: []const u8, text: []const u8, fresh: bool, accept_trust: bool, noted: ?[]const u8) void {
     defer ctx.gpa.free(text);
     if (fresh) {
-        claude.waitForPrompt(ctx, tmux_name, false) catch |err| {
+        claude.waitForPrompt(ctx, tmux_name, accept_trust) catch |err| {
             std.log.err("quick ticket: the operator's prompt didn't show ({s}); not sent", .{@errorName(err)});
             return;
         };
