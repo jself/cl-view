@@ -7,14 +7,85 @@ the parts of agent-deck I actually use.
 - `Ctrl-Q` detaches and drops you into the chooser; `Enter` attaches again.
 - `cl -p work` / `cl -p personal` pick the Claude config dir (profile).
 - `cl list` shows every session with its status and a live preview of its pane.
+- `cl web` serves the same to a browser, and a ticket board (Board) whose
+  tickets cl runs in sessions of their own, in worktrees or a shared checkout,
+  and merges when you approve them. It installs on a phone as an app, over
+  Tailscale (Web, "On a phone").
+- An operator session manages the others for you, by text or by voice.
 
 tmux is the database: each session is a tmux session named `cl_<name>_<id>`
 with its metadata in `@cl_*` options. Status comes from the registry files Claude
 itself writes under `<config dir>/sessions/`, the same source `claude agents` uses,
-so `busy` / `idle` / `blocked` match what Claude reports.
+so `busy` / `idle` / `blocked` match what Claude reports. The board is a SQLite
+database built into cl.
 
-Runs on Linux and macOS (Windows: use WSL). It needs tmux on PATH
-(`brew install tmux` on macOS).
+Runs on Linux and macOS (Windows: use WSL).
+
+## Requirements
+
+cl itself needs only these two, on the PATH of the shell that runs it (and of
+the tmux server, which starts the sessions):
+
+- **tmux** 3.0 or newer; 3.3 or newer for everything (older ones ignore the
+  options cl turns on: extended keys for Ctrl+Shift+Space, passthrough for
+  copying from a session to the desktop's clipboard).
+- **Claude Code** (`claude`), signed in under each profile you use (Config).
+
+Everything else is for one feature, and cl works without it; the table says
+what you lose.
+
+| Program | Used for | Without it |
+|---|---|---|
+| git | worktree tickets, merges, the after-merge command and push, Will conflict (git 2.38 or newer: `git merge-tree --write-tree`) | worktree tickets can't start; queue tickets still run in the project's directory |
+| [jj](https://jj-vcs.github.io/jj/) (Jujutsu, a recent one: 0.25 or newer) | a change per ticket that cl merges itself (below) | projects stay plain git; see below |
+| [gh](https://cli.github.com/), logged in | parking on a PR (`--pr`), watching CI after Push after merge, and Claude opening PRs (Done → PR) | those checks fail (a park on a PR never passes; the CI watch gives up with a note) |
+| [gutter](https://github.com/jself/gutter) | reviewing a ticket's diff in a browser (Open in gutter, `cl t gutter`) | no gutter buttons and no review guide; review from the summary instead |
+| `timeout` (GNU coreutils) | park checks (`--until`, `--pr`), push timeouts | park checks fail (macOS: see below); pushes run without the 2-minute limit |
+| [Tailscale](https://tailscale.com/) | `tailscale` in `web.listen`, the phone app over HTTPS (`tailscale serve`), test-plan links on the phone | serve on `127.0.0.1` or a LAN address; plain http has no phone app, microphone or notifications |
+| systemd (`systemctl`, `systemd-run`, `loginctl`) | `cl web install`: start the web server on boot (Linux) | `web.autostart` runs it in tmux instead |
+| webkitgtk-6.0 (GTK 4) and pkg-config, at build time | `cl-window`, the desktop window behind `cl window` (Linux) | `cl window` opens a Chromium-family browser in app mode, else the default browser |
+| a speech-to-text command (whisper.cpp) and optionally text-to-speech (Piper) | voice: talking to the operator, dictating into sessions | no mic button (Voice) |
+| `pw-record` (PipeWire) | `cl dictate`, dictating from a terminal (Linux) | use the web page's mic instead |
+
+**Is jj required?** No: not for the board, not for worktree tickets. When it
+is installed, cl gives every project jj (`jj git init --colocate`, so git
+keeps working), and tickets get more:
+
+- each ticket has a jj change of its own, in queue projects too (the shared
+  checkout switches to it), so its work is kept apart without commits;
+- Merge is done by cl itself (rebase onto trunk, move trunk); with git,
+  Claude is asked to merge the branch;
+- Will conflict warnings, a ticket under way moving between the queue and a
+  worktree, `cl t attach` taking a session's unclaimed work, and the Not
+  merged tab's Merge all need a jj change.
+
+Without jj, a worktree ticket is a `git worktree` on a branch of its own,
+and a queue ticket works in the project's checkout as it is, with no branch
+of its own, so finishing it only closes it.
+
+Building needs only **Zig 0.16.0** exactly (Build). Its two libraries come
+with it: [libvaxis](https://github.com/rockorager/libvaxis) (the terminal UI,
+pinned to a commit) and the SQLite 3.50.4 amalgamation, both fetched by `zig
+build`, and xterm.js (the web terminal) is in `src/web/vendor`. The Linux
+release binaries are static, so `cl` needs no libraries at run time.
+
+Install hints:
+
+```
+# Arch
+sudo pacman -S tmux git jujutsu github-cli webkitgtk-6.0 pkgconf
+# Debian / Ubuntu (jj: cargo or its release binaries; tmux 3.3+ is in Debian 12, Ubuntu 23.04)
+sudo apt install tmux git gh libwebkitgtk-6.0-dev pkg-config
+# macOS
+brew install tmux git jj gh coreutils
+# Claude Code, anywhere
+curl -fsSL https://claude.ai/install.sh | bash
+```
+
+On macOS: `cl window` and `cl dictate` are Linux-only for now, `cl web
+install` (systemd) isn't there, and park checks need `timeout`, which
+Homebrew's coreutils installs only as `gtimeout` (`ln -s "$(brew --prefix)/bin/gtimeout"
+~/.local/bin/timeout` until cl looks for it).
 
 ## Install
 
@@ -28,7 +99,8 @@ curl -L https://github.com/jself/cl-view/releases/latest/download/cl-$t.tar.gz |
 mkdir -p ~/.local/bin && install -m755 cl-$t/cl ~/.local/bin/cl
 ```
 
-On macOS, a binary downloaded with curl runs as is. One downloaded with a
+The tarballs hold `cl` only: `cl-window` links the system's WebKitGTK, so it
+comes from building (Window). On macOS, a binary downloaded with curl runs as is. One downloaded with a
 browser is quarantined; clear that with `xattr -d com.apple.quarantine ~/.local/bin/cl`.
 
 ## Build
@@ -70,7 +142,7 @@ work = ~/.claude-work
 personal = ~/.claude
 ```
 
-`default`, `operator` and dotted keys (`web.*`, `board.*`, `gutter.*`, `tmux.*`) are settings; every other key is a profile.
+`default`, `operator` and dotted keys (`web.*`, `board.*`, `gutter.*`, `tmux.*`, `voice.*`, `review.*`, `operator.*`) are settings; every other key is a profile.
 `-p <profile>` selects a profile, and `operator` picks the operator's
 profile (falling back to `default`). If `CLAUDE_CONFIG_DIR` is set when
 `cl` runs, it overrides `default`: the profile with that directory is used, or
@@ -114,11 +186,14 @@ cl watch                  print a line whenever a session's status changes
 cl closed                 closed sessions, most recently closed first
 cl operator               attach to the operator session (o in the chooser)
 cl alert <text> | --clear alert you from this session (Needs you and the chooser)
+cl say <text>             the operator's spoken answer to a voice message (Voice)
+cl dictate [name] | --cancel  record and type the words into a session (Voice)
 cl web                    serve the chooser to a browser (foreground)
 cl web password           set the web password (stored as an argon2id hash)
 cl web start | stop       run the web server in the background / stop it
 cl web install | uninstall  start it on boot, as a systemd user service (Linux)
 cl web --port N ...       the same on port N, as a second server (or CL_PORT=N)
+cl window [install]       the web UI in its own desktop window (Window)
 cl board                  the ticket board in the terminal (b in the chooser)
 cl ticket | t <command>   the ticket board (see Board)
 cl project <command>      projects that tickets belong to
@@ -457,7 +532,7 @@ ticket and comes back when Claude stops doesn't ask again.
 under `~/.local/share`, pointing at the `cl` you ran it with).
 
 The window is `cl-window`, a small GTK 4 / WebKitGTK program that the build
-makes next to `cl` when `webkitgtk-6.0` is installed (Arch: `webkitgtk-6.0`;
+makes next to `cl` on Linux when `webkitgtk-6.0` is installed (Arch: `webkitgtk-6.0`;
 force it on or off with `-Dwindow=true|false`). Install it beside `cl`:
 
 ```
@@ -719,13 +794,15 @@ cl project pause boats [--now] # start nothing new there (see Pausing); --all fo
 cl project resume boats
 cl project set qa-tool --after-merge '<command>'   # run on each merge (see After merge)
 cl project set cl-wrapper --push-after-merge origin  # push trunk and watch CI (see Push after merge)
+cl project set qa-tool --planners 1   # planning sessions at once (default 2; they don't take --slots)
 ```
 
 Every project gets jj (unless it isn't a code repo: Repo-less projects,
 below): adding one, or starting its first ticket, runs
 `jj git init --colocate` when the directory has no jj repo yet. Git keeps
 working, and worktree tickets get `jj workspace`s. A directory inside a bigger
-git repo is left alone, and so is everything when jj isn't installed.
+git repo is left alone, and so is everything when jj isn't installed
+(Requirements says what plain git projects do without it).
 
 With jj, every ticket gets a change of its own on top of trunk (the default
 branch), described `QA-1: <title>`, with a bookmark of its key and title on
