@@ -165,7 +165,7 @@
   /* Session status colors, the same hues as `cl list`: --sc for the label and dot, --sbg tints a card's title band, stronger on the left and faint on the right. */
   .s-busy { --sc: #facc15; --sbg: var(--sc); } .s-waiting { --sc: #e879f9; --sbg: var(--sc); } .s-blocked { --sc: #f87171; --sbg: var(--sc); }
   .s-idle { --sc: #4ade80; --sbg: var(--sc); } .s-shell { --sc: #22d3ee; --sbg: var(--sc); } .s-starting { --sc: #60a5fa; --sbg: var(--sc); }
-  .s-gone, .s-killed { --sc: #8b8e94; --sbg: var(--sc); } .s-parked { --sc: #c4b5fd; --sbg: var(--sc); } .s-paused { --sc: #fb923c; } .s-unknown, .s-none { --sc: #a0a3a8; }
+  .s-gone, .s-killed { --sc: #8b8e94; --sbg: var(--sc); } .s-parked { --sc: #c4b5fd; --sbg: var(--sc); } .s-paused { --sc: #fb923c; } .s-waits, .s-subs { --sc: #7dd3fc; } .s-unknown, .s-none { --sc: #a0a3a8; }
   .status { display: inline-flex; align-items: center; gap: calc(7 * var(--u)); font-size: calc(12.5 * var(--u)); color: var(--sc, #d6d7da); }
   .status.s-none { color: #d6d7da; }
   .dot { width: calc(8 * var(--u)); height: calc(8 * var(--u)); border-radius: calc(4 * var(--u)); flex: none; display: inline-block; background: var(--sc, #5d6168); }
@@ -208,6 +208,14 @@
   .unpark-ic { display: inline-flex; align-items: center; height: calc(22 * var(--u)); padding: 0 calc(8 * var(--u)); border-radius: calc(11 * var(--u)); font-size: calc(11.5 * var(--u));
                border: 1px solid var(--parked); color: var(--parked); cursor: pointer; white-space: nowrap; }
   .unpark-ic:hover { background: var(--parked-bg); }
+  .depbox { display: flex; flex-direction: column; gap: calc(6 * var(--u)); margin-top: calc(10 * var(--u)); }
+  .depbox .pill { cursor: pointer; border: 1px solid var(--line); background: transparent; color: inherit; }
+  .deprow { display: flex; flex-wrap: wrap; align-items: center; gap: calc(6 * var(--u)); }
+  .dep { display: inline-flex; align-items: center; }
+  .dep-x { border: 0; background: transparent; color: var(--muted, #8b8e94); cursor: pointer; font-size: calc(15 * var(--u)); padding: 0 calc(4 * var(--u)); }
+  .dep-x:hover { color: inherit; }
+  .blockform { display: inline-flex; gap: calc(6 * var(--u)); }
+  .blockform input { width: calc(120 * var(--u)); }
   .parkbox { border: 1px solid var(--parked-bg); background: color-mix(in srgb, var(--parked-bg) 45%, transparent); border-radius: calc(10 * var(--u));
              padding: calc(10 * var(--u)) calc(12 * var(--u)); display: grid; gap: calc(4 * var(--u)); font-size: calc(13 * var(--u)); }
   .parkbox code { font: calc(12 * var(--u)) var(--mono); overflow-wrap: anywhere; }
@@ -323,8 +331,10 @@
   .wiz .res { display: inline-block; min-width: calc(40 * var(--u)); font-size: calc(12 * var(--u)); color: var(--muted); }
   .wiz .res.pass { color: #86efac; } .wiz .res.fail { color: #fca5a5; }
   #toast { position: fixed; left: 50%; bottom: calc(20 * var(--u)); transform: translateX(-50%); background: #2c2e33; color: #fff; padding: calc(10 * var(--u)) calc(16 * var(--u));
-           border-radius: calc(10 * var(--u)); display: none; max-width: calc(100vw - calc(32 * var(--u))); z-index: 10; }
-  #toast.err { background: #7f1d1d; }
+           border-radius: calc(10 * var(--u)); display: none; max-width: calc(100vw - calc(32 * var(--u))); z-index: 10;
+           /* a popover, so it shows in the top layer over an open dialog; undo the popover defaults */
+           top: auto; right: auto; margin: 0; border: 0; overflow: visible; box-shadow: 0 4px 16px rgba(0,0,0,.45); }
+  #toast.err { background: #b91c1c; font-weight: 600; }
   #micBtn svg { width: calc(16 * var(--u)); height: calc(16 * var(--u)); }
   #micBtn.rec { background: #b91c1c; border-color: #b91c1c; color: #fff; }
   #micBtn.wait { opacity: .7; }
@@ -450,7 +460,7 @@
 <dialog id="dismissDlg" aria-label="Dismiss alerts" style="width:min(calc(480 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="dismissBody"></div></dialog>
 <dialog id="pauseDlg" aria-label="Pause" style="width:min(calc(520 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="pauseBody"></div></dialog>
 <dialog id="killDlg" aria-label="Kill the session" style="width:min(calc(480 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="killBody"></div></dialog>
-<div id="toast" role="status"></div>
+<div id="toast" role="status" popover="manual"></div>
 <div id="voiceBar" hidden role="status"><div class="txt"><div class="heard" id="voiceHeard"></div><div id="voiceText"></div></div><button type="button" id="voiceReplay" title="Say it again" aria-label="Say it again" hidden>&#8635;</button><button type="button" id="voiceClose" title="Stop and close" aria-label="Stop and close">&times;</button></div>
 
 <script src="/xterm.js"></script>
@@ -461,7 +471,7 @@
 const STAGES = ["backlog", "planning", "queued", "running", "review", "testing", "done"];
 const STAGE_NAME = { backlog: "Backlog", planning: "Planning", queued: "Queued", running: "Running", review: "Review", testing: "Testing", done: "Done" };
 const FLAG_NAME = { input: "Needs input", question: "Question", review: "Ready for review", testing: "Needs testing", ended: "Session ended", "start-failed": "Didn't start", conflict: "Conflicts", "after-merge": "After-merge failed", "merge-failed": "Didn't land", unmerged: "Not merged", unparked: "Woke from park", "park-expired": "Park expired", idle: "Idle" };
-const STATUS_NAME = { paused: "Paused", busy: "Working", waiting: "Waiting on you", blocked: "Waiting on you", idle: "Idle", shell: "Idle · background task", starting: "Starting", gone: "Session ended", nosession: "No session", killed: "Killed · restart it", parked: "Parked", unknown: "Unknown" };
+const STATUS_NAME = { waits: "Waits", subs: "Runs as its sub-tickets", paused: "Paused", busy: "Working", waiting: "Waiting on you", blocked: "Waiting on you", idle: "Idle", shell: "Idle · background task", starting: "Starting", gone: "Session ended", nosession: "No session", killed: "Killed · restart it", parked: "Parked", unknown: "Unknown" };
 
 const store = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch { return null; } };
 const state = {
@@ -473,8 +483,10 @@ const state = {
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const ago = (t) => { if (!t) return ""; const d = Math.max(0, (state.data?.now || Date.now() / 1000) - t);
   return d < 60 ? "now" : d < 3600 ? Math.floor(d / 60) + "m" : d < 86400 ? Math.floor(d / 3600) + "h" : Math.floor(d / 86400) + "d"; };
+// Shown again each time so it goes on top of any dialog opened since (modal dialogs sit in the top layer, above every z-index).
 const toast = (msg, err) => { const el = document.getElementById("toast"); el.textContent = msg; el.className = err ? "err" : ""; el.style.display = "block";
-  clearTimeout(toast.t); toast.t = setTimeout(() => (el.style.display = "none"), 3500); };
+  try { if (el.matches(":popover-open")) el.hidePopover(); el.showPopover(); } catch {}
+  clearTimeout(toast.t); toast.t = setTimeout(() => { el.style.display = "none"; try { el.hidePopover(); } catch {} }, err ? 6000 : 3500); };
 
 async function api(path, body) {
   const opts = body === undefined ? {} : { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) };
@@ -609,12 +621,19 @@ const pills = (t) => cardFlags(t).length || t.finishing || t.custom_close || t.p
 // A killed one waits for you to restart it.
 // A queued one in a paused project waits for it to resume, not for a slot.
 // One in Running, Review or Testing that never had a session has "No session" (it was moved there by hand).
+// One that waits on other tickets (board.zig hold: a link, or the sub-ticket
+// before it) waits for them to be Done, and a parent that never started runs
+// as its sub-tickets: neither is stuck, and the dispatcher won't start them.
+const waitingOn = (t) => (t.blocked_by || []).filter((d) => d.stage !== "done");
+const holdOf = (t) => t.children && !t.started ? "subs" : waitingOn(t).length ? "waits" : "";
 const statusOf = (row) => row.status || (row.ticket.tmux.startsWith("(") ? "starting" : row.ticket.park ? "parked" : row.ticket.killed ? "killed" : row.ticket.tmux && !["backlog", "queued"].includes(row.ticket.stage) ? "gone"
-  : row.ticket.stage === "queued" && projectPaused(row.ticket.project) ? "paused" : ["running", "review", "testing"].includes(row.ticket.stage) ? "nosession" : "none");
+  : row.ticket.stage === "queued" && projectPaused(row.ticket.project) ? "paused" : ["running", "review", "testing"].includes(row.ticket.stage) ? "nosession" : row.ticket.stage === "queued" && !row.ticket.tmux && holdOf(row.ticket) || "none");
+const waitTitle = (t) => waitingOn(t).map((d) => `${d.key} (${STAGE_NAME[d.stage]}${d.order ? ", the sub-ticket before it" : ""}): ${d.title}`).join("\n");
 // A Done ticket has no status unless its session is still live: "Not started" or "Session ended" says nothing about finished work.
-const statusHtml = (row) => { const s = statusOf(row); if (row.ticket.stage === "done" && (!row.status || row.status === "gone")) return "";
-  const label = s === "none" ? (row.ticket.stage === "queued" ? "Waiting for a slot" : "Not started") : (STATUS_NAME[s] || s);
-  return `<span class="status s-${esc(s)}"><span class="dot"></span>${esc(label)}</span>`; };
+const statusHtml = (row) => { const s = statusOf(row); const t = row.ticket; if (t.stage === "done" && (!row.status || row.status === "gone")) return "";
+  const label = s === "none" ? (t.stage === "queued" ? "Waiting for a slot" : "Not started") : s === "waits" ? "Waits on " + waitingOn(t).map((d) => d.key).join(", ") : (STATUS_NAME[s] || s);
+  const title = s === "waits" ? ` title="${esc("Starts once these are done:\n" + waitTitle(t))}"` : s === "subs" ? ` title="It has no work of its own: queueing it queued its sub-tickets, which run in order"` : "";
+  return `<span class="status s-${esc(s)}"${title}><span class="dot"></span>${esc(label)}</span>`; };
 const stageBadge = (stage) => `<span class="badge st-${esc(stage)}">${esc(STAGE_NAME[stage] || stage)}</span>`;
 // A parent's progress from its sub-tickets' stages: "4/6 done · 1 running · 1 review" over a bar with a
 // segment per sub-ticket, Done first and then the furthest along. mini is the header's one-line chip.
@@ -861,7 +880,7 @@ function cardHtml(row, compact) {
   return `<button type="button" class="card s-${esc(statusOf(row))} ${hot ? "hot" : ""}" data-open="${esc(t.key)}" data-drag="${esc(t.key)}">
     <span class="hd"><span class="top"><span>${esc(t.key)}</span><span class="grow"></span>${shellIcon(row)}<span>${ago(t.updated)}</span></span>
     <span class="t">${esc(t.title)}</span></span>
-    ${t.parent ? `<span class="sub">sub-ticket of ${esc(t.parent)}</span>` : ""}
+    ${t.parent ? `<span class="sub">sub-ticket of ${esc(t.parent)}${t.parallel ? " · parallel" : ""}</span>` : ""}
     ${compact ? "" : `<span class="meta">${esc(t.project)} · ${esc(where(t))}</span>`}
     ${t.children ? `<span class="meta">${t.children} sub-ticket${t.children > 1 ? "s" : ""}</span>` : ""}
     ${statusHtml(row)}${pills(t)}${t.park ? `<span class="pills"><span class="unpark-ic" data-unpark="${esc(t.key)}" role="button" tabindex="0" title="End the park and resume its session now">Resume</span></span>` : ""}</button>`;
@@ -1107,7 +1126,7 @@ function tabsFor(d) {
 function renderDetail() {
   // Typed but unsent text survives the redraw.
   const kept = {};
-  for (const id of ["commentText", "msg", "backText", "testNote"]) { const el = document.getElementById(id); if (el) kept[id] = el.value; }
+  for (const id of ["commentText", "msg", "backText", "testNote", "blockKey"]) { const el = document.getElementById(id); if (el) kept[id] = el.value; }
   renderDetailInner();
   for (const [id, v] of Object.entries(kept)) { const el = document.getElementById(id); if (el && v) el.value = v; }
   followRuns();
@@ -1167,9 +1186,28 @@ function renderDetailInner() {
     <h1>${esc(t.title)}</h1>
     <div class="facts">${status}${ws}${t.tmux ? `<span class="mono">${esc(t.tmux)}</span>` : ""}
       ${t.round > 1 ? `<span>round ${t.round}</span>` : ""}${t.plan ? `<span>plan first${t.skill ? " · " + esc(t.skill) : ""}</span>` : ""}${parent}</div>
-    <div class="actions">${acts.join("")}</div>${parkBox(t)}
+    <div class="actions">${acts.join("")}</div>${parkBox(t)}${depBox(d)}
     <div class="tabs" role="tablist">${tabs.map(([k, l]) => `<button type="button" role="tab" class="${state.tab === k ? "on" : ""}" aria-selected="${state.tab === k}" data-tab="${k}">${esc(l)}</button>`).join("")}</div>
     <div id="tabBody">${state.tab === tabs[0][0] && (t.body || "").trim() ? `<div class="desc">${descHtml(t.body)}</div>` : ""}${tabHtml(d)}</div>`;
+}
+// Blocked by: what it waits on (links you add here or with `cl ticket edit
+// --after`, any project, and the sub-ticket before it), and what waits on it.
+// A link has × to drop it; the sub-ticket order changes by rank or --parallel.
+function depBox(d) {
+  const t = d.ticket; const blocks = d.blocks || [];
+  if (t.stage === "done" && !t.blocked_by.length && !blocks.length) return "";
+  const chip = (k, extra, title) => `<button type="button" class="pill" data-open="${esc(k)}" title="${esc(title || "")}">${esc(k)}${extra}</button>`;
+  const waits = t.blocked_by.map((dep) => `<span class="dep">${chip(dep.key, dep.stage === "done" ? " ✓" : " · " + STAGE_NAME[dep.stage], dep.title + (dep.order ? " (the sub-ticket before it: rank or --parallel changes that)" : ""))}${dep.order ? ""
+    : `<button type="button" class="dep-x" data-unblock="${esc(dep.key)}" title="Stop waiting on ${esc(dep.key)}" aria-label="Stop waiting on ${esc(dep.key)}">×</button>`}</span>`).join(" ");
+  const linked = new Set([t.key, ...t.blocked_by.map((x) => x.key)]);
+  const choices = state.data.tickets.filter((r) => r.ticket.stage !== "done" && !linked.has(r.ticket.key))
+    .map((r) => `<option value="${esc(r.ticket.key)}">${esc(r.ticket.title)}</option>`).join("");
+  const held = t.stage === "queued" && waitingOn(t).length;
+  return `<div class="depbox"><div class="deprow"><strong>Blocked by</strong> ${waits || `<span class="muted">nothing</span>`}
+      <form id="blockForm" class="blockform"><input type="text" id="blockKey" name="blocker" list="blockKeys" placeholder="Ticket key" autocomplete="off" aria-label="Ticket it waits on">
+        <datalist id="blockKeys">${choices}</datalist><button type="submit" class="btn">Add</button></form></div>
+    ${held ? `<div class="muted">cl starts it once ${waitingOn(t).length > 1 ? "they're" : "it's"} done.</div>` : ""}
+    ${blocks.length ? `<div class="deprow"><strong>Blocks</strong> ${blocks.map((k) => chip(k, "")).join(" ")}</div>` : ""}</div>`;
 }
 function parkBox(t) {
   const p = t.park; if (!p) return "";
@@ -1792,6 +1830,10 @@ async function onClick(e) {
     return act(ds.approve, "approve", extra, finishMsg(ds.approve, extra) || "Approved");
   }
   if (ds.open) return openTicket(ds.open, ds.tab);
+  if (ds.unblock && state.open) {
+    try { await act(state.open, "unblock", { blocker: ds.unblock }, `${state.open} no longer waits on ${ds.unblock}`); } catch {}
+    return;
+  }
   const key = state.open; if (!key) return;
   if (ds.tab) { state.tab = ds.tab; state.tailPinned = true; tail.text = null; renderDetail(); return; }
   if (ds.runBottom) { setRunFollow(ds.runBottom, true); followRuns(); return; }
@@ -1875,7 +1917,9 @@ async function onClick(e) {
   }
   if (el.id === "deleteTicket") {
     if (el.dataset.sure !== "1") { el.dataset.sure = "1"; el.textContent = "Really delete?"; return; }
-    await act(key, "rm", {}, "Deleted"); document.getElementById("ticketDlg").close(); return;
+    const r = await act(key, "rm", {});
+    toast(r.freed?.length ? `Deleted; ${r.freed.join(", ")} no longer wait${r.freed.length > 1 ? "" : "s"} on ${key}` : "Deleted");
+    document.getElementById("ticketDlg").close(); return;
   }
 }
 document.addEventListener("click", (e) => busyWhile(e.target.closest("[data-unpark], button, a, tr.row"), onClick(e)));
@@ -2188,6 +2232,12 @@ async function onSubmit(e) {
   if (e.target.id === "quickForm") return submitQuick(e.target);
   if (e.target.id === "projForm") return submitProject(e.target);
   if (e.target.id === "parkForm") return submitPark(e.target);
+  if (e.target.id === "blockForm") {
+    const input = e.target.elements.blocker; const k = input.value.trim().toUpperCase(); if (!k) return;
+    input.value = "";
+    try { await act(state.open, "block", { blocker: k }, `${state.open} waits on ${k}`); } catch { const el = document.getElementById("blockKey"); if (el) el.value = k; }
+    return;
+  }
   if (e.target.id === "editForm") {
     const f = Object.fromEntries(new FormData(e.target));
     const was = state.detail?.ticket?.mode;

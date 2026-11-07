@@ -130,6 +130,16 @@ pub const Event = struct {
     at: i64,
 };
 
+/// A ticket another one waits on (Ticket.blocked_by).
+pub const Dep = struct {
+    id: i64,
+    key: []const u8,
+    title: []const u8,
+    stage: Stage,
+    /// From the order of sub-tickets (the one before it), not a link of its own.
+    order: bool = false,
+};
+
 pub const Ticket = struct {
     id: i64,
     key: []const u8,
@@ -197,12 +207,32 @@ pub const Ticket = struct {
     /// Its session was killed on purpose (`cl ticket kill`, the board's Kill):
     /// it waits for you to restart it rather than for the dispatcher.
     killed: bool = false,
+    /// A sub-ticket that doesn't wait for the sub-ticket before it (see
+    /// `blocked_by`).
+    parallel: bool = false,
+    /// A session has taken it up to build it (a "started" event; planning
+    /// doesn't count). A parent that never started has no work of its own:
+    /// it runs as its sub-tickets (`held`).
+    started: bool = false,
+    /// What it waits on before the dispatcher starts it: the tickets linked
+    /// with `cl ticket edit --after`, and for a sub-ticket that isn't
+    /// parallel, the sub-ticket ranked before it (and the parallel ones in
+    /// between, back to the first that isn't). Done ones included.
+    blocked_by: []Dep = &.{},
     flags: []Flag = &.{},
     /// Set while it is parked.
     park: ?Park = null,
 };
 
-pub const Error = error{ Sqlite, NotFound, Exists, BadInput, OutOfMemory };
+pub const Error = error{
+    Sqlite,
+    NotFound,
+    Exists,
+    BadInput,
+    OutOfMemory,
+    /// The tickets would wait on each other in a circle, so none would start.
+    Cycle,
+};
 
 /// Worktree slots a new project gets when none are given.
 pub const default_slots = 3;
@@ -260,6 +290,7 @@ const schema =
     \\  plan_md TEXT NOT NULL DEFAULT '',
     \\  review_guide TEXT NOT NULL DEFAULT '',
     \\  asking TEXT NOT NULL DEFAULT '',
+    \\  parallel INTEGER NOT NULL DEFAULT 0,
     \\  created INTEGER NOT NULL,
     \\  updated INTEGER NOT NULL
     \\);
@@ -351,6 +382,17 @@ const parks_schema =
     \\);
 ;
 
+/// Dependencies: `ticket` doesn't start until `blocker` is Done. Made
+/// whatever the version says, as the columns above are.
+const deps_schema =
+    \\CREATE TABLE IF NOT EXISTS deps (
+    \\  ticket INTEGER NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+    \\  blocker INTEGER NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+    \\  PRIMARY KEY (ticket, blocker)
+    \\);
+    \\CREATE INDEX IF NOT EXISTS deps_blocker ON deps(blocker);
+;
+
 pub fn migrate(db: Db) !void {
     const have = (try db.int("PRAGMA user_version", .{})) orelse 0;
     // Added whatever the version says: branches built in parallel each take
@@ -378,6 +420,9 @@ pub fn migrate(db: Db) !void {
         try addColumn(db, "projects", "paused", "INTEGER NOT NULL DEFAULT 0");
         // AskUserQuestion's questions used to come only from the transcript.
         try addColumn(db, "tickets", "asking", "TEXT NOT NULL DEFAULT ''");
+        // Dependencies: links of their own, and sub-tickets in order.
+        try addColumn(db, "tickets", "parallel", "INTEGER NOT NULL DEFAULT 0");
+        try db.execMulti(deps_schema);
     }
     if (have >= version) return;
     // Version 1 had no sub-tickets, version 2 no planning skill.
@@ -396,6 +441,7 @@ pub fn migrate(db: Db) !void {
     }
     try db.execMulti(schema);
     try db.execMulti(parks_schema);
+    try db.execMulti(deps_schema);
     try db.execMulti(std.fmt.comptimePrint("PRAGMA user_version = {d}", .{version}));
 }
 
@@ -753,7 +799,8 @@ pub fn createTicket(ctx: Ctx, db: Db, a: std.mem.Allocator, in: TicketInput) Err
 }
 
 const ticket_cols = "t.id, t.key, t.project, t.title, t.body, t.stage, t.mode, t.plan, t.target, t.worktree, t.branch, t.profile, t.tmux, t.session_id, t.summary, t.round, t.created, t.updated, " ++
-    "coalesce((SELECT p.key FROM tickets p WHERE p.id = t.parent), ''), (SELECT count(*) FROM tickets c WHERE c.parent = t.id), t.skill, t.base, t.finishing, t.change_id, t.rank, t.killed, t.test_plan, t.test_progress, t.custom_close, t.plan_md, t.review_guide, t.asking";
+    "coalesce((SELECT p.key FROM tickets p WHERE p.id = t.parent), ''), (SELECT count(*) FROM tickets c WHERE c.parent = t.id), t.skill, t.base, t.finishing, t.change_id, t.rank, t.killed, t.test_plan, t.test_progress, t.custom_close, t.plan_md, t.review_guide, t.asking, t.parallel, " ++
+    "EXISTS (SELECT 1 FROM events e WHERE e.ticket = t.id AND e.kind = 'started')";
 
 fn readTicket(st: sqlite.Stmt, a: std.mem.Allocator) !Ticket {
     return .{
@@ -789,6 +836,8 @@ fn readTicket(st: sqlite.Stmt, a: std.mem.Allocator) !Ticket {
         .plan_md = try st.dupe(a, 29),
         .review_guide = try st.dupe(a, 30),
         .asking = try st.dupe(a, 31),
+        .parallel = st.int(32) != 0,
+        .started = st.int(33) != 0,
     };
 }
 
@@ -808,6 +857,7 @@ pub fn getTicket(db: Db, a: std.mem.Allocator, key: []const u8) Error!Ticket {
     var t = try readTicket(st, a);
     t.flags = try activeFlags(db, a, t.id);
     t.park = try parkOf(db, a, t.id);
+    t.blocked_by = try blockers(db, a, t.id);
     return t;
 }
 
@@ -901,7 +951,8 @@ pub fn listTickets(db: Db, a: std.mem.Allocator, f: Filter) Error![]Ticket {
     if (f.needs) {
         try sql.appendSlice(a, " ORDER BY (SELECT min(at) FROM flags g WHERE g.ticket = t.id AND g.cleared IS NULL), t.id");
     } else if (f.parent != null) {
-        try sql.appendSlice(a, " ORDER BY t.id");
+        // The order they run in.
+        try sql.appendSlice(a, " ORDER BY t.rank, t.id");
     } else {
         try sql.appendSlice(a, " ORDER BY t.updated DESC, t.id DESC");
     }
@@ -921,6 +972,7 @@ pub fn listTickets(db: Db, a: std.mem.Allocator, f: Filter) Error![]Ticket {
     for (out.items) |*t| {
         t.flags = try activeFlags(db, a, t.id);
         t.park = try parkOf(db, a, t.id);
+        t.blocked_by = try blockers(db, a, t.id);
     }
     return out.toOwnedSlice(a);
 }
@@ -1031,11 +1083,187 @@ pub fn spinOff(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8) Error!vo
     }
 }
 
-/// Remove a ticket; refused while it has sub-tickets.
-pub fn removeTicket(db: Db, a: std.mem.Allocator, key: []const u8) Error!void {
+/// Remove a ticket; refused while it has sub-tickets. The tickets linked to
+/// wait on it go on without it: their keys come back, so the caller can say so.
+pub fn removeTicket(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8) Error![]const []const u8 {
     const t = try getTicket(db, a, key);
     if (t.children > 0) return error.Exists;
+    var freed: std.ArrayList([]const u8) = .empty;
+    {
+        var st = try db.query("SELECT w.id, w.key FROM deps d JOIN tickets w ON w.id = d.ticket WHERE d.blocker = ?1 ORDER BY w.id", .{t.id});
+        defer st.finalize();
+        var ids: std.ArrayList(i64) = .empty;
+        while (try st.step()) {
+            try ids.append(a, st.int(0));
+            try freed.append(a, try st.dupe(a, 1));
+        }
+        var buf: [64]u8 = undefined;
+        for (ids.items) |id| {
+            try logEvent(ctx, db, id, "no longer waits on", std.fmt.bufPrint(&buf, "{s} (removed)", .{t.key}) catch t.key);
+            try touch(ctx, db, id);
+        }
+    }
+    try db.exec("DELETE FROM deps WHERE ticket = ?1 OR blocker = ?1", .{t.id});
     try db.exec("DELETE FROM tickets WHERE id = ?1", .{t.id});
+    return freed.toOwnedSlice(a);
+}
+
+// ---- dependencies ----
+
+fn readDep(st: sqlite.Stmt, a: std.mem.Allocator, order: bool) !Dep {
+    return .{ .id = st.int(0), .key = try st.dupe(a, 1), .title = try st.dupe(a, 2), .stage = Stage.parse(st.text(3)) orelse .backlog, .order = order };
+}
+
+/// What ticket `id` waits on (see Ticket.blocked_by): its links, then the
+/// sub-tickets before it.
+pub fn blockers(db: Db, a: std.mem.Allocator, id: i64) Error![]Dep {
+    var out: std.ArrayList(Dep) = .empty;
+    {
+        var st = try db.query("SELECT b.id, b.key, b.title, b.stage FROM deps d JOIN tickets b ON b.id = d.blocker WHERE d.ticket = ?1 ORDER BY b.rank, b.id", .{id});
+        defer st.finalize();
+        while (try st.step()) try out.append(a, try readDep(st, a, false));
+    }
+    const linked = out.items.len;
+    var st = try db.query(
+        \\SELECT s.id, s.key, s.title, s.stage, s.parallel FROM tickets t JOIN tickets s ON s.parent = t.parent
+        \\WHERE t.id = ?1 AND t.parallel = 0 AND s.id != t.id AND (s.rank < t.rank OR (s.rank = t.rank AND s.id < t.id))
+        \\ORDER BY s.rank DESC, s.id DESC
+    , .{id});
+    defer st.finalize();
+    while (try st.step()) {
+        const d = try readDep(st, a, true);
+        // Linked as well: once is enough.
+        for (out.items[0..linked]) |x| {
+            if (x.id == d.id) break;
+        } else try out.append(a, d);
+        // Back to the first one that runs in order: that one waits for the rest.
+        if (st.int(4) == 0) break;
+    }
+    // Listed in their order.
+    std.mem.reverse(Dep, out.items[linked..]);
+    return out.toOwnedSlice(a);
+}
+
+/// Why the dispatcher leaves a queued ticket alone (null: nothing does).
+pub const Hold = enum {
+    /// A ticket it waits on isn't Done yet.
+    blocked,
+    /// It has sub-tickets and never started: it has no work of its own.
+    subtickets,
+};
+
+pub fn hold(t: Ticket) ?Hold {
+    if (t.children > 0 and !t.started) return .subtickets;
+    for (t.blocked_by) |d| if (d.stage != .done) return .blocked;
+    return null;
+}
+
+/// The tickets `t` waits on that aren't Done yet.
+pub fn waitingOn(a: std.mem.Allocator, t: Ticket) ![]const Dep {
+    var out: std.ArrayList(Dep) = .empty;
+    for (t.blocked_by) |d| if (d.stage != .done) try out.append(a, d);
+    return out.items;
+}
+
+/// Ticket `from` waits on `target`, directly or through others.
+fn reaches(db: Db, a: std.mem.Allocator, from: i64, target: i64) Error!bool {
+    var seen: std.AutoHashMapUnmanaged(i64, void) = .empty;
+    var stack: std.ArrayList(i64) = .empty;
+    try stack.append(a, from);
+    while (stack.pop()) |id| {
+        if (id == target) return true;
+        if ((try seen.getOrPut(a, id)).found_existing) continue;
+        for (try blockers(db, a, id)) |d| try stack.append(a, d.id);
+    }
+    return false;
+}
+
+/// Some sub-ticket of `id`'s parent (or `id` itself) waits on itself: the
+/// order of sub-tickets and the links between them disagree.
+fn orderCycle(db: Db, a: std.mem.Allocator, id: i64) Error!bool {
+    var st = try db.query("SELECT s.id FROM tickets t JOIN tickets s ON s.parent = t.parent WHERE t.id = ?1", .{id});
+    defer st.finalize();
+    var ids: std.ArrayList(i64) = .empty;
+    while (try st.step()) try ids.append(a, st.int(0));
+    for (ids.items) |s| for (try blockers(db, a, s)) |d| {
+        if (try reaches(db, a, d.id, s)) return true;
+    };
+    return false;
+}
+
+/// Link `key` to wait on `blocker_key` (any project): the dispatcher doesn't
+/// start it until that one is Done. error.Cycle when the blocker already
+/// waits on it (or it's the same ticket); false when they were linked already.
+pub fn addBlocker(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, blocker_key: []const u8) Error!bool {
+    const t = try getTicket(db, a, key);
+    const b = try getTicket(db, a, blocker_key);
+    if (t.id == b.id or try reaches(db, a, b.id, t.id)) return error.Cycle;
+    try db.exec("INSERT OR IGNORE INTO deps (ticket, blocker) VALUES (?1, ?2)", .{ t.id, b.id });
+    if (db.changes() == 0) return false;
+    try logEvent(ctx, db, t.id, "waits on", b.key);
+    try touch(ctx, db, t.id);
+    return true;
+}
+
+/// Drop the link from `key` to `blocker_key`; false when there was none.
+/// The order of sub-tickets isn't a link: rank or --parallel changes that.
+pub fn removeBlocker(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, blocker_key: []const u8) Error!bool {
+    const t = try getTicket(db, a, key);
+    const b = try getTicket(db, a, blocker_key);
+    try db.exec("DELETE FROM deps WHERE ticket = ?1 AND blocker = ?2", .{ t.id, b.id });
+    if (db.changes() == 0) return false;
+    try logEvent(ctx, db, t.id, "no longer waits on", b.key);
+    try touch(ctx, db, t.id);
+    return true;
+}
+
+/// A sub-ticket runs in order (waits for the one before it), or in parallel.
+/// error.Cycle when back in order it would wait on itself.
+pub fn setParallel(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, on: bool) Error!void {
+    const t = try getTicket(db, a, key);
+    if (t.parallel == on) return;
+    try db.execMulti("BEGIN IMMEDIATE");
+    errdefer db.execMulti("ROLLBACK") catch {};
+    try db.exec("UPDATE tickets SET parallel = ?2 WHERE id = ?1", .{ t.id, on });
+    if (!on and try orderCycle(db, a, t.id)) return error.Cycle;
+    try logEvent(ctx, db, t.id, if (on) "parallel" else "in order", "");
+    try touch(ctx, db, t.id);
+    try db.execMulti("COMMIT");
+}
+
+/// The tickets that wait on `id`: linked to it, or the sub-tickets after it.
+pub fn dependents(db: Db, a: std.mem.Allocator, id: i64) Error![]const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    var st = try db.query(
+        \\SELECT w.id, w.key FROM tickets w WHERE w.id IN (SELECT ticket FROM deps WHERE blocker = ?1)
+        \\  OR w.parent = (SELECT parent FROM tickets WHERE id = ?1)
+        \\ORDER BY w.rank, w.id
+    , .{id});
+    defer st.finalize();
+    var cands: std.ArrayList(struct { id: i64, key: []const u8 }) = .empty;
+    while (try st.step()) try cands.append(a, .{ .id = st.int(0), .key = try st.dupe(a, 1) });
+    for (cands.items) |c| {
+        if (c.id == id) continue;
+        for (try blockers(db, a, c.id)) |d| if (d.id == id) {
+            try out.append(a, c.key);
+            break;
+        };
+    }
+    return out.items;
+}
+
+/// Queueing a parent that never started queues its sub-tickets (it has no
+/// work of its own: it runs as them), and shelving it in Backlog shelves the
+/// ones that haven't started yet.
+fn moveSubtickets(ctx: Ctx, db: Db, id: i64, from: Stage, to: Stage) Error!void {
+    if ((try db.int("SELECT 1 FROM events WHERE ticket = ?1 AND kind = 'started'", .{id})) != null) return;
+    while (try db.int(
+        \\SELECT id FROM tickets c WHERE c.parent = ?1 AND c.stage = ?2 AND c.tmux = ''
+        \\  AND NOT EXISTS (SELECT 1 FROM events e WHERE e.ticket = c.id AND e.kind = 'started') ORDER BY c.rank, c.id LIMIT 1
+    , .{ id, @as([]const u8, @tagName(from)) })) |c| {
+        try moveId(ctx, db, c, from, to);
+        try logEvent(ctx, db, c, if (to == .queued) "queued" else "shelved", "with its parent");
+    }
 }
 
 fn touch(ctx: Ctx, db: Db, id: i64) Error!void {
@@ -1071,6 +1299,8 @@ fn moveId(ctx: Ctx, db: Db, id: i64, from: Stage, to: Stage) Error!void {
     if (to == .done) try db.exec("UPDATE flags SET cleared = ?2 WHERE ticket = ?1 AND cleared IS NULL AND kind != ?3", .{ id, now(ctx), flag_after_merge });
     // Out of Done, it is under way again: "done without merging" no longer holds.
     if (from == .done) try clearFlagId(ctx, db, id, flag_unmerged);
+    if (to == .queued) try moveSubtickets(ctx, db, id, .backlog, .queued);
+    if (from == .queued and to == .backlog) try moveSubtickets(ctx, db, id, .queued, .backlog);
     try touch(ctx, db, id);
 }
 
@@ -1351,6 +1581,9 @@ pub fn rankTicket(db: Db, a: std.mem.Allocator, key: []const u8, after: ?[]const
         const mid = @divFloor(r + other, 2);
         if (mid != r and mid != other) {
             try db.exec("UPDATE tickets SET rank = ?2 WHERE id = ?1", .{ t.id, mid });
+            // Sub-tickets run in rank order: a new order mustn't have one
+            // wait on a sibling that (through links) waits on it.
+            if (try orderCycle(db, a, t.id)) return error.Cycle;
             return db.execMulti("COMMIT");
         }
         // No room between them: spread every ticket out again, keeping the order.
@@ -1573,16 +1806,16 @@ test "projects, tickets, flags, comments, done" {
     try testing.expectEqual(@as(i64, 1), (try getTicket(db, a, k2)).children);
     try testing.expectEqual(@as(usize, 1), (try listTickets(db, a, .{ .parent = k2 })).len);
     try testing.expectEqual(@as(usize, 2), (try listTickets(db, a, .{ .top = true })).len);
-    try testing.expectError(error.Exists, removeTicket(db, a, k2));
+    try testing.expectError(error.Exists, removeTicket(ctx, db, a, k2));
     try testing.expectEqual(@as(usize, 1), (try openSubtickets(db, a, k2)).len);
     try spinOff(ctx, db, a, k2);
     try testing.expectEqual(@as(usize, 0), (try openSubtickets(db, a, k2)).len);
     try testing.expectEqualStrings("", (try getTicket(db, a, sub)).parent);
-    try removeTicket(db, a, sub);
+    _ = try removeTicket(ctx, db, a, sub);
 
     try testing.expectError(error.Exists, removeProject(db, "qa-tool"));
-    try removeTicket(db, a, k1);
-    try removeTicket(db, a, k2);
+    _ = try removeTicket(ctx, db, a, k1);
+    _ = try removeTicket(ctx, db, a, k2);
     try removeProject(db, "qa-tool");
 }
 
@@ -1868,4 +2101,66 @@ test "an idle session raises idle only when nothing else asks, and it goes when 
     // It comes and goes every turn: not in the activity log. Never dismissed (it would only come back).
     try testing.expect(waitingFlag(flag_idle));
     try testing.expectEqual(@as(?i64, null), try db.int("SELECT 1 FROM events WHERE ticket = ?1 AND detail = 'idle'", .{id}));
+}
+
+test "dependencies: links, cycles, a removed blocker, and shelving a parent" {
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp" };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try Db.open(":memory:");
+    defer db.close();
+    try migrate(db);
+    try addProject(db, .{ .name = "qa", .dir = "/x/qa" });
+    const k1 = try createTicket(ctx, db, a, .{ .project = "qa", .title = "One" });
+    const k2 = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Two" });
+    const k3 = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Three" });
+
+    // Itself, and circles through other tickets, are refused.
+    try testing.expectError(error.Cycle, addBlocker(ctx, db, a, k1, k1));
+    _ = try addBlocker(ctx, db, a, k2, k1);
+    _ = try addBlocker(ctx, db, a, k3, k2);
+    try testing.expectError(error.Cycle, addBlocker(ctx, db, a, k1, k3));
+    try testing.expectError(error.NotFound, addBlocker(ctx, db, a, k1, "QA-99"));
+    try testing.expectEqual(@as(usize, 1), (try dependents(db, a, (try getTicket(db, a, k1)).id)).len);
+
+    // Removing a blocker: what waited on it goes on without it, and says so.
+    const freed = try removeTicket(ctx, db, a, k2);
+    try testing.expectEqual(@as(usize, 1), freed.len);
+    try testing.expectEqualStrings(k3, freed[0]);
+    try testing.expectEqual(@as(usize, 0), (try getTicket(db, a, k3)).blocked_by.len);
+    try testing.expectEqual(@as(i64, 0), (try db.int("SELECT count(*) FROM deps", .{})).?);
+    try testing.expect(!try removeBlocker(ctx, db, a, k3, k1));
+    _ = try addBlocker(ctx, db, a, k3, k1);
+    try testing.expect(try removeBlocker(ctx, db, a, k3, k1));
+
+    // Sub-tickets: a link against their order is a circle, and so is a
+    // reorder or a return to order that would make one.
+    const kp = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Parent" });
+    const s1 = try createTicket(ctx, db, a, .{ .parent = kp, .title = "S1" });
+    const s2 = try createTicket(ctx, db, a, .{ .parent = kp, .title = "S2" });
+    try testing.expectError(error.Cycle, addBlocker(ctx, db, a, s1, s2));
+    try setParallel(ctx, db, a, s2, true);
+    _ = try addBlocker(ctx, db, a, s1, s2);
+    try testing.expectError(error.Cycle, setParallel(ctx, db, a, s2, false));
+    try testing.expect((try getTicket(db, a, s2)).parallel);
+    try testing.expect(try removeBlocker(ctx, db, a, s1, s2));
+    try setParallel(ctx, db, a, s2, false);
+    _ = try addBlocker(ctx, db, a, s2, s1);
+    const r1 = (try getTicket(db, a, s1)).rank;
+    try testing.expectError(error.Cycle, rankTicket(db, a, s1, s2, null));
+    try testing.expectEqual(r1, (try getTicket(db, a, s1)).rank);
+
+    // Queued with its parent, shelved with it while not started.
+    try move(ctx, db, a, kp, .queued);
+    try testing.expectEqual(Stage.queued, (try getTicket(db, a, s1)).stage);
+    try testing.expectEqual(Stage.queued, (try getTicket(db, a, s2)).stage);
+    try move(ctx, db, a, kp, .backlog);
+    try testing.expectEqual(Stage.backlog, (try getTicket(db, a, s1)).stage);
+    try testing.expectEqual(Stage.backlog, (try getTicket(db, a, s2)).stage);
+    // A parent that ran has work of its own: queueing it leaves them be.
+    try logEvent(ctx, db, (try getTicket(db, a, kp)).id, "started", "cl_qa_1");
+    try move(ctx, db, a, kp, .queued);
+    try testing.expectEqual(Stage.backlog, (try getTicket(db, a, s1)).stage);
+    try testing.expect(hold(try getTicket(db, a, kp)) == null);
 }

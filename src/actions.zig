@@ -436,17 +436,19 @@ fn killTicketSession(ctx: Ctx, db: board.Db, t: board.Ticket, s: []const u8) !vo
 
 /// Delete a ticket. Its session, gutter and test launches go with it, as
 /// they do when it goes to Done: nothing on the board points at them
-/// anymore. error.Exists while it has sub-tickets.
-pub fn remove(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8) !void {
+/// anymore. error.Exists while it has sub-tickets. Returns the tickets that
+/// were linked to wait on it: they go on without it.
+pub fn remove(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8) ![]const []const u8 {
     const t = try board.getTicket(db, a, key);
     const me = tmux.ownSession(ctx, a);
     const s = try sessionToClose(ctx, db, t);
-    try board.removeTicket(db, a, t.key);
+    const freed = try board.removeTicket(ctx, db, a, t.key);
     const mine = if (s) |x| if (me) |m| std.mem.eql(u8, x, m) else false else false;
     if (s) |x| if (!mine) tmux.kill(ctx, x) catch {};
     review.stopGutter(ctx, a, t.key) catch {};
     review.stopLaunchesBut(ctx, a, t.key, me) catch {};
     if (mine) tmux.kill(ctx, s.?) catch {};
+    return freed;
 }
 
 /// The main server's sweep: a Done ticket whose session is still alive
@@ -1112,7 +1114,7 @@ test "going to Done closes the ticket's session, even when a test server of its 
     const six = try T.ticket(ctx, db, a, "Six", "cl_qa-6_dd");
     try T.start(ctx, "cl_qa-6_dd");
     try T.start(ctx, "clrun_qa-6_s1");
-    try remove(ctx, db, a, six);
+    _ = try remove(ctx, db, a, six);
     try std.testing.expect(!T.alive(ctx, "cl_qa-6_dd"));
     try std.testing.expect(!T.alive(ctx, "clrun_qa-6_s1"));
     try std.testing.expectError(error.NotFound, board.getTicket(db, a, six));

@@ -921,6 +921,25 @@ needs no permission). Deleting the ticket deletes its images.
   session `cl t sub "title"`. `list --top` leaves them out, `list --parent
   QA-1` lists them, and `show` includes them. A ticket with sub-tickets can't
   be removed until they are.
+- Sub-tickets run in order: each waits for the one ranked before it to be
+  Done (rank them with `cl t rank` or by dragging, and the order follows),
+  in queue and worktree projects alike. `--parallel` (on `new` or `edit`)
+  lets one run without waiting; `--in-order` puts it back. A sub-ticket after
+  a parallel one waits for it too, back to the first one in order.
+- A parent that never started has no work of its own: queueing it queues its
+  sub-tickets (Backlog to Queued; back to Backlog shelves the ones not
+  started), and it stays in Queued, "runs as its sub-tickets", without a
+  session. A parent that ran (and split work off) starts as usual.
+- Dependencies: `cl t edit QA-5 --after QA-3,WEB-2` makes QA-5 wait until
+  those (any project) are Done; `--not-after QA-3` drops the link, and `new`
+  takes `--after` too. On the board, a ticket's Blocked by row does the same:
+  type a key (it suggests open tickets) and Add, or × on a link to drop it. The dispatcher leaves a waiting ticket in Queued (its
+  card says "Waits on QA-3"), and starts it once they're done; `cl t start`
+  still starts it by hand. A link that would make tickets wait on each other
+  in a circle is refused, and so is a reorder of sub-tickets that would.
+  `show` lists what it waits on and what it blocks (`--json`: `blocked_by`,
+  `blocks`). Removing a ticket drops the links to it and says which tickets
+  no longer wait on it.
 
 ### The terminal board
 

@@ -124,6 +124,10 @@ pub const CardStatus = enum {
     parked,
     /// Queued in a paused project (`cl project pause`).
     paused,
+    /// Queued, waiting on other tickets to be done (board.hold).
+    blocked,
+    /// Queued, a parent that runs as its sub-tickets (board.hold).
+    subtickets,
     waiting_slot,
     not_started,
     done,
@@ -139,6 +143,8 @@ pub const CardStatus = enum {
             .killed => "killed; restart it",
             .parked => "parked",
             .paused => "paused",
+            .blocked => "waits on other tickets",
+            .subtickets => "runs as its sub-tickets",
             .waiting_slot => "waiting for a slot",
             .not_started => "not started",
             .done => "done",
@@ -153,6 +159,7 @@ pub const CardStatus = enum {
             .starting => .{ .index = 4 },
             .parked => .{ .index = 5 },
             .paused => .{ .index = 6 },
+            .blocked, .subtickets => .{ .index = 6 },
             .gone, .killed => .{ .index = 8 },
             else => .default,
         };
@@ -184,7 +191,11 @@ pub fn cardStatus(t: board.Ticket, live: ?claude.Status, paused: bool) CardStatu
     if (t.stage == .done) return .done;
     if (t.tmux.len > 0 and t.stage != .backlog and t.stage != .queued) return .gone;
     if (t.stage != .queued) return .not_started;
-    return if (paused) .paused else .waiting_slot;
+    if (paused) return .paused;
+    return switch (board.hold(t) orelse return .waiting_slot) {
+        .blocked => .blocked,
+        .subtickets => .subtickets,
+    };
 }
 
 pub fn flagLabel(f: board.Flag) []const u8 {
@@ -1586,6 +1597,15 @@ test cardStatus {
     try testing.expectEqual(CardStatus.waiting_slot, cardStatus(t, null, false));
     // In a paused project it says so rather than waiting for a slot.
     try testing.expectEqual(CardStatus.paused, cardStatus(t, null, true));
+    // Waiting on another ticket, or running as its sub-tickets: not on a slot.
+    var deps = [_]board.Dep{.{ .id = 2, .key = "QA-2", .title = "First", .stage = .running }};
+    t.blocked_by = &deps;
+    try testing.expectEqual(CardStatus.blocked, cardStatus(t, null, false));
+    deps[0].stage = .done;
+    try testing.expectEqual(CardStatus.waiting_slot, cardStatus(t, null, false));
+    t.children = 2;
+    try testing.expectEqual(CardStatus.subtickets, cardStatus(t, null, false));
+    t.children = 0;
     t.stage = .done;
     t.tmux = "cl_qa_1";
     try testing.expectEqual(CardStatus.done, cardStatus(t, null, false));

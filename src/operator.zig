@@ -173,7 +173,9 @@ const tickets_skill =
     \\                          plan to approve first (--skill <name> picks the interview skill).
     \\                          Planning starts right away in a session of its own and writes
     \\                          no code; once approved, the ticket queues to be built
-    \\     --parent <key>       a sub-ticket; the project may be left out
+    \\     --parent <key>       a sub-ticket; the project may be left out. It runs after the
+    \\                          sub-tickets created before it (see Roadmaps below)
+    \\     --after <key,...>    wait until these tickets are done before starting
     \\     --stage queued       start as soon as a slot or session frees up; without it
     \\                          the ticket waits in backlog until someone queues it
     \\     --profile <name>     the Claude profile for its session
@@ -183,12 +185,34 @@ const tickets_skill =
     \\Several pieces of work: one ticket each, or a parent ticket with sub-tickets when they
     \\belong together. Make sure the human wants all of them before creating more than two.
     \\
+    \\## Roadmaps and dependencies
+    \\
+    \\A roadmap is a parent ticket with sub-tickets, created in the order they should run:
+    \\
+    \\  cl ticket new <project> "<goal>" -m "<the bigger picture>"          (prints QA-10)
+    \\  cl ticket new --parent QA-10 "<first step>" -m "<details>"           (QA-11)
+    \\  cl ticket new --parent QA-10 "<second step>" -m "<details>"          (QA-12)
+    \\  cl ticket move QA-10 queued                                          when asked to start
+    \\
+    \\- Sub-tickets run in order, in queue and worktree projects alike: each waits until the
+    \\  one ranked before it is done. `cl ticket rank` reorders them, and the order follows.
+    \\  `--parallel` (on new or edit) for one that needn't wait; `--in-order` undoes it.
+    \\- The parent has no work of its own: queueing it is the one action that queues its
+    \\  sub-tickets. It stays in queued ("runs as its sub-tickets") and never gets a session.
+    \\- Any ticket can wait on others, in any project: `cl ticket edit QA-5 --after QA-3,WEB-2`
+    \\  (or `new ... --after`); `--not-after QA-3` drops it. The dispatcher starts it only once
+    \\  they're all done. A link that would make tickets wait on each other is refused.
+    \\- `cl ticket show <key>` says what it waits on and what it blocks (`--json`: blocked_by,
+    \\  blocks). A queued ticket waiting on others isn't stuck: don't alert about it or start
+    \\  it by hand (`cl ticket start` ignores what it waits on) unless the human asks.
+    \\
     \\## Reading the board
     \\
     \\  cl ticket needs --json             the inbox, oldest first: {"tickets": [...] waiting on the
     \\                                     human, "alerts": [...] sessions' `cl alert`s (yours too)}
     \\  cl ticket list [--stage <s>] [--project <p>] [--search <q>] [--open] [--json]
-    \\  cl ticket show <key> [--json]      details, flags, sub-tickets, comments and activity
+    \\  cl ticket show <key> [--json]      details, flags, what it waits on and blocks,
+    \\                                     sub-tickets (in order), comments and activity
     \\
     \\Stages: backlog, planning, queued, running, review, testing, done. Flags say what a
     \\ticket needs from the human: question (Claude asked something), input (a permission
@@ -234,11 +258,15 @@ const tickets_skill =
     \\## Changing tickets
     \\
     \\  cl ticket edit <key> [--title <t>] [-m <body>] [--plan | --no-plan] ...
+    \\  cl ticket edit <key> --after <key,...> | --not-after <key,...> | --parallel | --in-order
+    \\                                     wait on other tickets, or stop; a sub-ticket that
+    \\                                     doesn't / does wait for the one before it
     \\  cl ticket move <key> <stage>       e.g. queued to have the dispatcher start it
     \\  cl ticket rank <key> --top         reorder when asked: --top / --bottom of its
     \\                                     stage (all projects), or --before / --after <key>;
-    \\                                     the dispatcher starts queued tickets in this order
-    \\  cl ticket start <key>              start it now
+    \\                                     the dispatcher starts queued tickets in this order,
+    \\                                     and sub-tickets run in it
+    \\  cl ticket start <key>              start it now (even if it waits on other tickets)
     \\  cl ticket park <key> --reason "<what it waits on>" [--until '<shell check>'] [--every 1h] [--max 7d]
     \\                                     wait on something outside cl (a PR, a deploy): its
     \\                                     session ends and it leaves the inbox; the dispatcher
@@ -259,7 +287,8 @@ const tickets_skill =
     \\  cl ticket answer <key> <answer>... answer its question (an option number or words)
     \\
     \\Approving, answering, sending comments into a session, moving to done and `rm` act for
-    \\the human: do them only when the human asked you to. Never `rm` a ticket without asking.
+    \\the human: do them only when the human asked you to. Never `rm` a ticket without asking:
+    \\the tickets that wait on it would go on without it (`rm` names them).
     \\
 ;
 

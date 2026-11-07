@@ -935,12 +935,15 @@ pub fn tick(ctx: Ctx, cfg: config.Config, db: board.Db) !usize {
 /// ones start on their own, up to the project's planners). A killed one waits for you to
 /// restart it, and a parked one for its park to end, in whatever stage
 /// (moving it to Queued doesn't start it). A paused project's queued
-/// tickets wait, in their place, for it to resume.
+/// tickets wait, in their place, for it to resume. One that waits on
+/// another ticket (board.hold: a link, or the sub-ticket before it) waits
+/// until that one is Done, and a parent that never started runs as its
+/// sub-tickets, so it doesn't start itself.
 fn waitingToStart(db: board.Db, a: std.mem.Allocator) ![]board.Ticket {
     const paused = try pausedProjects(db, a);
     var waiting: std.ArrayList(board.Ticket) = .empty;
     for (try board.listTickets(db, a, .{ .stage = .queued })) |t| {
-        if (t.tmux.len == 0 and !t.killed and t.park == null and !paused.contains(t.project)) try waiting.append(a, t);
+        if (t.tmux.len == 0 and !t.killed and t.park == null and !paused.contains(t.project) and board.hold(t) == null) try waiting.append(a, t);
     }
     std.mem.sort(board.Ticket, waiting.items, {}, byRank);
     return waiting.items;
@@ -1658,4 +1661,96 @@ test "a start that fails says why" {
     try std.testing.expectEqual(error.SessionFailed, sessionFailed(error.PromptTimeout, "/x"));
     try std.testing.expectEqualStrings("Claude's prompt didn't show within 60 seconds", failureReason(error.SessionFailed));
     try std.testing.expectEqualStrings("TargetBusy", failureReason(error.TargetBusy));
+}
+
+test "the dispatcher holds a blocked ticket and starts it once its blocker is done" {
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp" };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "qa", .dir = "/x/qa", .mode = .worktree });
+    try board.addProject(db, .{ .name = "web", .dir = "/x/web" });
+    // A blocker in another project, still in Backlog.
+    const kb = try board.createTicket(ctx, db, a, .{ .project = "web", .title = "API first" });
+    const kw = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Uses the API", .stage = .queued });
+    try std.testing.expect(try board.addBlocker(ctx, db, a, kw, kb));
+    try std.testing.expect(!try board.addBlocker(ctx, db, a, kw, kb));
+
+    const held = try board.getTicket(db, a, kw);
+    try std.testing.expectEqual(board.Hold.blocked, board.hold(held).?);
+    try std.testing.expectEqualStrings(kb, (try board.waitingOn(a, held))[0].key);
+    try std.testing.expectEqual(@as(usize, 0), (try waitingToStart(db, a)).len);
+
+    // Under way isn't enough: it waits for Done.
+    try board.move(ctx, db, a, kb, .queued);
+    var w = try waitingToStart(db, a);
+    try std.testing.expectEqual(@as(usize, 1), w.len);
+    try std.testing.expectEqualStrings(kb, w[0].key);
+    try board.move(ctx, db, a, kb, .review);
+    try std.testing.expectEqual(@as(usize, 0), (try waitingToStart(db, a)).len);
+
+    try board.move(ctx, db, a, kb, .done);
+    w = try waitingToStart(db, a);
+    try std.testing.expectEqual(@as(usize, 1), w.len);
+    try std.testing.expectEqualStrings(kw, w[0].key);
+    try std.testing.expect(board.hold(w[0]) == null);
+}
+
+test "ordered sub-tickets in a worktree project start one at a time" {
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp" };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "qa", .dir = "/x/qa", .mode = .worktree, .slots = 3 });
+    const kp = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Roadmap" });
+    const k1 = try board.createTicket(ctx, db, a, .{ .parent = kp, .title = "One" });
+    const k2 = try board.createTicket(ctx, db, a, .{ .parent = kp, .title = "Two" });
+    const k3 = try board.createTicket(ctx, db, a, .{ .parent = kp, .title = "Three" });
+    const kx = try board.createTicket(ctx, db, a, .{ .parent = kp, .title = "Alongside" });
+    try board.setParallel(ctx, db, a, kx, true);
+
+    // Queueing the parent queues its sub-tickets; it has no work of its own.
+    try board.move(ctx, db, a, kp, .queued);
+    for ([_][]const u8{ k1, k2, k3, kx }) |k| try std.testing.expectEqual(board.Stage.queued, (try board.getTicket(db, a, k)).stage);
+    try std.testing.expectEqual(board.Hold.subtickets, board.hold(try board.getTicket(db, a, kp)).?);
+
+    const keys = struct {
+        fn of(al: std.mem.Allocator, ts: []const board.Ticket) ![]const u8 {
+            var out: std.ArrayList(u8) = .empty;
+            for (ts) |t| {
+                if (out.items.len > 0) try out.append(al, ' ');
+                try out.appendSlice(al, t.key);
+            }
+            return out.items;
+        }
+    }.of;
+    // Slots for three, but only the first starts, with the parallel one.
+    try std.testing.expectEqualStrings("QA-2 QA-5", try keys(a, try waitingToStart(db, a)));
+    try db.exec("UPDATE tickets SET tmux = 'cl_qa-2_1', stage = 'running' WHERE key = ?1", .{k1});
+    try db.exec("UPDATE tickets SET tmux = 'cl_qa-5_2', stage = 'running' WHERE key = ?1", .{kx});
+    try std.testing.expectEqualStrings("", try keys(a, try waitingToStart(db, a)));
+    try db.exec("UPDATE tickets SET stage = 'done' WHERE key = ?1", .{k1});
+    try std.testing.expectEqualStrings("QA-3", try keys(a, try waitingToStart(db, a)));
+
+    // Reordered, the chain follows: Three goes before Two.
+    try board.rankTicket(db, a, k3, null, k2);
+    try std.testing.expectEqualStrings("QA-4", try keys(a, try waitingToStart(db, a)));
+    const t2 = try board.getTicket(db, a, k2);
+    try std.testing.expectEqualStrings(k3, t2.blocked_by[0].key);
+    try std.testing.expect(t2.blocked_by[0].order);
+    try db.exec("UPDATE tickets SET stage = 'done' WHERE key = ?1", .{k3});
+    try std.testing.expectEqualStrings("QA-3", try keys(a, try waitingToStart(db, a)));
+
+    // A sub-ticket created later goes last, after the parallel one too.
+    const k4 = try board.createTicket(ctx, db, a, .{ .parent = kp, .title = "Four", .stage = .queued });
+    const t4 = try board.getTicket(db, a, k4);
+    try std.testing.expectEqual(@as(usize, 2), t4.blocked_by.len);
+    try std.testing.expectEqualStrings(k2, t4.blocked_by[0].key);
+    try std.testing.expectEqualStrings(kx, t4.blocked_by[1].key);
 }

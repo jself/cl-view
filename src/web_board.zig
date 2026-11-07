@@ -119,6 +119,7 @@ pub fn handle(ctx: Ctx, cfg: config.Config, req: *std.http.Server.Request, path:
         const status: std.http.Status, const msg: []const u8 = switch (err) {
             error.NotFound => .{ .not_found, "no such ticket or project" },
             error.Exists => .{ .conflict, "already exists, or still in use" },
+            error.Cycle => .{ .conflict, "that would make tickets wait on each other in a circle (or on itself), so none would start" },
             error.BadInput => .{ .bad_request, "invalid input" },
             error.NoSuchDir => .{ .bad_request, "no such directory" },
             error.NoSession => .{ .conflict, "the ticket has no live session" },
@@ -197,6 +198,8 @@ const Body = struct {
     tell: ?[]const u8 = null,
     planners: ?i64 = null,
     spin_off: ?bool = null,
+    /// block, unblock: the ticket it waits on.
+    blocker: ?[]const u8 = null,
     /// Going to Done: "merge", "pr" or "close" (the default).
     finish: ?[]const u8 = null,
     /// Moving or ranking: the keys of the tickets it lands between.
@@ -461,6 +464,10 @@ fn ticketAction(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator
         // Ranked first, so the dispatcher never sees it queued in the wrong place.
         if (nonEmpty(b.after) != null or nonEmpty(b.before) != null) try board.rankTicket(db, a, key, nonEmpty(b.after), nonEmpty(b.before));
         try actions.move(ctx, cfg, db, a, key, stage, b.spin_off orelse false, try finishOf(b));
+    } else if (eql(u8, action, "block")) {
+        _ = try board.addBlocker(ctx, db, a, key, b.blocker orelse return error.BadInput);
+    } else if (eql(u8, action, "unblock")) {
+        _ = try board.removeBlocker(ctx, db, a, key, b.blocker orelse return error.BadInput);
     } else if (eql(u8, action, "rank")) {
         try board.rankTicket(db, a, key, nonEmpty(b.after), nonEmpty(b.before));
     } else if (eql(u8, action, "comment")) {
@@ -500,8 +507,10 @@ fn ticketAction(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator
         try actions.press(ctx, db, a, key, std.meta.stringToEnum(actions.Key, b.key orelse "") orelse return error.BadInput);
     } else if (eql(u8, action, "rm")) {
         const t = try board.getTicket(db, a, key);
-        try actions.remove(ctx, db, a, t.key);
+        const freed = try actions.remove(ctx, db, a, t.key);
         images.removeTicket(ctx, a, cfg, t.key);
+        // The tickets that waited on it go on without it: the board says so.
+        return ok(req, a, .{ .ok = true, .freed = freed });
     } else if (eql(u8, action, "cleanup")) {
         const t = try board.getTicket(db, a, key);
         if (t.worktree.len == 0) return error.BadInput;
@@ -706,6 +715,7 @@ fn getTicket(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, r
         .ticket = t,
         .status = ss.map.get(t.tmux) orelse "",
         .subtickets = subs.items,
+        .blocks = try board.dependents(db, a, t.id),
         .comments = try board.comments(db, a, t.id),
         .events = try board.events(db, a, t.id),
         .tail = tail,
