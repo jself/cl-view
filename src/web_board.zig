@@ -4,6 +4,7 @@
 //!
 //!   GET  /board                         the page
 //!   GET  /api/board                     projects, tickets, sessions, profiles
+//!   GET  /api/needs                     what is in Needs You, as ids (cl-window's attention check)
 //!   GET  /api/ticket/<key>              one ticket in full (+ session tail, review, test plan)
 //!   POST /api/ticket                    new ticket
 //!   POST /api/image/<key|new>           upload an image (the raw bytes) for a ticket's description
@@ -35,6 +36,7 @@ const park = @import("park.zig");
 const images = @import("images.zig");
 const alerts = @import("alerts.zig");
 const voice = @import("voice.zig");
+const ticket_watch = @import("ticket_watch.zig");
 
 const board_html = @embedFile("web/board.html");
 
@@ -271,6 +273,7 @@ fn route(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: 
     }
     if (!post) {
         if (std.mem.eql(u8, what, "board")) return getBoard(ctx, cfg, db, a, req);
+        if (std.mem.eql(u8, what, "needs")) return getNeeds(ctx, cfg, db, a, req);
         if (std.mem.eql(u8, what, "ticket") and name.len > 0) return getTicket(ctx, cfg, db, a, req, name);
         if (std.mem.eql(u8, what, "image")) return getImage(ctx, cfg, a, req, name, action);
         return error.NotFound;
@@ -653,6 +656,47 @@ fn getBoard(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, re
         // request, so the board asks for each sentence and starts on the first.
         .voice = .{ .on = cfg.voice.stt.len > 0, .tts = cfg.voice.tts.len > 0, .split = voice.ttsIsUrl(cfg.voice.tts), .speed = cfg.voice.tts_speed, .pitch = cfg.voice.tts_pitch },
     });
+}
+
+/// What is in Needs You, one id per thing asking: `f<flag id>` for each
+/// flag that puts a ticket there and `a<tmux>@<time>` for each alert.
+/// cl-window reads it every few seconds and asks for attention when an id
+/// shows up that it has never seen. Hidden projects are left out, as
+/// the board leaves them out by default.
+fn getNeeds(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: *std.http.Server.Request) !void {
+    const ss = try sessionStatuses(ctx, cfg, a);
+    try ok(req, a, .{ .needs = try needsIds(a, try ticket_watch.snapshot(db, a, .{ .busy = ss.busy }), try alerts.list(ctx, db, a, false)) });
+}
+
+fn needsIds(a: std.mem.Allocator, tickets: []const ticket_watch.Seen, al: []const alerts.Alert) ![]const []const u8 {
+    var ids: std.ArrayList([]const u8) = .empty;
+    for (tickets) |t| if (t.inNeeds()) for (t.flags) |f| if (t.asks(f)) try ids.append(a, try std.fmt.allocPrint(a, "f{d}", .{f.id}));
+    for (al) |x| try ids.append(a, try std.fmt.allocPrint(a, "a{s}@{d}", .{ x.tmux, x.at }));
+    return ids.items;
+}
+
+test "needsIds: the flags that put a ticket in Needs You, then alerts" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const flags = [_]ticket_watch.SeenFlag{ .{ .id = 7, .kind = "question", .detail = "" }, .{ .id = 8, .kind = "review", .detail = "", .hidden = true } };
+    const done_flags = [_]ticket_watch.SeenFlag{ .{ .id = 9, .kind = "review", .detail = "" }, .{ .id = 10, .kind = "after-merge", .detail = "" } };
+    const base: ticket_watch.Seen = .{ .id = 1, .key = "CL-1", .project = "p", .title = "t", .stage = .running, .hidden = false, .flags = &flags };
+    var parked = base;
+    parked.parked = true;
+    var working = base;
+    working.working = true;
+    var hidden_project = base;
+    hidden_project.project_hidden = true;
+    var done = base;
+    done.stage = .done;
+    done.flags = &done_flags;
+    const al = [_]alerts.Alert{.{ .tmux = "cl_x", .from = "x", .operator = false, .text = "hi", .at = 42, .ticket = "", .project = "" }};
+    const ids = try needsIds(a, &.{ base, parked, working, hidden_project, done }, &al);
+    try std.testing.expectEqual(@as(usize, 3), ids.len);
+    try std.testing.expectEqualStrings("f7", ids[0]);
+    try std.testing.expectEqualStrings("f10", ids[1]);
+    try std.testing.expectEqualStrings("acl_x@42", ids[2]);
 }
 
 // ---- voice (voice.zig): the board records, cl transcribes and speaks ----

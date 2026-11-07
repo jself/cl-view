@@ -309,6 +309,13 @@ opens the board. Closing the window leaves `cl web` and every session running;
 reopening it comes back to the page, size and zoom you left. A second
 `cl window` raises the open one.
 
+While the window isn't focused, something new landing in Needs You (a flag,
+or a session's `cl alert`) makes it ask for attention: KDE highlights its
+taskbar entry (other desktops show it their own way) without taking focus.
+It checks every few seconds (`GET /api/needs`), whatever page it is on. Only
+new ones count: a flag that drops out of Needs You while Claude works on its
+ticket and comes back when Claude stops doesn't ask again.
+
 `cl window install` adds it to the app launcher (a `.desktop` entry and icon
 under `~/.local/share`, pointing at the `cl` you ran it with).
 

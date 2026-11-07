@@ -13,6 +13,11 @@
 // Cookies (the sign-in) and local storage live in <data dir>, and the window
 // remembers its page, size and zoom there, so reopening it comes back to the
 // same place. One window per user: a second launch raises the first.
+//
+// While the window isn't focused, something new in the board's Needs You (a
+// flag or an alert it hasn't seen before) asks for attention: KDE highlights its taskbar entry,
+// other desktops do what they do for an app that wants you. It checks
+// /api/needs every few seconds, through the page so the sign-in comes along.
 #include <gtk/gtk.h>
 #include <webkit/webkit.h>
 
@@ -128,6 +133,63 @@ static void on_load(WebKitWebView *v, WebKitLoadEvent e, gpointer _) {
     if (e == WEBKIT_LOAD_FINISHED) save_state();
 }
 
+// ---- attention: Needs You got something new ----
+
+#define NEEDS_EVERY_S 4
+// Every id read so far (NULL before the first read). Only an id never seen
+// before asks for attention: a flag that leaves Needs You while Claude works
+// on the ticket and comes back when it stops is the same flag, not news.
+static GHashTable *needs_seen;
+static gboolean needs_pending; // a read is under way; don't start another
+
+// Asking to be activated without the user having just clicked on us: KWin
+// (and Mutter) refuse to move focus and mark the window as demanding
+// attention instead. GTK 4 has no urgency hint of its own; on Wayland this
+// is xdg-activation, on X11 _NET_ACTIVE_WINDOW, both ending the same way.
+static void want_attention(void) {
+    if (gtk_window_is_active(window)) return;
+    gtk_window_present(window);
+}
+
+static void on_needs(GObject *src, GAsyncResult *res, gpointer _) {
+    needs_pending = FALSE;
+    JSCValue *v = webkit_web_view_call_async_javascript_function_finish(WEBKIT_WEB_VIEW(src), res, NULL);
+    // Not signed in, the server restarting or slow: try again next time.
+    if (!v) return;
+    if (!jsc_value_is_string(v)) {
+        g_object_unref(v);
+        return;
+    }
+    char *text = jsc_value_to_string(v);
+    g_object_unref(v);
+    gboolean first = !needs_seen, fresh = FALSE;
+    if (first) needs_seen = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    char **ids = g_strsplit(text, "\n", -1);
+    for (char **id = ids; *id; id++) {
+        if (!**id || g_hash_table_contains(needs_seen, *id)) continue;
+        g_hash_table_add(needs_seen, g_strdup(*id));
+        fresh = TRUE;
+    }
+    g_strfreev(ids);
+    g_free(text);
+    // The first read is what was already there when the window opened.
+    if (fresh && !first) want_attention();
+}
+
+static gboolean check_needs(gpointer _) {
+    const char *uri = webkit_web_view_get_uri(view);
+    if (needs_pending || !uri || !same_origin(uri)) return G_SOURCE_CONTINUE;
+    needs_pending = TRUE;
+    // An isolated world: the page's own scripts can't get in its way. The
+    // timeout ends a read the server never answers, so the next can start.
+    static const char js[] = "const r = await fetch('/api/needs', {cache: 'no-store', signal: AbortSignal.timeout(10000)});"
+                             "if (!r.ok) return null;"
+                             "const j = await r.json();"
+                             "return Array.isArray(j.needs) ? j.needs.join('\\n') : null;";
+    webkit_web_view_call_async_javascript_function(view, js, -1, NULL, "cl-window", NULL, NULL, on_needs, NULL);
+    return G_SOURCE_CONTINUE;
+}
+
 static gboolean act_reload(GtkWidget *w, GVariant *args, gpointer _) {
     (void)w, (void)args;
     webkit_web_view_reload(view);
@@ -230,6 +292,7 @@ static void activate(GtkApplication *app, gpointer _) {
 
     gtk_window_present(window);
     gtk_widget_grab_focus(GTK_WIDGET(view));
+    g_timeout_add_seconds(NEEDS_EVERY_S, check_needs, NULL);
 }
 
 int main(int argc, char **argv) {

@@ -57,7 +57,7 @@ pub const Seen = struct {
 
     /// A flag that puts it in Needs You. On a Done ticket only work that
     /// didn't land or a failed after-merge run still asks (board.asksWhenDone).
-    fn asks(self: Seen, f: SeenFlag) bool {
+    pub fn asks(self: Seen, f: SeenFlag) bool {
         return !f.hidden and (self.stage != .done or board.asksWhenDone(f.kind));
     }
 
