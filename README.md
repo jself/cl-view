@@ -700,6 +700,7 @@ cl project unhide boats
 cl project pause boats [--now] # start nothing new there (see Pausing); --all for every project
 cl project resume boats
 cl project set qa-tool --after-merge '<command>'   # run on each merge (see After merge)
+cl project set cl-wrapper --push-after-merge origin  # push trunk and watch CI (see Push after merge)
 ```
 
 Every project gets jj: adding one, or starting its first ticket, runs
@@ -1348,6 +1349,59 @@ cl project set qa-tool --after-merge-claude none     # Claude does nothing after
 
 The default is to rebuild and restart whatever runs from the project's
 checkout, as its CLAUDE.md says.
+
+#### Push after merge
+
+For a project whose trunk goes straight to its remote rather than through
+PRs, cl can push trunk after each merge into it and watch the commit's CI:
+
+```
+cl project set cl-wrapper --push-after-merge origin   # the git remote to push to
+cl project set cl-wrapper --push-after-merge ''       # no push (the default)
+```
+
+The push is a step of the after-merge run, after the command (if any),
+whatever the command's result: trunk is merged either way, and CI says
+whether the code is broken. A project with only a push still gets the run,
+and `cl project after-merge <name>` pushes trunk as it is too. It pushes
+trunk's commit (jj's trunk bookmark, git's main branch) with `git push`,
+fast-forward only: when the remote has commits trunk doesn't (someone pushed
+from elsewhere), nothing is pushed and the ticket gets a `push-failed` flag
+saying so; fetch and sort it out by hand, then push again with `cl project
+push <name>` (Needs you's Push again), which pushes without running the
+command. A result with no merged ticket to go on (a push by hand) goes on
+the project's ticket merged into trunk last, so it still shows in Needs you.
+A run that finds the remote already has trunk (a run by hand on the same
+trunk) doesn't watch that commit's CI again if cl watched it before, so a
+result you dismissed doesn't come back.
+A jj repo then imports the remote's new position and tracks
+`<trunk>@<remote>`, so a `jj git push` by hand works afterwards (`jj git init
+--colocate` leaves it untracked, which is why jj refused to push before).
+The push runs with cl's environment and never prompts (ssh in batch mode,
+no askpass helper): a remote over SSH needs the key in an agent `cl web` can
+reach (or a key without a passphrase). Each call to the remote (ls-remote,
+push, fetch, gh) is cut off after 2 minutes, so a remote that stalls fails
+the push instead of holding up the project's later after-merge runs. That
+uses `timeout` (coreutils; `gtimeout` from Homebrew on macOS); without it,
+only ssh's 30-second connect timeout applies. The
+board's project dialog sets it too ("Push trunk to").
+
+Once pushed, a watcher of its own (detached, like the run) follows the
+commit's GitHub Actions runs with `gh run list --commit`, from 20 seconds
+after the push, doubling up to every 5 minutes; the push log says "watching
+CI at <commit>" when it starts, and the result follows when CI finishes. A run that fails (or times
+out) puts a `ci-failed` flag on the merged tickets, with the failed jobs and
+the run's link (Needs you's See the run opens it); the ticket stays Done.
+When a later commit's CI passes, trunk is green again past it: the
+`ci-failed` flags of the commits it contains clear. Watchers of different
+pushes run side by side and can finish in any order, so a pass never clears
+a newer commit's failure, and a failure of a commit a newer green commit
+already contains raises no flag. Cancelled or skipped runs, no run within 10
+minutes (no CI), gh failing five times in a row (not a GitHub remote, or not
+logged in) or runs still going after 3 hours end the watch with a note in the ticket's activity and no flag. The pushes and
+CI results go in `~/.local/state/cl/push-<project>.log`, apart from the
+after-merge log, and one push of a project runs at a time. The watcher doesn't hold up the
+next merge's run.
 
 An open board notices when the server comes back from another build, and
 reloads by itself (keeping the open ticket, drafts and scroll), or shows a

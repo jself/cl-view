@@ -61,6 +61,8 @@ pub const flag_review = "review"; // Claude said done; review it
 pub const flag_testing = "testing"; // try it out
 pub const flag_conflict = "conflict"; // merging it back conflicts
 pub const flag_after_merge = "after-merge"; // the project's after-merge command failed
+pub const flag_push_failed = "push-failed"; // pushing trunk to its remote after a merge failed (Project.push_after_merge)
+pub const flag_ci_failed = "ci-failed"; // CI failed on the trunk commit pushed after a merge
 pub const flag_merge_failed = "merge-failed"; // approved, but its merge (or PR) didn't land
 pub const flag_unmerged = "unmerged"; // Done, but its branch's work isn't on its target (trunk, or Ticket.onto)
 pub const flag_unparked = "unparked"; // its park's condition came true; it resumed
@@ -107,6 +109,10 @@ pub const Project = struct {
     /// Whether a ticket reaching Review gets an automated review by itself
     /// (`cl project set --auto-review`, `autoreview.startOnReview`).
     auto_review: AutoReview = .off,
+    /// The git remote trunk is pushed to after each merge into it, whose CI
+    /// run cl then watches (`cl project set --push-after-merge`, ci.zig); ""
+    /// for none.
+    push_after_merge: []const u8 = "",
 };
 
 pub const Flag = struct {
@@ -325,6 +331,7 @@ const schema =
     \\  onto TEXT NOT NULL DEFAULT '',
     \\  review_skill TEXT NOT NULL DEFAULT '',
     \\  auto_review TEXT NOT NULL DEFAULT 'off',
+    \\  push_after_merge TEXT NOT NULL DEFAULT '',
     \\  planners INTEGER NOT NULL DEFAULT
 ++ std.fmt.comptimePrint(" {d}\n", .{default_planners}) ++
     \\);
@@ -530,6 +537,8 @@ pub fn migrate(db: Db) !void {
         _ = try addColumn(db, "tickets", "pr_then", "TEXT NOT NULL DEFAULT ''");
         // Early warnings of conflicts with trunk.
         try db.execMulti(drift_schema);
+        // Pushing trunk after a merge.
+        _ = try addColumn(db, "projects", "push_after_merge", "TEXT NOT NULL DEFAULT ''");
     }
     if (have >= version) return;
     // Version 1 had no sub-tickets, version 2 no planning skill.
@@ -696,6 +705,7 @@ pub const ProjectInput = struct {
     onto: ?[]const u8 = null,
     review_skill: ?[]const u8 = null,
     auto_review: ?AutoReview = null,
+    push_after_merge: ?[]const u8 = null,
 };
 
 /// A key prefix from a project name: a short first word as is (`qa-tool` →
@@ -751,22 +761,42 @@ fn validPrefix(p: []const u8) bool {
     return true;
 }
 
+/// A git remote's name as cl passes it to git: one word, not an option
+/// (`--upload-pack=...` would be read as one). "" is none.
+fn validRemote(r: []const u8) bool {
+    if (r.len == 0) return true;
+    if (r[0] == '-') return false;
+    for (r) |ch| if (std.ascii.isWhitespace(ch) or ch < 0x20) return false;
+    return true;
+}
+
+test validRemote {
+    try std.testing.expect(validRemote(""));
+    try std.testing.expect(validRemote("origin"));
+    try std.testing.expect(!validRemote("--upload-pack=x"));
+    try std.testing.expect(!validRemote("-origin"));
+    try std.testing.expect(!validRemote("origin main"));
+}
+
 pub fn addProject(db: Db, in: ProjectInput) Error!void {
     if (in.name.len == 0 or in.dir.len == 0) return error.BadInput;
+    if (in.push_after_merge) |r| if (!validRemote(r)) return error.BadInput;
     var buf: [8]u8 = undefined;
     const prefix = in.prefix orelse defaultPrefix(&buf, in.name);
     if (!validPrefix(prefix)) return error.BadInput;
     if (try db.int("SELECT 1 FROM projects WHERE name = ?1 OR prefix = ?2", .{ in.name, prefix }) != null) return error.Exists;
-    try db.exec("INSERT INTO projects (name, dir, prefix, slots, mode, profile, after_merge, after_merge_claude, planners, onto, review_skill, auto_review) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)", .{
+    try db.exec("INSERT INTO projects (name, dir, prefix, slots, mode, profile, after_merge, after_merge_claude, planners, onto, review_skill, auto_review, push_after_merge) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)", .{
         in.name,                             in.dir,               prefix,                    in.slots orelse default_slots,
         @tagName(in.mode orelse .queue),     in.profile orelse "", in.after_merge orelse "",  in.after_merge_claude orelse "",
         in.planners orelse default_planners, in.onto orelse "",    in.review_skill orelse "", @tagName(in.auto_review orelse .off),
+        in.push_after_merge orelse "",
     });
 }
 
 /// Change the given fields of a project.
 pub fn updateProject(db: Db, name: []const u8, in: ProjectInput) Error!void {
     if (try db.int("SELECT 1 FROM projects WHERE name = ?1", .{name}) == null) return error.NotFound;
+    if (in.push_after_merge) |r| if (!validRemote(r)) return error.BadInput;
     if (in.prefix) |p| {
         if (!validPrefix(p)) return error.BadInput;
         if (try db.int("SELECT 1 FROM projects WHERE prefix = ?1 AND name != ?2", .{ p, name }) != null) return error.Exists;
@@ -782,6 +812,7 @@ pub fn updateProject(db: Db, name: []const u8, in: ProjectInput) Error!void {
     if (in.onto) |o| try db.exec("UPDATE projects SET onto = ?2 WHERE name = ?1", .{ name, o });
     if (in.review_skill) |k| try db.exec("UPDATE projects SET review_skill = ?2 WHERE name = ?1", .{ name, k });
     if (in.auto_review) |r| try db.exec("UPDATE projects SET auto_review = ?2 WHERE name = ?1", .{ name, @tagName(r) });
+    if (in.push_after_merge) |r| try db.exec("UPDATE projects SET push_after_merge = ?2 WHERE name = ?1", .{ name, r });
     // Renaming last, so the lookups above still match.
     if (in.name.len > 0 and !std.mem.eql(u8, in.name, name)) {
         if (try db.int("SELECT 1 FROM projects WHERE name = ?1", .{in.name}) != null) return error.Exists;
@@ -818,7 +849,7 @@ pub fn removeProject(db: Db, name: []const u8) Error!void {
     try db.exec("DELETE FROM projects WHERE name = ?1", .{name});
 }
 
-const project_cols = "name, dir, prefix, slots, mode, profile, after_merge, after_merge_claude, hidden, planners, paused, onto, review_skill, auto_review";
+const project_cols = "name, dir, prefix, slots, mode, profile, after_merge, after_merge_claude, hidden, planners, paused, onto, review_skill, auto_review, push_after_merge";
 
 fn readProject(st: sqlite.Stmt, a: std.mem.Allocator) !Project {
     return .{
@@ -836,6 +867,7 @@ fn readProject(st: sqlite.Stmt, a: std.mem.Allocator) !Project {
         .onto = try st.dupe(a, 11),
         .review_skill = try st.dupe(a, 12),
         .auto_review = AutoReview.parse(st.text(13)) orelse .off,
+        .push_after_merge = try st.dupe(a, 14),
     };
 }
 
@@ -1743,9 +1775,9 @@ fn moveId(ctx: Ctx, db: Db, id: i64, from: Stage, to: Stage) Error!void {
         try db.exec("DELETE FROM parks WHERE ticket = ?1", .{id});
         if (db.changes() > 0) try logEvent(ctx, db, id, "unparked", "moved to Done");
     }
-    // All but a failed after-merge run's: that comes after the merge, so it
-    // stays until the next run (or the human) clears it.
-    if (to == .done) try db.exec("UPDATE flags SET cleared = ?2 WHERE ticket = ?1 AND cleared IS NULL AND kind != ?3", .{ id, now(ctx), flag_after_merge });
+    // All but what runs after the merge (the after-merge command, the push
+    // and its CI): that stays until the next run (or the human) clears it.
+    if (to == .done) try db.exec("UPDATE flags SET cleared = ?2 WHERE ticket = ?1 AND cleared IS NULL AND kind NOT IN (?3, ?4, ?5)", .{ id, now(ctx), flag_after_merge, flag_push_failed, flag_ci_failed });
     // Out of Done, it is under way again: "done without merging" no longer holds.
     if (from == .done) try clearFlagId(ctx, db, id, flag_unmerged);
     if (to == .queued) try moveSubtickets(ctx, db, id, .backlog, .queued);
@@ -1822,11 +1854,21 @@ pub fn clearFlagId(ctx: Ctx, db: Db, id: i64, kind: []const u8) Error!void {
     }
 }
 
+/// The project's ticket that went into trunk last, as its after-merge run
+/// was queued (only merges into trunk queue one: "merged" is also logged
+/// for a ticket's --onto branch); null for none.
+pub fn lastMergedTicket(db: Db, a: std.mem.Allocator, project: []const u8) Error!?[]const u8 {
+    var st = try db.query("SELECT t.key FROM events e JOIN tickets t ON t.id = e.ticket WHERE t.project = ?1 AND e.kind = 'after-merge queued' ORDER BY e.at DESC, e.id DESC LIMIT 1", .{project});
+    defer st.finalize();
+    if (!try st.step()) return null;
+    return try st.dupe(a, 0);
+}
+
 /// Flags that still ask something of a Done ticket, so Needs You keeps it:
 /// its work didn't land (not merged, or merging it later conflicted) or what
 /// runs after the merge failed. Going to Done clears the others.
 pub fn asksWhenDone(kind: []const u8) bool {
-    for ([_][]const u8{ flag_after_merge, flag_unmerged, flag_merge_failed, flag_conflict }) |k| {
+    for ([_][]const u8{ flag_after_merge, flag_push_failed, flag_ci_failed, flag_unmerged, flag_merge_failed, flag_conflict }) |k| {
         if (std.mem.eql(u8, kind, k)) return true;
     }
     return false;

@@ -17,6 +17,9 @@
 //! One run per project at a time: merges that land during a run get one more
 //! run after it, on the newest trunk (see board.claimAfterMerge).
 //!
+//! A project that pushes trunk after a merge (--push-after-merge) does that
+//! in the same run, after the command (see ci.zig).
+//!
 //! When it fails, the operator is asked to sort it out (unless the project
 //! turned Claude's after-merge steps off; see actions.claudeSteps). Without a
 //! command, Claude does the after-merge steps instead (actions.zig).
@@ -27,6 +30,7 @@ const board = @import("board.zig");
 const worktree = @import("worktree.zig");
 const actions = @import("actions.zig");
 const operator = @import("operator.zig");
+const ci = @import("ci.zig");
 
 /// Lines of the log a failure flag shows.
 const tail_lines = 20;
@@ -39,10 +43,10 @@ pub fn logPath(ctx: Ctx, a: std.mem.Allocator, cfg: config.Config, project: []co
 /// A ticket was merged into the project's trunk: queue it for the project's
 /// after-merge command and start a runner, detached (it exits at once if one
 /// is running already; that one runs again for it). False when the project
-/// has no command.
+/// has no command and doesn't push trunk.
 pub fn start(ctx: Ctx, db: board.Db, a: std.mem.Allocator, project: []const u8, ticket_id: i64, key: []const u8) !bool {
     const p = try board.getProject(db, a, project);
-    if (p.after_merge.len == 0) return false;
+    if (!runs(p)) return false;
     try board.queueAfterMerge(db, project, key);
     try board.logEvent(ctx, db, ticket_id, "after-merge queued", "");
     spawnRunner(ctx, a, project) catch |e| {
@@ -50,6 +54,11 @@ pub fn start(ctx: Ctx, db: board.Db, a: std.mem.Allocator, project: []const u8, 
         try board.setFlagId(ctx, db, ticket_id, board.flag_after_merge, "auto", "cl couldn't start the after-merge run");
     };
     return true;
+}
+
+/// The project has something to run after a merge: a command, or a push.
+pub fn runs(p: board.Project) bool {
+    return p.after_merge.len > 0 or p.push_after_merge.len > 0;
 }
 
 /// Run `cl project after-merge <project> --run` in a session of its own
@@ -90,14 +99,7 @@ pub fn runLoop(ctx: Ctx, cfg: config.Config, db: board.Db, project: []const u8) 
         const pending = (try board.takeAfterMerge(db, a, project)) orelse return;
         var keys: std.ArrayList([]const u8) = .empty;
         var it = std.mem.tokenizeAny(u8, pending, " \n");
-        while (it.next()) |k| {
-            // By hand ("-"): also for the tickets whose run failed, so one
-            // that passes now clears their flags.
-            if (std.mem.eql(u8, k, "-")) {
-                for (try board.listTickets(db, a, .{ .project = project, .flag = board.flag_after_merge })) |t| try addKey(a, &keys, t.key);
-            }
-            try addKey(a, &keys, k);
-        }
+        while (it.next()) |k| try addKey(a, &keys, k);
         runOnce(ctx, cfg, db, a, project, keys.items) catch |e| {
             var buf: [128]u8 = undefined;
             record(ctx, db, a, keys.items, .{ .ok = false, .detail = std.fmt.bufPrint(&buf, "cl: {s}", .{@errorName(e)}) catch "cl failed" });
@@ -113,12 +115,31 @@ fn addKey(a: std.mem.Allocator, keys: *std.ArrayList([]const u8), k: []const u8)
 
 const Result = struct { ok: bool, detail: []const u8 };
 
+/// One run for the merged tickets `keys` ("-": a run by hand): the
+/// command, then the push, each read now (they may have changed since the
+/// merge). The push goes ahead whatever the command did: trunk is merged
+/// either way.
 fn runOnce(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, project: []const u8, keys: []const []const u8) !void {
-    // Read now: the command may have changed since the merge.
     const p = try board.getProject(db, a, project);
-    if (p.after_merge.len == 0) return;
+    rotate(ctx, a, try logPath(ctx, a, cfg, project));
+    // By hand, the command also runs for the tickets whose run failed, so
+    // one that passes now clears their flags. Only the command: the push
+    // has its own (see ci.targets).
+    var cmd_keys: std.ArrayList([]const u8) = .empty;
+    for (keys) |k| {
+        if (std.mem.eql(u8, k, "-")) for (try board.listTickets(db, a, .{ .project = project, .flag = board.flag_after_merge })) |t| try addKey(a, &cmd_keys, t.key);
+        try addKey(a, &cmd_keys, k);
+    }
+    if (p.after_merge.len > 0) runCommand(ctx, cfg, db, a, p, cmd_keys.items) catch |e| {
+        var buf: [128]u8 = undefined;
+        record(ctx, db, a, cmd_keys.items, .{ .ok = false, .detail = std.fmt.bufPrint(&buf, "cl: {s}", .{@errorName(e)}) catch "cl failed" });
+    };
+    if (p.push_after_merge.len > 0) ci.pushAndWatch(ctx, cfg, db, a, p, keys);
+}
+
+fn runCommand(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, p: board.Project, keys: []const []const u8) !void {
+    const project = p.name;
     const log = try logPath(ctx, a, cfg, project);
-    rotate(ctx, a, log);
     const commit = trunkCommit(ctx, a, p.dir) catch |e| {
         appendLog(ctx, a, log, try std.fmt.allocPrint(a, "\n=== {s}: no trunk commit to run on: {s}\n", .{ project, lastError() }));
         return e;
@@ -206,7 +227,7 @@ fn record(ctx: Ctx, db: board.Db, a: std.mem.Allocator, keys: []const []const u8
 }
 
 /// The commit trunk is on now: jj's trunk bookmark, git's main branch.
-fn trunkCommit(ctx: Ctx, a: std.mem.Allocator, dir: []const u8) ![]const u8 {
+pub fn trunkCommit(ctx: Ctx, a: std.mem.Allocator, dir: []const u8) ![]const u8 {
     if (worktree.trunkBookmark(ctx, a, dir)) |b| {
         const rev = try std.fmt.allocPrint(a, "\"{s}\"", .{b});
         return std.mem.trim(u8, try run(ctx, a, null, &.{ "jj", "-R", dir, "--ignore-working-copy", "log", "--no-graph", "-r", rev, "-T", "commit_id" }), " \n");
@@ -216,7 +237,7 @@ fn trunkCommit(ctx: Ctx, a: std.mem.Allocator, dir: []const u8) ![]const u8 {
 }
 
 /// The repo's git directory: git's own, or a non-colocated jj repo's store.
-fn gitDir(ctx: Ctx, a: std.mem.Allocator, dir: []const u8) ![]const u8 {
+pub fn gitDir(ctx: Ctx, a: std.mem.Allocator, dir: []const u8) ![]const u8 {
     if (run(ctx, a, null, &.{ "git", "-C", dir, "rev-parse", "--absolute-git-dir" })) |o| return std.mem.trim(u8, o, " \n") else |_| {}
     const store = try std.fmt.allocPrint(a, "{s}/.jj/repo/store/git", .{dir});
     try std.Io.Dir.cwd().access(ctx.io, store, .{});
@@ -241,17 +262,27 @@ fn cleanCheckout(ctx: Ctx, a: std.mem.Allocator, dir: []const u8, path: []const 
 }
 
 /// Keep the log from growing without end: past 1 MB it moves to .log.1.
-fn rotate(ctx: Ctx, a: std.mem.Allocator, log: []const u8) void {
+pub fn rotate(ctx: Ctx, a: std.mem.Allocator, log: []const u8) void {
     const st = std.Io.Dir.cwd().statFile(ctx.io, log, .{}) catch return;
     if (st.size < 1 << 20) return;
     const old = std.fmt.allocPrint(a, "{s}.1", .{log}) catch return;
     std.Io.Dir.rename(std.Io.Dir.cwd(), log, std.Io.Dir.cwd(), old, ctx.io) catch {};
 }
 
-fn appendLog(ctx: Ctx, a: std.mem.Allocator, log: []const u8, text: []const u8) void {
-    const old = std.Io.Dir.cwd().readFileAlloc(ctx.io, log, a, .limited(4 << 20)) catch "";
-    const data = std.mem.concat(a, u8, &.{ old, text }) catch return;
-    std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = log, .data = data }) catch {};
+/// Add `text` to the end of the log (O_APPEND: a run's command or the CI
+/// watcher may be writing to it at the same time).
+pub fn appendLog(ctx: Ctx, a: std.mem.Allocator, log: []const u8, text: []const u8) void {
+    _ = ctx;
+    const path = a.dupeZ(u8, log) catch return;
+    const fd = std.c.open(path, .{ .ACCMODE = .WRONLY, .APPEND = true, .CREAT = true, .CLOEXEC = true }, @as(std.c.mode_t, 0o644));
+    if (fd < 0) return;
+    defer _ = std.c.close(fd);
+    var rest = text;
+    while (rest.len > 0) {
+        const n = std.c.write(fd, rest.ptr, rest.len);
+        if (n <= 0) return;
+        rest = rest[@intCast(n)..];
+    }
 }
 
 /// The last lines of the newest run in the log.
@@ -286,7 +317,7 @@ test tailOfLastRun {
 var last_error: [512]u8 = undefined;
 var last_error_len: usize = 0;
 
-fn lastError() []const u8 {
+pub fn lastError() []const u8 {
     return std.mem.trim(u8, last_error[0..last_error_len], " \n");
 }
 
@@ -354,4 +385,56 @@ test "a failing after-merge command flags the ticket in Needs You with the log's
     try runOnce(ctx, cfg, db, a, "qa", &.{k});
     try std.testing.expectEqual(@as(usize, 0), (try board.getTicket(db, a, k)).flags.len);
     try std.testing.expectEqual(@as(usize, 0), (try board.listTickets(db, a, .{ .needs = true })).len);
+}
+
+test "a project that only pushes gets a run that pushes; a failing command doesn't stop the push" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var env: std.process.Environ.Map = .init(a);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // Project qa pushes to origin and has no command.
+    const t = try ci.testSetup(a, &env, try tmp.dir.realPathFileAlloc(std.testing.io, ".", a));
+    defer t.db.close();
+    const remoteHead = struct {
+        fn f(e: ci.TestEnv) ![]const u8 {
+            return std.mem.trim(u8, try run(e.ctx, e.a, null, &.{ "git", "--git-dir", e.remote, "rev-parse", "master" }), "\n");
+        }
+    }.f;
+    const k = try board.createTicket(t.ctx, t.db, a, .{ .project = "qa", .title = "Merged", .stage = .done });
+    try std.testing.expect(runs(try board.getProject(t.db, a, "qa")));
+
+    _ = try ci.testGit(t, &.{ "commit", "-q", "--allow-empty", "-m", "two" });
+    try runOnce(t.ctx, t.cfg, t.db, a, "qa", &.{k});
+    try std.testing.expectEqualStrings(std.mem.trim(u8, try ci.testGit(t, &.{ "rev-parse", "HEAD" }), "\n"), try remoteHead(t));
+
+    // A command that fails: flagged after-merge, and trunk is pushed anyway.
+    try board.updateProject(t.db, "qa", .{ .name = "", .dir = "", .after_merge = "exit 3", .after_merge_claude = "none" });
+    _ = try ci.testGit(t, &.{ "commit", "-q", "--allow-empty", "-m", "three" });
+    try runOnce(t.ctx, t.cfg, t.db, a, "qa", &.{k});
+    try std.testing.expectEqualStrings(std.mem.trim(u8, try ci.testGit(t, &.{ "rev-parse", "HEAD" }), "\n"), try remoteHead(t));
+    try std.testing.expect(try ci.hasFlag(t, k, board.flag_after_merge));
+    try std.testing.expect(!try ci.hasFlag(t, k, board.flag_push_failed));
+    // By hand, with the command fixed: it runs for the flagged ticket too
+    // (its flag goes), but the push's result goes on the ticket merged
+    // last, not on the one flagged only for the command.
+    try board.updateProject(t.db, "qa", .{ .name = "", .dir = "", .after_merge = "true" });
+    const k2 = try board.createTicket(t.ctx, t.db, a, .{ .project = "qa", .title = "Merged last", .stage = .done });
+    try board.logEvent(t.ctx, t.db, (try board.getTicket(t.db, a, k2)).id, "after-merge queued", "");
+    _ = try ci.testGit(t, &.{ "commit", "-q", "--allow-empty", "-m", "four" });
+    try runOnce(t.ctx, t.cfg, t.db, a, "qa", &.{"-"});
+    try std.testing.expect(!try ci.hasFlag(t, k, board.flag_after_merge));
+    const id1 = (try board.getTicket(t.db, a, k)).id;
+    const id2 = (try board.getTicket(t.db, a, k2)).id;
+    try std.testing.expectEqual(@as(?i64, 2), try t.db.int("SELECT count(*) FROM events WHERE ticket = ?1 AND kind = 'pushed'", .{id1}));
+    try std.testing.expectEqual(@as(?i64, 1), try t.db.int("SELECT count(*) FROM events WHERE ticket = ?1 AND kind = 'pushed'", .{id2}));
+
+    // The pushes in their own log; the command's run alone in its own, so
+    // the flag's tail is the command's.
+    const push_log = try std.Io.Dir.cwd().readFileAlloc(t.ctx.io, try ci.logPath(t.ctx, a, t.cfg, "qa"), a, .limited(1 << 20));
+    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, push_log, "=== push qa: pushed "));
+    const log = try std.Io.Dir.cwd().readFileAlloc(t.ctx.io, try logPath(t.ctx, a, t.cfg, "qa"), a, .limited(1 << 20));
+    try std.testing.expect(std.mem.indexOf(u8, log, "=== exit 3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, log, "=== push") == null);
 }

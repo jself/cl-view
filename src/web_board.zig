@@ -19,7 +19,7 @@
 //!   POST /api/needs/act                 a notification's button: {item, action} (push.act)
 //!   POST /api/alert/<tmux>/dismiss      clear a session's alert (cl alert)
 //!   POST /api/project                   add a project
-//!   POST /api/project/<name>/<action>   set rm hide unhide after-merge
+//!   POST /api/project/<name>/<action>   set rm hide unhide after-merge push
 //!   GET  /api/push                      push notifications: the key, devices, settings
 //!   POST /api/push/<action>             subscribe settings device remove test
 const std = @import("std");
@@ -36,6 +36,7 @@ const worktree = @import("worktree.zig");
 const web = @import("web.zig");
 const operator = @import("operator.zig");
 const after_merge = @import("after_merge.zig");
+const ci = @import("ci.zig");
 const park = @import("park.zig");
 const drift = @import("drift.zig");
 const images = @import("images.zig");
@@ -254,6 +255,7 @@ const Body = struct {
     review_skill: ?[]const u8 = null,
     /// Project: whether a ticket reaching Review gets an automated review by itself.
     auto_review: ?board.AutoReview = null,
+    push_after_merge: ?[]const u8 = null,
     /// Ticket or project: the branch it targets ("" for trunk / the project's).
     onto: ?[]const u8 = null,
     /// finish "tell": what Claude should do first.
@@ -436,6 +438,7 @@ fn route(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: 
                 .review_skill = b.review_skill,
                 .auto_review = b.auto_review,
                 .onto = b.onto,
+                .push_after_merge = b.push_after_merge,
             }) catch |e| return projectFail(req, e);
             _ = worktree.ensureJj(ctx, a, dir);
             return ok(req, a, .{ .ok = true });
@@ -458,10 +461,13 @@ fn route(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: 
                 .review_skill = b.review_skill,
                 .auto_review = b.auto_review,
                 .onto = b.onto,
+                .push_after_merge = b.push_after_merge,
             }) catch |e| return projectFail(req, e);
         } else if (std.mem.eql(u8, action, "after-merge")) {
-            if ((try board.getProject(db, a, name)).after_merge.len == 0) return error.BadInput;
+            if (!after_merge.runs(try board.getProject(db, a, name))) return error.BadInput;
             try after_merge.startByHand(ctx, db, a, name, nonEmpty(b.key) orelse "-");
+        } else if (std.mem.eql(u8, action, "push")) {
+            ci.pushFromBoard(ctx, db, a, name) catch |e| return if (e == error.NoPush) error.BadInput else e;
         } else if (std.mem.eql(u8, action, "hide") or std.mem.eql(u8, action, "unhide")) {
             try board.setProjectHidden(db, name, std.mem.eql(u8, action, "hide"));
         } else if (std.mem.eql(u8, action, "pause") or std.mem.eql(u8, action, "resume")) {

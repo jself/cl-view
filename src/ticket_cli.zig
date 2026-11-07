@@ -13,6 +13,7 @@ const worktree = @import("worktree.zig");
 const actions = @import("actions.zig");
 const review = @import("review.zig");
 const after_merge = @import("after_merge.zig");
+const ci = @import("ci.zig");
 const autoreview = @import("autoreview.zig");
 const park = @import("park.zig");
 const drift = @import("drift.zig");
@@ -214,11 +215,11 @@ pub const project_usage =
     \\
     \\  add <name> <dir> [--prefix <KEY>] [--slots <n>] [--planners <n>] [--mode queue|worktree]
     \\      [--profile <name>] [--after-merge <command>] [--after-merge-claude <steps> | none]
-    \\      [--review-skill <skill>] [--auto-review off|on|send]
+    \\      [--review-skill <skill>] [--auto-review off|on|send] [--push-after-merge <remote>]
     \\  set <name> [--name <new>] [--dir <dir>] [--prefix <KEY>] [--slots <n>] [--planners <n>]
     \\      [--mode queue|worktree] [--profile <name>] [--after-merge <command>]
     \\      [--after-merge-claude <steps> | none] [--onto <branch>] [--review-skill <skill>]
-    \\      [--auto-review off|on|send]
+    \\      [--auto-review off|on|send] [--push-after-merge <remote>]
     \\  rm <name>                   (refused while it has tickets)
     \\  hide <name> / unhide <name> keep its tickets out of the board's views, Needs You,
     \\                              `cl ticket needs` and `cl ticket list`, or bring them back;
@@ -231,7 +232,9 @@ pub const project_usage =
     \\                              (back to Queued or Planning; they resume their conversation)
     \\  resume <name> | --all       start dispatching there again, top of the queue first
     \\  list [--json]
-    \\  after-merge <name>          run the after-merge command now, on trunk as it is
+    \\  after-merge <name>          run the after-merge command (and push) now, on trunk as it is
+    \\  push <name>                 push trunk to the --push-after-merge remote now and watch its
+    \\                              CI, without the after-merge command
     \\
     \\--onto: the branch (jj bookmark or git branch) its tickets start from and merge
     \\  into instead of trunk, like a long-lived feature branch; a ticket's own --onto
@@ -242,6 +245,11 @@ pub const project_usage =
     \\  gets CL_TICKET, CL_TICKETS, CL_PROJECT, CL_COMMIT, CL_PROJECT_DIR and
     \\  CL_CHECKOUT; output goes to ~/.local/state/cl/after-merge-<name>.log, and a
     \\  failure flags the ticket. "" removes it.
+    \\--push-after-merge: the git remote (like origin) cl pushes trunk to after it merges
+    \\  a ticket into it, after the --after-merge command, for projects that don't go
+    \\  through PRs. Fast-forward only: a remote with commits trunk doesn't have is left
+    \\  alone. It then watches the commit's GitHub Actions runs (gh) for up to 3 hours
+    \\  and flags the ticket when one fails. "" (the default): no push.
     \\--review-skill: the skill the automated review (cl ticket autoreview) uses
     \\  instead of cl's own instructions; it still reports findings in cl's format.
     \\  "" (the default): cl's own.
@@ -256,6 +264,12 @@ pub const project_usage =
     \\  default): rebuild and restart what runs from the checkout. none: nothing.
     \\
 ++ std.fmt.comptimePrint("--slots: worktree tickets in progress at once (default {d})\n--planners: planning sessions at once; they don't wait for the queue or a slot (default {d})\n", .{ board.default_slots, board.default_planners });
+
+fn checkRemote(r: ?[]const u8) ?[]const u8 {
+    const v = r orelse return null;
+    if (v.len > 0 and (v[0] == '-' or std.mem.indexOfAny(u8, v, " \t\n") != null)) fail("--push-after-merge is a git remote's name, like origin (\"\" for none)", .{});
+    return v;
+}
 
 fn parseAutoReview(args: Args) ?board.AutoReview {
     const v = args.get("--auto-review") orelse return null;
@@ -404,7 +418,7 @@ pub fn projectMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void
     defer arena_state.deinit();
     const a = arena_state.allocator();
     const cmd = argv[0];
-    const args = try Args.parse(a, argv[1..], &.{ "--prefix", "--slots", "--planners", "--mode", "--profile", "--name", "--dir", "--after-merge", "--after-merge-claude", "--onto", "--review-skill", "--auto-review" }, project_usage);
+    const args = try Args.parse(a, argv[1..], &.{ "--prefix", "--slots", "--planners", "--mode", "--profile", "--name", "--dir", "--after-merge", "--after-merge-claude", "--onto", "--review-skill", "--auto-review", "--push-after-merge" }, project_usage);
     const db = openBoard(ctx, cfg);
     defer db.close();
 
@@ -413,7 +427,7 @@ pub fn projectMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void
         const ps = board.listProjects(db, a) catch |e| boardFail(db, e, "project");
         if (args.has("--json")) return out(try std.fmt.allocPrint(a, "{f}\n", .{std.json.fmt(ps, .{})}));
         var aw: std.Io.Writer.Allocating = .init(a);
-        for (ps) |p| try aw.writer.print("{s}\t{s}\t{s}\tslots {d}\tplanners {d}\t{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}\n", .{
+        for (ps) |p| try aw.writer.print("{s}\t{s}\t{s}\tslots {d}\tplanners {d}\t{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}\n", .{
             p.name, p.prefix, try ctx.shortenHomeIn(a, p.dir), p.slots, p.planners, @tagName(p.mode),
             if (p.onto.len > 0) "\tonto " else "", p.onto,
             if (p.hidden) "\thidden" else "",
@@ -423,11 +437,12 @@ pub fn projectMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void
             if (p.after_merge_claude.len > 0) "\tclaude after merge: " else "", p.after_merge_claude,
             if (p.review_skill.len > 0) "\treview skill: " else "", p.review_skill,
             if (p.auto_review != .off) "\tauto review: " else "", if (p.auto_review != .off) @tagName(p.auto_review) else "",
+            if (p.push_after_merge.len > 0) "\tpush after merge: " else "", p.push_after_merge,
         });
         return out(aw.writer.buffered());
     }
     if (std.mem.eql(u8, cmd, "add")) {
-        args.only(&.{ "--prefix", "--slots", "--planners", "--mode", "--profile", "--after-merge", "--after-merge-claude", "--onto", "--review-skill", "--auto-review" }, project_usage);
+        args.only(&.{ "--prefix", "--slots", "--planners", "--mode", "--profile", "--after-merge", "--after-merge-claude", "--onto", "--review-skill", "--auto-review", "--push-after-merge" }, project_usage);
         if (args.pos.items.len != 2) fail("usage: cl project add <name> <dir> [options]", .{});
         const dir = try realDir(ctx, a, args.pos.items[1]);
         try checkProfile(cfg, args.get("--profile"));
@@ -445,13 +460,14 @@ pub fn projectMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void
             .onto = args.get("--onto"),
             .review_skill = args.get("--review-skill"),
             .auto_review = parseAutoReview(args),
+            .push_after_merge = checkRemote(args.get("--push-after-merge")),
         }) catch |e| boardFail(db, e, "project (name or prefix)");
         const p = board.getProject(db, a, args.pos.items[0]) catch |e| boardFail(db, e, "project");
         const jj = worktree.ensureJj(ctx, a, dir);
         return out(try std.fmt.allocPrint(a, "{s}: tickets are {s}-1, {s}-2, ...{s}\n", .{ p.name, p.prefix, p.prefix, if (jj) "\n(set up jj alongside git: jj git init --colocate)" else "" }));
     }
     if (std.mem.eql(u8, cmd, "set")) {
-        args.only(&.{ "--prefix", "--slots", "--planners", "--mode", "--profile", "--name", "--dir", "--after-merge", "--after-merge-claude", "--onto", "--review-skill", "--auto-review" }, project_usage);
+        args.only(&.{ "--prefix", "--slots", "--planners", "--mode", "--profile", "--name", "--dir", "--after-merge", "--after-merge-claude", "--onto", "--review-skill", "--auto-review", "--push-after-merge" }, project_usage);
         if (args.pos.items.len != 1) fail("usage: cl project set <name> [options]", .{});
         try checkProfile(cfg, args.get("--profile"));
         if (args.get("--onto") != null) checkOnto(ctx, a, (board.getProject(db, a, args.pos.items[0]) catch |e| boardFail(db, e, "project")).dir, args.get("--onto"));
@@ -468,6 +484,7 @@ pub fn projectMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void
             .onto = args.get("--onto"),
             .review_skill = args.get("--review-skill"),
             .auto_review = parseAutoReview(args),
+            .push_after_merge = checkRemote(args.get("--push-after-merge")),
         }) catch |e| boardFail(db, e, "project (name or prefix)");
         return;
     }
@@ -478,9 +495,26 @@ pub fn projectMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void
         // --run: the detached runner cl starts (see after_merge.zig).
         if (args.has("--run")) return after_merge.runLoop(ctx, cfg, db, name);
         const p = board.getProject(db, a, name) catch |e| boardFail(db, e, "project");
-        if (p.after_merge.len == 0) fail("{s} has no after-merge command (cl project set {s} --after-merge <command>)", .{ name, name });
+        if (!after_merge.runs(p)) fail("{s} has no after-merge command and doesn't push (cl project set {s} --after-merge <command>, or --push-after-merge <remote>)", .{ name, name });
         after_merge.startByHand(ctx, db, a, name, "-") catch |e| boardFail(db, e, "project");
         return out(try std.fmt.allocPrint(a, "{s}: after-merge run started; log: {s}\n", .{ name, try ctx.shortenHomeIn(a, try after_merge.logPath(ctx, a, cfg, name)) }));
+    }
+    if (std.mem.eql(u8, cmd, "push")) {
+        args.only(&.{}, project_usage);
+        if (args.pos.items.len != 1) fail("usage: cl project push <name>", .{});
+        const name = args.pos.items[0];
+        ci.pushByHand(ctx, cfg, db, a, name) catch |e| switch (e) {
+            error.NoPush => fail("{s} doesn't push after a merge (cl project set {s} --push-after-merge <remote>)", .{ name, name }),
+            else => boardFail(db, e, "project"),
+        };
+        return out(try std.fmt.allocPrint(a, "{s}: push tried; how it went (and later its CI) is in {s} and on the ticket\n", .{ name, try ctx.shortenHomeIn(a, try ci.logPath(ctx, a, cfg, name)) }));
+    }
+    // The CI watcher a push after a merge starts (see ci.zig):
+    // `ci-watch <name> <commit> [<ticket>...]`.
+    if (std.mem.eql(u8, cmd, "ci-watch")) {
+        args.only(&.{}, project_usage);
+        if (args.pos.items.len < 2) fail("usage: cl project ci-watch <name> <commit> [<ticket>...]", .{});
+        return ci.watch(ctx, cfg, db, args.pos.items[0], args.pos.items[1], args.pos.items[2..], .{});
     }
     if (std.mem.eql(u8, cmd, "pause") or std.mem.eql(u8, cmd, "resume")) {
         const pause = std.mem.eql(u8, cmd, "pause");

@@ -228,6 +228,8 @@ fn flagLabel(f: ticket_watch.SeenFlag) []const u8 {
         .{ board.flag_park_expired, "park expired" },
         .{ board.flag_conflict, "conflicts" },
         .{ board.flag_after_merge, "after-merge failed" },
+        .{ board.flag_push_failed, "push failed" },
+        .{ board.flag_ci_failed, "CI failed" },
         .{ board.flag_merge_failed, "didn't land" },
         .{ board.flag_unmerged, "not merged" },
         .{ "ended", "session ended" },
@@ -1340,4 +1342,9 @@ test "act: a notification's button does what the board's would, once" {
 
     try testing.expectError(error.BadInput, act(ctx, cfg, db, a, "fx", "dismiss", ""));
     try testing.expectError(error.Handled, act(ctx, cfg, db, a, "f9999", "dismiss", ""));
+}
+
+test "flagLabel: the push and CI flags read as words" {
+    try std.testing.expectEqualStrings("push failed", flagLabel(.{ .id = 1, .kind = board.flag_push_failed, .detail = "" }));
+    try std.testing.expectEqualStrings("CI failed", flagLabel(.{ .id = 2, .kind = board.flag_ci_failed, .detail = "" }));
 }

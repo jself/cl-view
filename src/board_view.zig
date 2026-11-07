@@ -211,6 +211,7 @@ fn flagColor(kind: []const u8) vaxis.Color {
     if (eql(u8, kind, board.flag_review) or eql(u8, kind, board.flag_unparked) or eql(u8, kind, board.flag_ready_to_close)) return .{ .index = 2 };
     if (eql(u8, kind, board.flag_testing)) return .{ .index = 6 };
     if (eql(u8, kind, board.flag_conflict) or eql(u8, kind, board.flag_after_merge) or eql(u8, kind, board.flag_park_expired) or
+        eql(u8, kind, board.flag_push_failed) or eql(u8, kind, board.flag_ci_failed) or
         eql(u8, kind, board.flag_pr_closed) or eql(u8, kind, board.flag_merge_failed) or eql(u8, kind, board.flag_unmerged)) return .{ .index = 5 };
     return .{ .index = 3 };
 }
@@ -420,6 +421,12 @@ fn askLineRaw(a: std.mem.Allocator, t: board.Ticket, f: board.Flag) ![]const u8 
         const first = std.mem.sliceTo(f.detail, '\n');
         return std.fmt.allocPrint(a, "After-merge command failed{s}{s}", .{ if (first.len > 0) ": " else "", first });
     }
+    if (eql(u8, f.kind, board.flag_push_failed)) {
+        const first = std.mem.sliceTo(f.detail, '\n');
+        return std.fmt.allocPrint(a, "Push after merge failed{s}{s}", .{ if (first.len > 0) ": " else "", first });
+    }
+    // Its detail starts "CI failed at <commit>: ...".
+    if (eql(u8, f.kind, board.flag_ci_failed)) return std.mem.sliceTo(f.detail, '\n');
     if (eql(u8, f.kind, board.flag_merge_failed)) {
         const first = std.mem.sliceTo(f.detail, '\n');
         return std.fmt.allocPrint(a, "Merge didn't land{s}{s}", .{ if (first.len > 0) ": " else "", first });
@@ -1528,6 +1535,8 @@ test askLine {
     try testing.expectEqualStrings("Plan ready for approval", try askLine(a, t, .{ .kind = "review", .source = "auto", .at = 0, .detail = "plan" }));
     try testing.expectEqualStrings("Merging it back conflicts in: src/a.zig, b.md", try askLine(a, t, .{ .kind = "conflict", .source = "auto", .at = 0, .detail = "src/a.zig (content)\nb.md\n" }));
     try testing.expectEqualStrings("After-merge command failed: make: error 2", try askLine(a, t, .{ .kind = "after-merge", .source = "auto", .at = 0, .detail = "make: error 2\nmore" }));
+    try testing.expectEqualStrings("Push after merge failed: couldn't push trunk to origin: rejected", try askLine(a, t, .{ .kind = "push-failed", .source = "auto", .at = 0, .detail = "couldn't push trunk to origin: rejected\nmore" }));
+    try testing.expectEqualStrings("CI failed at abc: ci (test-macos)", try askLine(a, t, .{ .kind = "ci-failed", .source = "auto", .at = 0, .detail = "CI failed at abc: ci (test-macos)\nhttps://x\ncommit abc" }));
     try testing.expectEqualStrings("my own words", try askLine(a, t, .{ .kind = "note", .source = "manual", .at = 0, .detail = "my own\nwords" }));
 }
 

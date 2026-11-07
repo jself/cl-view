@@ -592,7 +592,7 @@
 "use strict";
 const STAGES = ["backlog", "planning", "queued", "running", "review", "testing", "done"];
 const STAGE_NAME = { backlog: "Backlog", planning: "Planning", queued: "Queued", running: "Running", review: "Review", testing: "Testing", done: "Done" };
-const FLAG_NAME = { input: "Needs input", question: "Question", review: "Ready for review", testing: "Needs testing", ended: "Session ended", "start-failed": "Didn't start", conflict: "Conflicts", "after-merge": "After-merge failed", "merge-failed": "Didn't land", unmerged: "Not merged", unparked: "Woke from park", "park-expired": "Park expired", "pr-closed": "PR closed", "follow-up-failed": "Follow-up failed", idle: "Idle", "ready-to-close": "Ready to close" };
+const FLAG_NAME = { input: "Needs input", question: "Question", review: "Ready for review", testing: "Needs testing", ended: "Session ended", "start-failed": "Didn't start", conflict: "Conflicts", "after-merge": "After-merge failed", "push-failed": "Push failed", "ci-failed": "CI failed", "merge-failed": "Didn't land", unmerged: "Not merged", unparked: "Woke from park", "park-expired": "Park expired", "pr-closed": "PR closed", "follow-up-failed": "Follow-up failed", idle: "Idle", "ready-to-close": "Ready to close" };
 const STATUS_NAME = { waits: "Waits", paused: "Paused", busy: "Working", waiting: "Waiting on you", blocked: "Waiting on you", idle: "Idle", shell: "Idle · background task", starting: "Starting", gone: "Session ended", nosession: "No session", killed: "Killed · restart it", parked: "Parked", unknown: "Unknown" };
 
 const store = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch { return null; } };
@@ -674,7 +674,7 @@ async function sendAnswer(key, answers, btn) {
 const flagDetail = (f) => { try { return JSON.parse(f.detail); } catch { return null; } };
 // The human is holding it up: it has a flag they haven't hidden, and Claude isn't working on it.
 // A Done ticket only for work that didn't land or a failed after-merge run (board.zig asksWhenDone).
-const DONE_ASKS = ["after-merge", "unmerged", "merge-failed", "conflict"];
+const DONE_ASKS = ["after-merge", "push-failed", "ci-failed", "unmerged", "merge-failed", "conflict"];
 const asksStill = (t, f) => t.stage !== "done" || DONE_ASKS.includes(f.kind);
 // Parked, it waits on something outside cl, not on you.
 const needsMe = (row) => !row.ticket.park && row.ticket.flags.some((f) => !f.hidden && asksStill(row.ticket, f)) && !row.working;
@@ -710,6 +710,8 @@ function askLine(t, f, quick) {
   if (f.kind === "idle") return "Idle: waiting for you";
   if (f.kind === "conflict") { const n = f.detail.split("\n").filter((l) => l.trim()).length; return `Merge conflicts in ${n} file${n === 1 ? "" : "s"}`; }
   if (f.kind === "after-merge") return "After-merge command failed: " + f.detail.split("\n")[0];
+  if (f.kind === "push-failed") return "Push after merge failed: " + f.detail.split("\n")[0];
+  if (f.kind === "ci-failed") return f.detail.split("\n")[0];
   if (f.kind === "merge-failed") return "Merge didn't land: " + f.detail.split("\n")[0];
   if (f.kind === "unmerged") return "Done but not merged: " + f.detail.split("\n")[0];
   if (f.kind === "ready-to-close") return `All ${t.children_done} sub-tickets done: close it?`;
@@ -723,11 +725,13 @@ function askLine(t, f, quick) {
 // them; Hide is for "not now".
 const WAITING = ["question", "input", "review", "testing", "conflict", "idle"];
 const dismissable = (f) => !WAITING.includes(f.kind);
+// A ci-failed flag's first failed run (its detail's second line).
+const ciRunUrl = (f) => (f.detail.split("\n")[1] || "").startsWith("https://") ? f.detail.split("\n")[1] : "";
 const DISMISS_TIP = "Remove this alert for good. The ticket itself doesn't change; the alert comes back only if the same thing happens again";
 // A failed start of a queued (or planning) ticket is retried by the dispatcher.
 const retries = (t) => (t.stage === "queued" || t.stage === "planning") && !t.tmux && !t.killed && !t.park;
 const flagLabel = (f) => f.kind === "review" && f.detail === "plan" ? "Plan ready" : (FLAG_NAME[f.kind] || f.kind);
-const flagClass = (k) => ["after-merge", "park-expired", "pr-closed", "follow-up-failed", "merge-failed", "unmerged"].includes(k) ? "f-conflict" : k === "unparked" || k === "ready-to-close" ? "f-review" : ["input", "question", "review", "testing", "conflict"].includes(k) ? "f-" + k : "";
+const flagClass = (k) => ["after-merge", "push-failed", "ci-failed", "park-expired", "pr-closed", "follow-up-failed", "merge-failed", "unmerged"].includes(k) ? "f-conflict" : k === "unparked" || k === "ready-to-close" ? "f-review" : ["input", "question", "review", "testing", "conflict"].includes(k) ? "f-" + k : "";
 // Finishing: Claude is merging the branch or opening a PR before it goes to Done.
 const finishPill = (t) => t.finishing ? `<span class="pill f-finishing" title="${t.finishing === "pr" ? `Claude is opening a PR${t.pr_then ? esc("; a follow-up ticket, parked on it, does what's left once it merges: " + t.pr_then) : ""}` : t.finishing === "after-merge" ? "It's merged; Claude is doing the after-merge steps (rebuilding, restarting)" : t.finishing === "tell" ? "Claude is doing what you told it" : "Claude is merging its branch"}; it goes to Done after">Finishing</span>` : "";
 // Claude asked to close it its own way (cl ticket custom-close).
@@ -988,6 +992,8 @@ function renderNeeds() {
       : f.kind === "review" ? `<button type="button" class="btn primary" data-open="${esc(t.key)}" data-tab="review">Review</button>`
       : f.kind === "testing" ? `<button type="button" class="btn primary" data-open="${esc(t.key)}" data-tab="test">Test it</button>`
       : f.kind === "after-merge" ? `<button type="button" class="btn primary" data-open="${esc(t.key)}" data-tab="after-merge">See the log</button>`
+      : f.kind === "push-failed" ? `<button type="button" class="btn primary" data-push-again="${esc(t.project)}" title="Push trunk to its remote again (the after-merge command doesn't run)">Push again</button>`
+      : f.kind === "ci-failed" && ciRunUrl(f) ? `<a class="btn primary" href="${esc(ciRunUrl(f))}" target="_blank" rel="noopener">See the run</a>`
       : f.kind === "merge-failed" || f.kind === "unmerged" ? `<button type="button" class="btn primary" data-open="${esc(t.key)}" data-tab="landing">See why</button>`
       : f.kind === "idle" ? `<button type="button" class="btn primary" data-open="${esc(t.key)}" data-tab="session">Open session</button>`
       : f.kind === "ready-to-close" ? `<button type="button" class="btn primary" data-to-done="${esc(t.key)}" title="Move it to Done (it asks how to finish when it has a branch of its own)">Move to Done</button>`
@@ -1124,6 +1130,7 @@ function openProject(name) {
         <label>Worktree slots<input type="number" name="slots" min="1" value="${p ? p.slots : ""}" placeholder="3"></label></div>
       <div class="row2"><label>Profile<select name="profile"><option value="">Default</option>${profiles.map((x) => `<option ${x === p?.profile ? "selected" : ""}>${esc(x)}</option>`).join("")}</select></label>
         <label>Target branch<input type="text" name="onto" class="mono" value="${esc(p?.onto || "")}" placeholder="Trunk" autocomplete="off" title="A jj bookmark or git branch its tickets start from and merge into instead of trunk; a ticket's own target wins. Merges into it don't run the after-merge steps"></label></div>
+      <label>Push trunk to<input type="text" name="push_after_merge" class="mono" value="${esc(p?.push_after_merge || "")}" placeholder="Nowhere" autocomplete="off" title="A git remote (like origin) cl pushes trunk to after each merge into it, then watches its CI and flags the ticket when it fails. For projects that don't go through PRs"></label>
       <label>When a ticket reaches Review<select name="auto_review" title="Run the automated review by itself, the first time a ticket gets there, so the ticket reaches Needs you with its findings there">${[["off", "Wait for me to run the automated review"], ["on", "Run the automated review"], ["send", "Run the automated review and send its findings to Claude for one round"]].map(([v, l]) => `<option value="${v}" ${(p?.auto_review || "off") === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>
       ${p ? `<p class="muted" style="margin:0;font-size:calc(12.5 * var(--u))">A new prefix applies to new tickets; existing keys stay as they are.</p>` : ""}
       <p class="formerr" id="projErr" role="alert" hidden></p>
@@ -1132,7 +1139,7 @@ function openProject(name) {
 }
 async function submitProject(form) {
   const f = Object.fromEntries(new FormData(form)); const old = form.dataset.name;
-  const body = { name: f.name.trim(), dir: f.dir.trim(), prefix: f.prefix.trim().toUpperCase(), mode: f.mode, profile: f.profile, onto: f.onto.trim(), auto_review: f.auto_review };
+  const body = { name: f.name.trim(), dir: f.dir.trim(), prefix: f.prefix.trim().toUpperCase(), mode: f.mode, profile: f.profile, onto: f.onto.trim(), auto_review: f.auto_review, push_after_merge: f.push_after_merge.trim() };
   if (f.slots !== "") body.slots = Number(f.slots);
   // An unchanged directory isn't sent: one that's gone since would refuse the save.
   if (old && body.dir === state.data.projects.find((x) => x.name === old)?.dir) delete body.dir;
@@ -2223,6 +2230,10 @@ async function onClick(e) {
   if (ds.kill !== undefined) { document.getElementById("killDlg").close(ds.kill); return; }
   if (el.id === "needsHiddenBtn") { state.needsHidden = !state.needsHidden; store("cl-needs-hidden", state.needsHidden ? "1" : "0"); renderNeeds(); return; }
   if (ds.toDone) return moveTo(ds.toDone, "done");
+  if (ds.pushAgain) {
+    try { await api(`project/${encodeURIComponent(ds.pushAgain)}/push`, {}); toast("Pushing again; the result comes back to the ticket"); } catch (e) { toast(e.message, true); }
+    return;
+  }
   if (ds.hide) return act(ds.hide, "hide", {}, `${ds.hide} hidden from Needs you; a new flag brings it back`);
   if (ds.unhide) return act(ds.unhide, "unhide", {}, `${ds.unhide} is back in Needs you`);
   if (ds.dismiss) return act(ds.dismiss, "dismiss", { kind: ds.kind }, `${ds.dismiss}: ${(FLAG_NAME[ds.kind] || ds.kind).toLowerCase()} alert dismissed`).catch(() => {});
