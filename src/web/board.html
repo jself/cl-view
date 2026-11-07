@@ -960,6 +960,7 @@ async function loadDetail(key, quiet) {
   if (quiet && focused) { drawTail(); return; }
   // A refresh keeps the popup's scroll and the session tail's.
   if (quiet) keepScroll(document.getElementById("ticketDlg"), renderDetail); else renderDetail();
+  followRuns();
   drawTail();
 }
 
@@ -1056,7 +1057,25 @@ function renderDetail() {
   for (const id of ["commentText", "msg", "backText", "testNote"]) { const el = document.getElementById(id); if (el) kept[id] = el.value; }
   renderDetailInner();
   for (const [id, v] of Object.entries(kept)) { const el = document.getElementById(id); if (el && v) el.value = v; }
+  followRuns();
   drawTail();
+}
+// A test plan step's run: output follows new lines, like a terminal: it
+// stays scrolled to the bottom as the command writes and when it exits.
+// Scrolling up stops that (the redraw then keeps your place); scrolling back
+// to the bottom, its "Scroll to bottom" button (as on the Session tab), or
+// Restart starts it again. Keyed "TICKET:step".
+const runUnfollowed = {};
+function followRuns() {
+  for (const el of document.querySelectorAll("pre.runout")) if (!runUnfollowed[el.dataset.follow]) el.scrollTop = el.scrollHeight;
+}
+document.addEventListener("scroll", (e) => {
+  const el = e.target; if (!el.classList?.contains("runout")) return;
+  setRunFollow(el.dataset.follow, el.scrollTop + el.clientHeight >= el.scrollHeight - 4);
+}, true);
+function setRunFollow(k, follow) {
+  if (follow) delete runUnfollowed[k]; else runUnfollowed[k] = true;
+  for (const b of document.querySelectorAll("[data-run-bottom]")) if (b.dataset.runBottom === k) b.hidden = follow;
 }
 function renderDetailInner() {
   const d = state.detail; const t = d.ticket; const tabs = tabsFor(d);
@@ -1211,7 +1230,8 @@ function testTab(d) {
     ${st.run ? `<div><pre class="term">${esc(st.run)}</pre>
       <div class="actions" style="margin-top:calc(8 * var(--u));align-items:center"><button type="button" class="btn primary" data-launch="${at + 1}">${l ? "Restart" : "Run"}</button>${l ? `<button type="button" class="btn" data-launch-stop="${at + 1}">Stop</button>` : ""}
       ${l ? `<span class="muted">${l.running ? "Running" : "Exited"}</span>` : ""}</div>
-      ${l ? `<pre class="term" style="margin-top:calc(8 * var(--u))">${esc(l.output || "(no output yet)")}</pre>` : ""}</div>` : ""}
+      ${l ? `<div class="tail" style="margin-top:calc(8 * var(--u))"><pre class="term runout" data-follow="${esc(d.ticket.key)}:${at}">${esc(l.output || "(no output yet)")}</pre>
+        <button type="button" class="tobottom" data-run-bottom="${esc(d.ticket.key)}:${at}" ${runUnfollowed[d.ticket.key + ":" + at] ? "" : "hidden"}>Scroll to bottom ↓</button></div>` : ""}</div>` : ""}
     ${st.wait ? `<p class="wait ${ready ? "up" : ""}">${ready === true ? "✓ Answering" : ready === false ? "… Not answering yet" : "Waits for"}: ${esc(st.wait)}</p>` : ""}
     ${st.open.length ? `<div class="actions">${st.open.map((u) => `<a class="btn" href="${esc(u)}" target="_blank" rel="noopener">Open ${esc(u.replace(/^https?:\/\//, ""))} ↗</a>`).join("")}</div>` : ""}
     ${st.checks.length ? `<div style="display:flex;flex-direction:column;gap:calc(8 * var(--u))">${st.checks.map((c) => { const i = ci++; const r = state.checks["c" + i] || {};
@@ -1714,6 +1734,7 @@ async function onClick(e) {
   if (ds.open) return openTicket(ds.open, ds.tab);
   const key = state.open; if (!key) return;
   if (ds.tab) { state.tab = ds.tab; state.tailPinned = true; tail.text = null; renderDetail(); return; }
+  if (ds.runBottom) { setRunFollow(ds.runBottom, true); followRuns(); return; }
   if (el.id === "toBottom") { tail.term?.scrollToBottom(); setPinned(true); return; }
   if (ds.move) return act(key, "move", { stage: ds.move }, "Moved");
   if (ds.relocate) {
@@ -1737,7 +1758,7 @@ async function onClick(e) {
     if (c.pass === pass) { delete c.pass; delete c.note; } else c.pass = pass;
     state.checks["c" + ds.check] = c; saveProgress(); renderDetail(); return; }
   if (ds.stepGo !== undefined) { state.checks.step = Math.max(0, +ds.stepGo); saveProgress(); renderDetail(); document.getElementById("ticketDlg").scrollTop = 0; return; }
-  if (ds.launch) return act(key, "launch", { step: +ds.launch }, "Started");
+  if (ds.launch) { setRunFollow(key + ":" + (+ds.launch - 1), true); return act(key, "launch", { step: +ds.launch }, "Started"); }
   if (ds.launchStop) return act(key, "launch-stop", { step: +ds.launchStop }, "Stopped");
   if (ds.act === "gutter") {
     try { const r = await act(key, "gutter"); toast("gutter's window is open"); } catch {}
