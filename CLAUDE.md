@@ -15,7 +15,7 @@ When cl merges a ticket, the project's after-merge command does the rebuild by i
 
     cl project set cl-wrapper --after-merge '~/.local/share/zvm/0.16.0/zig build -Doptimize=ReleaseSafe && install -m755 zig-out/bin/cl* ~/.local/bin/ && { pkill -f "^$HOME/.local/bin/cl web$" || true; }'
 
-It builds master in a clean checkout (not this one), installs `cl` and `cl-window`, and restarts `cl web` (the loop in the `cl_web_*` tmux session starts it again 10 seconds later). The open board reloads by itself. Its output is in `~/.local/state/cl/after-merge-cl-wrapper.log`. A failure flags the ticket and asks the operator to sort it out (README, "After merge"). Don't rebuild by hand after a merge cl made; check `cl project list` shows the command, and if it doesn't, do the steps below.
+It builds master in a clean checkout (not this one), installs `cl` and `cl-window`, and restarts `cl web` (the loop in the `cl_web_*` tmux session, or systemd once `cl web install` has run, starts it again 10 seconds later). The open board reloads by itself. Its output is in `~/.local/state/cl/after-merge-cl-wrapper.log`. A failure flags the ticket and asks the operator to sort it out (README, "After merge"). Don't rebuild by hand after a merge cl made; check `cl project list` shows the command, and if it doesn't, do the steps below.
 
 When master changes some other way (a fix committed to it by hand), do the same by hand without being asked: `cl project after-merge cl-wrapper` runs the command on master as it is. Without the command:
 

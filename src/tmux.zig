@@ -4,6 +4,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Ctx = @import("ctx.zig");
 const config = @import("config.zig");
+const web_service = @import("web_service.zig");
 
 pub const prefix = "cl_";
 
@@ -187,6 +188,40 @@ pub fn runQuiet(ctx: Ctx, argv: []const []const u8) !void {
     ctx.gpa.free(out);
 }
 
+/// Start the tmux server, unless one runs, in a systemd scope of its own
+/// (`systemd-run --user --scope`), and keep it running with no sessions
+/// (exit-empty off). For `cl web` as a systemd service: tmux puts each pane
+/// in a scope that is PartOf the unit its server runs in, so a server started
+/// from cl-web.service would lose every session whenever that service is
+/// stopped or restarted. True if it started one. `cl web` calls it at
+/// startup, and `newSession` before each session it makes there.
+pub fn startServerScoped(ctx: Ctx) !bool {
+    if (run(ctx, &.{"list-clients"})) |out| {
+        ctx.gpa.free(out);
+        return false;
+    } else |err| if (err == error.NoTmuxSocket) return err;
+    const tmux_argv = try fullArgv(ctx, &.{ "start-server", ";", "set", "-s", "exit-empty", "off" });
+    defer ctx.gpa.free(tmux_argv);
+    var unit_buf: [32]u8 = undefined;
+    const unit = std.fmt.bufPrint(&unit_buf, "--unit=cl-tmux-{d}", .{std.os.linux.getpid()}) catch unreachable;
+    const pre = [_][]const u8{ "systemd-run", "--user", "--scope", "--quiet", "--collect", unit, "--" };
+    const full = try ctx.gpa.alloc([]const u8, pre.len + tmux_argv.len);
+    defer ctx.gpa.free(full);
+    @memcpy(full[0..pre.len], &pre);
+    @memcpy(full[pre.len..], tmux_argv);
+    const res = std.process.run(ctx.gpa, ctx.io, .{ .argv = full }) catch |err| {
+        setError(@errorName(err));
+        return err;
+    };
+    defer ctx.gpa.free(res.stdout);
+    defer ctx.gpa.free(res.stderr);
+    if (res.term != .exited or res.term.exited != 0) {
+        setError(if (std.mem.trim(u8, res.stderr, " \n").len > 0) res.stderr else "systemd-run failed");
+        return error.TmuxFailed;
+    }
+    return true;
+}
+
 /// Replace the program in a session's first pane with `command`, in `dir`.
 /// The session, its name and its other windows stay; the session's
 /// environment (profile, config dir) carries over, plus `env`. `arg`, when
@@ -292,6 +327,9 @@ pub const NewOptions = struct {
 
 /// Create a detached session running `command`. Returns the tmux session name.
 pub fn newSession(ctx: Ctx, opts: NewOptions) ![]const u8 {
+    // In cl-web.service, a session must not be what starts the server
+    // there, should the server have gone since startup (`startServerScoped`).
+    if (web_service.inUnit(ctx)) _ = startServerScoped(ctx) catch {};
     const san = try sanitize(ctx.gpa, opts.name);
     defer ctx.gpa.free(san);
     var idbuf: [8]u8 = undefined;

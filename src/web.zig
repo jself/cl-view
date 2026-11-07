@@ -14,6 +14,7 @@ const actions = @import("actions.zig");
 const web_board = @import("web_board.zig");
 const board = @import("board.zig");
 const worktree = @import("worktree.zig");
+const web_service = @import("web_service.zig");
 
 const index_html = @embedFile("web/index.html");
 const login_html = @embedFile("web/login.html");
@@ -49,7 +50,7 @@ const State = struct {
     terms: std.ArrayList(*Terminal) = .empty,
 };
 
-const usage = "usage: cl web [--port N] [password | start | stop]";
+const usage = "usage: cl web [--port N] [password | start | stop | install | uninstall]";
 
 pub fn main(ctx: Ctx, cfg_in: config.Config, argv_in: []const []const u8) !void {
     var cfg = cfg_in;
@@ -64,6 +65,8 @@ pub fn main(ctx: Ctx, cfg_in: config.Config, argv_in: []const []const u8) !void 
         if (std.mem.eql(u8, argv[0], "password")) return setPassword(ctx);
         if (std.mem.eql(u8, argv[0], "start")) return start(ctx, cfg, true);
         if (std.mem.eql(u8, argv[0], "stop")) return stop(ctx, cfg);
+        if (std.mem.eql(u8, argv[0], "install")) return install(ctx, cfg);
+        if (std.mem.eql(u8, argv[0], "uninstall")) return uninstall(ctx, cfg);
         return fail(usage, .{});
     }
     return serve(ctx, cfg);
@@ -76,6 +79,13 @@ fn serve(ctx: Ctx, cfg: config.Config) !void {
     var state: State = .{ .ctx = ctx, .cfg = cfg, .key = undefined, .exe = try ctx.exePath(&exe_buf) };
     std.crypto.hash.sha2.Sha256.hash(cfg.web.password, &state.key, .{});
     if (cfg.web.port) |p| replaceOld(ctx, cfg, p);
+    // As a systemd service, before anything here can start the tmux server
+    // inside the service (README, "Start on boot").
+    if (cfg.web.port == null and web_service.inUnit(ctx)) {
+        if (tmux.startServerScoped(ctx)) |started| {
+            if (started) logf("started the tmux server in a systemd scope of its own, so restarting {s} leaves the sessions alone", .{web_service.unit_name});
+        } else |err| logf("couldn't start the tmux server outside {s} ({s}: {s}); restarting the service may close sessions it started", .{ web_service.unit_name, @errorName(err), tmux.lastError() });
+    }
 
     // One listener per comma-separated address. Mistakes in the config stop us
     // here; an address that is not available yet (tailscale) is retried.
@@ -1106,6 +1116,16 @@ pub fn start(ctx: Ctx, cfg: config.Config, force: bool) !void {
     var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
+    // Installed as a service, the main server is systemd's to run.
+    if (cfg.web.port == null and web_service.installed(ctx)) {
+        var err: []const u8 = "";
+        if (!web_service.control(ctx, arena, .start, &err)) {
+            if (force) fail("systemctl --user start {s}: {s}", .{ web_service.unit_name, err });
+            return;
+        }
+        if (force) say("cl web is running as {s} (systemctl --user status {s})", .{ web_service.unit_name, web_service.unit_name });
+        return;
+    }
     const r = try role(arena, cfg);
     if (try tmux.findRole(ctx, arena, r) != null) {
         if (force) say("cl web is already running (cl web stop to stop it)", .{});
@@ -1135,8 +1155,51 @@ fn stop(ctx: Ctx, cfg: config.Config) !void {
     var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
+    if (cfg.web.port == null and web_service.installed(ctx)) {
+        var err: []const u8 = "";
+        if (!web_service.control(ctx, arena, .stop, &err)) fail("systemctl --user stop {s}: {s}", .{ web_service.unit_name, err });
+        return;
+    }
     const s = (try tmux.findRole(ctx, arena, try role(arena, cfg))) orelse fail("cl web is not running", .{});
     try tmux.kill(ctx, s.tmux_name);
+}
+
+/// Run the main server as a systemd user service, so it starts on boot,
+/// in place of the hidden tmux session (which this stops).
+fn install(ctx: Ctx, cfg: config.Config) !void {
+    if (cfg.web.port != null) fail("cl web install sets up the main server; run it without CL_PORT or --port", .{});
+    if (cfg.web.password.len == 0) fail("no web.password in ~/.config/cl/config; run `cl web password` first", .{});
+    var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const exe = try ctx.exePath(&exe_buf);
+    const installed_cl = try std.fmt.allocPrint(arena, "{s}/.local/bin/cl", .{ctx.home});
+    if (!std.mem.eql(u8, exe, installed_cl))
+        say("note: the service will run {s}, not {s}, which is what the after-merge command installs and restarts", .{ exe, installed_cl });
+    if (!web_service.supported) fail("cl web install sets up a systemd user service, which needs Linux; on macOS, keep using web.autostart or `cl web start` (a hidden tmux session)", .{});
+    var stopped = false;
+    if (!ctx.tmux_blocked) if (tmux.findRole(ctx, arena, tmux.web_role) catch null) |s| {
+        try tmux.kill(ctx, s.tmux_name);
+        stopped = true;
+        say("stopped the cl web running in tmux ({s}); systemd runs it from now on", .{s.tmux_name});
+    };
+    web_service.install(ctx, arena, exe, try logPath(ctx, arena, cfg)) catch |err| {
+        if (stopped) start(ctx, cfg, true) catch {};
+        if (err == error.InstallFailed) std.process.exit(1);
+        return err;
+    };
+}
+
+fn uninstall(ctx: Ctx, cfg: config.Config) !void {
+    if (cfg.web.port != null) fail("cl web uninstall removes the main server's service; run it without CL_PORT or --port", .{});
+    var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);
+    defer arena_state.deinit();
+    try web_service.uninstall(ctx, arena_state.allocator());
+    if (cfg.web.autostart) {
+        try start(ctx, cfg, false);
+        say("cl web runs in a hidden tmux session again (web.autostart)", .{});
+    } else say("`cl web start` runs it in a hidden tmux session again", .{});
 }
 
 /// web.log, or web-<port>.log for a server on an overridden port.

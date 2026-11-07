@@ -34,7 +34,7 @@ const usage =
     \\                            the chooser and the web board's Needs You show it
     \\  cl say <text>             the operator's short spoken answer to a voice message (voice.*)
     \\  cl web                    serve the chooser to a browser (see web.* in the config)
-    \\  cl web password | start | stop
+    \\  cl web password | start | stop | install | uninstall
     \\                            set the web password, or run the server in the background
     \\  cl window [install]       the web UI in its own desktop window (install: app launcher entry)
     \\  cl board                  the ticket board in the terminal (b in the chooser)
@@ -416,6 +416,7 @@ test {
     std.testing.refAllDecls(operator);
     std.testing.refAllDecls(voice);
     std.testing.refAllDecls(@import("after_merge.zig"));
+    std.testing.refAllDecls(@import("web_service.zig"));
     std.testing.refAllDecls(@import("park.zig"));
     std.testing.refAllDecls(@import("ticket_watch.zig"));
     std.testing.refAllDecls(@import("board_view.zig"));

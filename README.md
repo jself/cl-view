@@ -117,6 +117,7 @@ cl alert <text> | --clear alert you from this session (Needs you and the chooser
 cl web                    serve the chooser to a browser (foreground)
 cl web password           set the web password (stored as an argon2id hash)
 cl web start | stop       run the web server in the background / stop it
+cl web install | uninstall  start it on boot, as a systemd user service (Linux)
 cl web --port N ...       the same on port N, as a second server (or CL_PORT=N)
 cl board                  the ticket board in the terminal (b in the chooser)
 cl ticket | t <command>   the ticket board (see Board)
@@ -267,6 +268,8 @@ web.font_size = 16              # text size of the board and terminal pages, in 
 - With `web.autostart`, the server runs in a hidden tmux session and logs to
   `~/.local/state/cl/web.log`. After changing the password or upgrading cl,
   run `cl web stop` and it starts again with the next cl command.
+- `cl web install` runs it as a systemd user service instead, so it starts
+  on boot (below).
 - Signing in sets a 30-day cookie signed with a key derived from the password
   hash, so it survives restarts and a new password signs everyone out. Failed
   logins are limited to five a minute, and the terminal WebSocket only accepts
@@ -299,6 +302,62 @@ web.font_size = 16              # text size of the board and terminal pages, in 
   it first stops any other `cl web` started with the same port (another
   ticket's test server still running, or `cl web start`'s), so the newest
   build is the one that answers. The main server is never stopped this way.
+
+### Start on boot
+
+The hidden tmux session only starts when some cl command runs, so after a
+reboot the phone app, its notifications and the board's dispatcher wait for
+you to open a terminal. On Linux, `cl web install` makes the main server a
+systemd user service instead:
+
+- It writes `~/.config/systemd/user/cl-web.service`, which runs this cl's
+  `web` (normally `~/.local/bin/cl web`) and logs to the same `web.log`;
+  stops the server running in tmux; and enables and starts the service
+  (`systemctl --user enable`, then `restart`, so running it again picks up a
+  new unit). `systemctl --user status cl-web` shows how it is doing.
+- Like the tmux loop, systemd starts it again 10 s after it exits, however it
+  exits (`Restart=always`), so killing it is a restart: the after-merge
+  command's `pkill -f "^$HOME/.local/bin/cl web$"` still works.
+- The unit's PATH is `~/.local/bin`, the directory cl runs from, then the PATH
+  of the shell that ran `cl web install` (and `/usr/local/bin:/usr/bin:/bin`).
+  systemd's own PATH has no `~/.local/bin`, and the tmux server the service
+  may start at boot (and every session in it) inherits the unit's PATH. Run
+  it again from a shell whose PATH is right if that changes. `LANG`,
+  `LC_ALL`, `EDITOR`, `VISUAL`, `TMUX_TMPDIR`, `CL_TMUX_SOCKET`,
+  `XDG_STATE_HOME` and `XDG_DATA_HOME` are copied in too when set.
+- That is all the environment a tmux server started by the service gets, and
+  so every session on it: not the rest of your login shell's (tokens your
+  `.zshrc` exports, `SSH_AUTH_SOCK` for `git push` over ssh, `DISPLAY`). A
+  tmux server started from your shell keeps the full one; after a reboot the
+  service is what starts it. Put what sessions need in `~/.config/cl/web.env`
+  (`NAME=value` lines, read when the service starts; `systemctl --user
+  restart cl-web` after changing it), or set it in tmux with `tmux
+  set-environment -g NAME value` for sessions started after.
+- A user's systemd only starts at boot, before anyone logs in, with
+  *lingering* on. Without it, `cl web install` runs `loginctl enable-linger`,
+  which lets your user services (all of them, not only this one) start at
+  boot and keep running after you log out; when that isn't allowed it says
+  to run `sudo loginctl enable-linger <you>`, and meanwhile the service
+  starts at login. `loginctl disable-linger` turns it off.
+- While it's installed, `cl web start` / `stop` and web.autostart start and
+  stop the service (`systemctl --user start | stop cl-web`) and never a tmux
+  one. A `CL_PORT` second server is unaffected.
+- tmux gives every pane a systemd scope that is *part of* the unit its server
+  started in, so a tmux server started by the service would lose every
+  session whenever the service stops or restarts. So at startup, if no tmux
+  server runs, the service starts one in a scope of its own
+  (`systemd-run --user --scope`, unit `cl-tmux-<pid>`), with `exit-empty`
+  off so it stays up between sessions, and checks again before each session
+  it starts (should that server have gone); `KillMode=process` leaves anything else
+  it started alone.
+- `cl web uninstall` stops, disables and removes the unit (lingering stays as
+  it is), then starts the server in tmux again if web.autostart is on. If
+  systemctl can't stop it, the unit stays and nothing else starts.
+- If any systemctl step of `cl web install` fails, it disables and removes
+  the unit again and restarts the tmux server it stopped.
+
+macOS has no systemd: `cl web install` refuses there, and web.autostart or
+`cl web start` (tmux) remain the way to run it.
 
 ### On a phone
 
