@@ -552,7 +552,12 @@ cl t done QA-1 --summary "Fixed the race"
   the plan and runs `done`, which means "plan ready" there. On the web board,
   its Needs you card's Read the plan opens the ticket's Plan tab, with Approve
   plan and a box to send feedback. The plan stays approvable while Claude
-  answers; a revised plan it hands in replaces it. `cl t approve` moves it to Queued, and a new session builds it; on
+  answers; a revised plan it hands in replaces it. Edit plan there changes
+  its markdown yourself while a fresh session will build it (Planning, or
+  Backlog and Queued before it has run: a session resuming its conversation
+  isn't told the plan): that session gets the plan as you saved it, and
+  Claude isn't told you changed it. If Claude hands
+  in a revised plan while you edit, Save is refused rather than replace it. `cl t approve` moves it to Queued, and a new session builds it; on
   a ticket in review or testing, approve moves it on a stage.
 
 ### Running tickets
@@ -844,6 +849,12 @@ as your draft review: those with a file and line as inline comments, the rest
 in the overall note. Delete the wrong ones, edit or add, and Submit as usual.
 A draft of your own for the same changes is kept instead (the board says so);
 one cl wrote that you left as it was is replaced by newer findings.
+Edit, on the Review tab, opens the message Send findings would paste in as
+one text to change: drop findings, reword them, add your own. Saved, it is
+what Send findings sends, and Open in gutter puts it whole in the overall
+note (without the opening line addressed to Claude); Back to the findings
+drops it, and a new review starts without it. If the review runs again while
+you edit, Save is refused, so your edit isn't put on findings you haven't seen.
 After a new round, the old findings say which round they were from. Done,
 deleting the ticket, or moving it back to Queued stops a review that's
 running.

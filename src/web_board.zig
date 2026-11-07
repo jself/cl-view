@@ -14,6 +14,7 @@
 //!                                       gutter-stop launch launch-stop test-progress
 //!                                       test-results relocate park unpark autoreview
 //!                                       autoreview-stop autoreview-send autoreview-gutter
+//!                                       autoreview-edit plan
 //!   POST /api/flags/dismiss             dismiss one kind of flag on several tickets
 //!   POST /api/alert/<tmux>/dismiss      clear a session's alert (cl alert)
 //!   POST /api/project                   add a project
@@ -140,6 +141,8 @@ pub fn handle(ctx: Ctx, cfg: config.Config, req: *std.http.Server.Request, path:
             error.AlreadyRunning => .{ .conflict, "its automated review is running already" },
             error.StartFailed => .{ .internal_server_error, std.fmt.allocPrint(a, "the reviewer didn't start: {s}", .{tmux.lastError()}) catch "the reviewer didn't start" },
             error.NoFindings => .{ .conflict, "there are no findings to use" },
+            error.EditConflict => .{ .conflict, "it changed while you were editing (a revised plan, or a new review): copy your text, press Cancel to see the new version, and edit that" },
+            error.PlanStarted => .{ .conflict, "the session that builds it has started, or will resume a conversation, and won't see an edit of the plan; send Claude what to change instead" },
             error.OldFindings => .{ .conflict, "these findings are from before Claude's last changes; run the review again" },
             error.NotDelivered => .{ .conflict, "Claude didn't take the answer; it's still waiting. Check the session" },
             error.AlreadyStarted => .{ .conflict, "it already has a session" },
@@ -215,6 +218,8 @@ const Body = struct {
     /// finish "tell": what Claude should do first.
     tell: ?[]const u8 = null,
     planners: ?i64 = null,
+    /// plan, autoreview-edit: the text the edit started from.
+    base: ?[]const u8 = null,
     spin_off: ?bool = null,
     /// block, unblock: the ticket it waits on.
     blocker: ?[]const u8 = null,
@@ -578,6 +583,10 @@ fn ticketAction(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator
         try autoreview.stop(ctx, db, a, key);
     } else if (eql(u8, action, "autoreview-send")) {
         return ok(req, a, try actions.autoreviewSend(ctx, db, a, key));
+    } else if (eql(u8, action, "autoreview-edit")) {
+        try autoreview.edit(ctx, db, a, key, b.text orelse return error.BadInput, b.base orelse return error.BadInput);
+    } else if (eql(u8, action, "plan")) {
+        try board.editPlan(ctx, db, a, key, b.text orelse return error.BadInput, b.base orelse return error.BadInput);
     } else if (eql(u8, action, "autoreview-gutter")) {
         const t = try board.getTicket(db, a, key);
         const r = try autoreview.openInGutter(ctx, cfg, db, a, t);
@@ -805,6 +814,7 @@ fn getTicket(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, r
     }
     const dir = review.ticketDir(db, a, t) catch "";
     const plan = review.readTestPlan(a, t);
+    const ar = try autoreview.check(ctx, db, a, t);
     // gutter may have been opened elsewhere (cl t gutter): relay it too.
     const gutter_port = try review.gutterPort(ctx, a, t.key);
     if (gutter_port) |p| web.relayGutter(ctx, cfg, t.key, p);
@@ -828,7 +838,9 @@ fn getTicket(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, r
         .gutter_port = gutter_port,
         // The last automated review (checked: one whose reviewer died or ran
         // too long reads as failed), and whether it is of an earlier round.
-        .autoreview = try autoreview.check(ctx, db, a, t),
+        .autoreview = ar,
+        // What "Send findings to Claude" sends (your edit, if you made one): Edit starts from it.
+        .autoreview_message = if (ar) |r| (if (std.mem.eql(u8, r.status, "done")) try autoreview.message(a, r) else "") else "",
         .autoreview_session = try autoreview.sessionName(a, t.key),
         // gutter is installed: the board offers it for review.
         .gutter = review.findGutter(ctx, a, cfg) != null,

@@ -1272,6 +1272,70 @@ pub fn setPlan(ctx: Ctx, db: Db, id: i64, md: []const u8) Error!void {
     try touch(ctx, db, id);
 }
 
+/// Your edit of the ticket's plan (the board's Edit on its Plan tab): what
+/// the session that builds it is told. Only while that will be a fresh
+/// session (`planEditable`): one that resumes a conversation is never told
+/// the plan. `base` is the plan the edit started from: error.EditConflict
+/// when it has changed since (Claude handed in a revised one), so yours
+/// doesn't replace it unseen. One statement checks and writes, so a `done
+/// --plan` or a start from another process can't land in between.
+pub fn editPlan(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, md: []const u8, base: []const u8) (Error || error{ PlanStarted, EditConflict })!void {
+    const t = try getTicket(db, a, key);
+    if (!planEditable(t)) return error.PlanStarted;
+    const ws = " \t\r\n";
+    if (!std.mem.eql(u8, std.mem.trim(u8, base, ws), std.mem.trim(u8, t.plan_md, ws))) return error.EditConflict;
+    const trimmed = std.mem.trim(u8, md, ws);
+    if (std.mem.eql(u8, trimmed, std.mem.trim(u8, t.plan_md, ws))) return;
+    const new = if (trimmed.len > 0) try std.fmt.allocPrint(a, "{s}\n", .{trimmed}) else "";
+    try db.exec("UPDATE tickets SET plan_md = ?2 WHERE id = ?1 AND plan_md = ?3 AND " ++ plan_editable_sql, .{ t.id, new, t.plan_md });
+    if (db.changes() == 0) {
+        const now_t = try getTicket(db, a, key);
+        return if (planEditable(now_t)) error.EditConflict else error.PlanStarted;
+    }
+    try touch(ctx, db, t.id);
+    try logEvent(ctx, db, t.id, "plan edited", "");
+}
+
+/// Whether an edit of `t`'s plan reaches the session that builds it: in
+/// Planning (approving starts a fresh session), or in Backlog or Queued with
+/// no conversation to resume (a resumed one is only told it's back on).
+pub fn planEditable(t: Ticket) bool {
+    return t.stage == .planning or ((t.stage == .backlog or t.stage == .queued) and t.session_id.len == 0);
+}
+
+/// `planEditable` as SQL on the tickets table.
+const plan_editable_sql = "(stage = 'planning' OR (stage IN ('backlog', 'queued') AND session_id = ''))";
+
+test editPlan {
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp" };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try Db.open(":memory:");
+    defer db.close();
+    try migrate(db);
+    try addProject(db, .{ .name = "qa", .dir = "/x/qa" });
+    const k = try createTicket(ctx, db, a, .{ .project = "qa", .title = "T", .stage = .planning });
+    const id = (try getTicket(db, a, k)).id;
+    try setPlan(ctx, db, id, "## Steps\n1. do it\n");
+    try editPlan(ctx, db, a, k, "## Steps\n1. do it\n2. test it\n\n", "## Steps\n1. do it");
+    try std.testing.expectEqualStrings("## Steps\n1. do it\n2. test it\n", (try getTicket(db, a, k)).plan_md);
+    // Claude handed in a revised plan while you edited the old one: yours doesn't replace it.
+    try setPlan(ctx, db, id, "## Revised\n");
+    try std.testing.expectError(error.EditConflict, editPlan(ctx, db, a, k, "mine", "## Steps\n1. do it\n2. test it\n"));
+    try std.testing.expectEqualStrings("## Revised\n", (try getTicket(db, a, k)).plan_md);
+    // Once its build session started, that session would never see it...
+    try move(ctx, db, a, k, .running);
+    try std.testing.expectError(error.PlanStarted, editPlan(ctx, db, a, k, "x", "## Revised\n"));
+    // ...nor when it's back in Queued with a conversation to resume.
+    try move(ctx, db, a, k, .queued);
+    try db.exec("UPDATE tickets SET session_id = 'abc' WHERE id = ?1", .{id});
+    try std.testing.expectError(error.PlanStarted, editPlan(ctx, db, a, k, "x", "## Revised\n"));
+    try db.exec("UPDATE tickets SET session_id = '' WHERE id = ?1", .{id});
+    try editPlan(ctx, db, a, k, "## Mine\n", "## Revised\n");
+    try std.testing.expectEqualStrings("## Mine\n", (try getTicket(db, a, k)).plan_md);
+}
+
 /// Save how far testing got (left out of `updated`: it changes as you type).
 /// Claude's custom close (see Ticket.custom_close); "" clears it.
 pub fn setCustomClose(ctx: Ctx, db: Db, id: i64, text: []const u8) Error!void {

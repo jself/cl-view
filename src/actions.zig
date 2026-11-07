@@ -875,11 +875,11 @@ pub fn gutterSubmitted(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []cons
 /// Send the ticket's automated review findings to its session ("Send
 /// findings to Claude", `cl ticket autoreview <key> --send`): pasted in like
 /// a gutter review and kept as a comment, which starts another round.
-/// error.NoFindings unless a finished review has some.
+/// error.NoFindings unless a finished review has some (or your edit).
 pub fn autoreviewSend(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8) !CommentResult {
     const t = try board.getTicket(db, a, key);
     var r = autoreview.load(a, t) orelse return error.NoFindings;
-    if (!std.mem.eql(u8, r.status, "done") or r.findings.len == 0) return error.NoFindings;
+    if (!autoreview.usable(r)) return error.NoFindings;
     if (!autoreview.current(r, t)) return error.OldFindings;
     const s = liveSession(ctx, t) orelse return error.NoSession;
     const msg = try autoreview.message(a, r);

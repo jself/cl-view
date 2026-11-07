@@ -326,6 +326,8 @@
   .comment .body { white-space: pre-wrap; overflow-wrap: anywhere; }
   .comment.claude { background: #1b1f27; }
   .plan { overflow-wrap: anywhere; line-height: 1.5; }
+  /* Editing the plan or the automated review's message: its text as written. */
+  textarea.mdedit { font-family: var(--mono, monospace); font-size: calc(13 * var(--u)); line-height: 1.5; min-height: calc(220 * var(--u)); }
   /* The Review tab's automated review: one row per finding, its severity first. */
   .ar { display: flex; flex-direction: column; gap: calc(8 * var(--u)); padding: calc(10 * var(--u)) calc(12 * var(--u)); border: 1px solid var(--line); border-radius: calc(10 * var(--u)); }
   .ar .hd { display: flex; flex-wrap: wrap; align-items: baseline; gap: calc(8 * var(--u)); }
@@ -520,7 +522,7 @@ const store = (k, v) => { try { if (v === undefined) return localStorage.getItem
 const state = {
   data: null, view: store("cl-view") || "board", filter: "all", project: "", subs: store("cl-subs") === "1", done: store("cl-done") === "1", parked: store("cl-parked") !== "0",
   search: "", needsOpen: store("cl-needs") !== "0", needsHidden: store("cl-needs-hidden") === "1", open: null, detail: null, tab: null, picks: {}, other: {}, checks: {},
-  sending: false, hiddenProjects: store("cl-hidden-projects") === "1",
+  sending: false, editing: null, edit: {}, hiddenProjects: store("cl-hidden-projects") === "1",
 };
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -1068,7 +1070,7 @@ async function removeProject(name) {
 // The terminal page shows the ticket's title above the session.
 function shellHref(t) { return `/?attach=${encodeURIComponent(t.tmux)}&ticket=${encodeURIComponent(t.key)}`; }
 async function openTicket(key, tab) {
-  state.open = key; state.tab = tab || null; state.tailPinned = true; tail.text = null; state.picks = {}; state.other = {}; state.checks = {};
+  state.open = key; state.tab = tab || null; state.editing = null; state.edit = {}; state.tailPinned = true; tail.text = null; state.picks = {}; state.other = {}; state.checks = {};
   document.getElementById("ticketBody").innerHTML = `<p class="muted">Loading ${esc(key)}…</p>`;
   const dlg = document.getElementById("ticketDlg"); if (!dlg.open) dlg.showModal();
   await loadDetail(key);
@@ -1192,6 +1194,15 @@ function renderDetail() {
   followRuns();
   drawTail();
 }
+// The Plan tab's and the automated review's Edit: a box of their text, until Save or Cancel.
+// state.edit[what] keeps the text it started from (base, sent with Save so the server
+// refuses it if that changed meanwhile) and what you typed (draft), so a redraw or
+// another tab and back doesn't lose it.
+const EDIT_BOXES = { planEdit: "plan", reviewEdit: "review" };
+const startEdit = (what, base) => { state.editing = what; state.edit[what] = { base, draft: base }; };
+const editDraft = (what, base) => state.edit[what]?.draft ?? base;
+document.addEventListener("input", (e) => { const what = EDIT_BOXES[e.target.id]; if (what && state.edit[what]) state.edit[what].draft = e.target.value; });
+const editButtons = (what) => `<button type="button" class="btn primary" data-edit-save="${what}" title="Ctrl+Enter">Save</button><button type="button" class="btn" data-edit-cancel="${what}">Cancel</button>`;
 // A test plan step's run: output follows new lines, like a terminal: it
 // stays scrolled to the bottom as the command writes and when it exits.
 // Scrolling up stops that (the redraw then keeps your place); scrolling back
@@ -1383,28 +1394,47 @@ function autoreviewHtml(d) {
   const live = sessionLive(d); const n = r.findings.length;
   // From before Claude's last changes: their lines may point elsewhere now, so only Run again.
   const old = r.round && r.round < t.round;
+  // Edit: the message Send findings pastes in, as one text to change; what you save is sent instead.
+  if (state.editing === "review" && !old) return `<div class="ar">${head("editing what's sent to Claude")}
+    ${(state.edit.review?.base ?? d.autoreview_message ?? "").trim() !== (d.autoreview_message || "").trim() ? `<p class="pill f-conflict" style="margin:0;align-self:flex-start">The review changed since you started editing: Save is refused. Copy what you need, then Cancel to see the new one.</p>` : ""}
+    <textarea id="reviewEdit" class="mdedit" rows="14" aria-label="What's sent to Claude">${esc(editDraft("review", d.autoreview_message || ""))}</textarea>
+    <p class="muted" style="margin:0">Send findings to Claude pastes this into its session (and Open in gutter puts it in the overall note).${r.edited ? " Emptied, it goes back to the findings as they came." : ""}</p>
+    <div class="actions">${editButtons("review")}${r.edited ? `<button type="button" class="btn" data-edit-revert="review" title="Drop your edit: the findings are sent as the review wrote them">Back to the findings</button>` : ""}</div></div>`;
+  const editBtn = old ? "" : `<button type="button" class="btn" data-edit="review" title="Change what's sent to Claude: drop findings, reword them, add your own">${r.edited ? "Edit again" : "Edit"}</button>`;
   const items = r.findings.map((f) => { const at = f.path ? f.path + (f.line ? ":" + f.line + (f.end_line > f.line ? "-" + f.end_line : "") : "") : "";
     return `<li><div><span class="sev ${esc(f.severity)}">${esc(f.severity)}</span><strong>${esc(f.title)}</strong>${at ? ` <span class="at">${esc(at)}</span>` : ""}</div>${f.body ? `<div class="plan">${mdHtml(f.body)}</div>` : ""}</li>`; }).join("");
   const sendTitle = live ? "Paste them into its session (like Send back): Claude checks each one, fixes what's real and says which it disagrees with" : "Its session isn't running: start it again to send them";
   const gutterBtn = d.gutter && live && !d.gutter_port ? `<button type="button" class="btn" data-act="autoreview-gutter" title="Open gutter with the findings as your draft review: delete or edit them, add your own, then Submit">Open in gutter with findings</button>` : "";
   return `<div class="ar">${head(`${n ? `${n} finding${n > 1 ? "s" : ""}` : "no findings"} · ${ago(r.finished)}${meta ? " · " + meta : ""}${r.sent ? " · sent to Claude" : ""}`)}
-    ${r.summary ? `<div class="plan">${mdHtml(r.summary)}</div>` : ""}
-    ${n ? `<ol>${items}</ol>` : ""}
+    ${r.edited ? `<div class="muted">What's sent, as you edited it:</div><div class="comment"><div class="body">${esc(r.edited)}</div></div>`
+      : `${r.summary ? `<div class="plan">${mdHtml(r.summary)}</div>` : ""}
+    ${n ? `<ol>${items}</ol>` : ""}`}
     ${old && n ? `<p class="muted" style="margin:0">Claude has changed the code since: run it again to review what's there now.</p>` : ""}
-    <div class="actions">${n && !old ? `<button type="button" class="btn${r.sent ? "" : " primary"}" data-act="autoreview-send" ${live ? "" : "disabled"} title="${esc(sendTitle)}">${r.sent ? "Send findings again" : "Send findings to Claude"}</button>${gutterBtn}` : ""}${runBtn("Run again", old)}</div></div>`;
+    <div class="actions">${(n || r.edited) && !old ? `<button type="button" class="btn${r.sent ? "" : " primary"}" data-act="autoreview-send" ${live ? "" : "disabled"} title="${esc(sendTitle)}">${r.sent ? "Send findings again" : "Send findings to Claude"}</button>${gutterBtn}` : ""}${editBtn}${runBtn("Run again", old)}</div></div>`;
 }
 // The plan Claude handed in, to read before approving it or sending it back.
+// Edit turns it into its markdown to change: what you save is what the session that builds it is told.
 function planTab(d) {
   const t = d.ticket; const ready = planReady(t);
   const md = (t.plan_md || "").trim();
+  // Only while a fresh session will build it (board.planEditable): one that resumes its
+  // conversation is only told it's back on, never the plan.
+  const editable = t.stage === "planning" || (["backlog", "queued"].includes(t.stage) && !t.session_id);
+  const edit = editable ? `<button type="button" class="btn" data-edit="plan" title="Change the plan's text yourself; the session that builds it gets your version">${md ? "Edit plan" : "Write the plan"}</button>` : "";
+  if (state.editing === "plan" && editable) return `<div style="display:flex;flex-direction:column;gap:calc(10 * var(--u))">
+    ${(state.edit.plan?.base ?? md).trim() !== md ? `<p class="pill f-conflict" style="margin:0;align-self:flex-start">The plan changed since you started editing: Save is refused. Copy what you need, then Cancel to see the new one.</p>` : ""}
+    <textarea id="planEdit" class="mdedit" rows="16" aria-label="The plan (markdown)">${esc(editDraft("plan", md))}</textarea>
+    <p class="muted" style="margin:0">Markdown. The session that builds it gets the plan as you save it.${sessionLive(d) && t.stage === "planning" ? " Claude isn't told you changed it, and a revised plan it hands in replaces yours." : ""}</p>
+    <div class="actions">${editButtons("plan")}</div></div>`;
   return `<div style="display:flex;flex-direction:column;gap:calc(10 * var(--u))">
     ${md ? `<div class="plan">${mdHtml(md)}</div>` : `<p class="muted" style="margin:0">Claude hasn't handed in the plan's text; its summary is under Comments.</p>`}
     ${ready ? `<p class="muted" style="margin:0">Approving moves it to Queued: a new session builds it from this plan.</p>
-    <div class="actions"><button type="button" class="btn primary" data-act="approve">Approve plan</button></div>
+    <div class="actions"><button type="button" class="btn primary" data-act="approve">Approve plan</button>${edit}</div>
     <label class="muted" style="display:flex;flex-direction:column;gap:calc(5 * var(--u));font-size:calc(12.5 * var(--u))">Or ask about it or say what to change (when Claude hands in a revised plan, it shows here)
       <textarea id="backText" rows="3"></textarea></label>
     <div class="actions"><button type="button" class="btn" id="sendBack">Send to Claude</button></div>`
-    : t.stage === "planning" ? `<p class="muted" style="margin:0">Claude hasn't handed in a plan yet.</p>` : ""}</div>`;
+    : t.stage === "planning" ? `<p class="muted" style="margin:0">Claude hasn't handed in a plan yet.</p>`
+    : edit ? `<div class="actions">${edit}</div>` : ""}</div>`;
 }
 // Enough markdown for a plan: headings, lists, code blocks, inline code,
 // bold and links. Everything is escaped first.
@@ -1677,6 +1707,20 @@ async function submitNew(form) {
     document.getElementById("newDlg").close(); toast(`${r.key} created`); await refresh();
   } catch (e) { toast(e.message, true); }
 }
+// Save the plan or the review's message you edited (revert: drop your edit of the message).
+async function saveEdit(key, what, revert) {
+  const box = document.getElementById(what === "plan" ? "planEdit" : "reviewEdit");
+  const text = revert ? "" : box?.value ?? "";
+  // Back to the findings starts from the message as it is now, edit box open or not.
+  const base = revert ? state.detail?.autoreview_message || "" : state.edit[what]?.base ?? "";
+  if (what === "plan" && !text.trim() && (state.detail?.ticket.plan_md || "").trim() && !confirm("Save an empty plan? The session that builds it gets no plan.")) return;
+  try { await act(key, what === "plan" ? "plan" : "autoreview-edit", { text, base }, what === "plan" ? "Saved the plan" : revert ? "Back to the findings as they came" : "Saved; Send findings to Claude sends your version"); } catch { return; }
+  state.editing = null; delete state.edit[what]; renderDetail();
+}
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Enter" || !(e.ctrlKey || e.metaKey) || e.isComposing || !EDIT_BOXES[e.target.id]) return;
+  e.preventDefault(); if (state.open) saveEdit(state.open, EDIT_BOXES[e.target.id], false);
+});
 // Ctrl+Enter (Cmd+Enter on a Mac) creates the ticket from anywhere in the
 // form, the description box included. Not while a create is still going, so
 // a held or doubled key makes one ticket.
@@ -2044,6 +2088,9 @@ async function onClick(e) {
     try { const r = await act(key, "autoreview-gutter"); toast(r.draft === "kept" ? "gutter is open with the draft review you already had (the findings weren't added to it)" : "gutter is open with the findings as your draft"); } catch {}
     return;
   }
+  if (ds.edit) { startEdit(ds.edit, ds.edit === "plan" ? (state.detail?.ticket.plan_md || "").trim() : state.detail?.autoreview_message || ""); renderDetail(); document.getElementById(ds.edit === "plan" ? "planEdit" : "reviewEdit")?.focus(); return; }
+  if (ds.editCancel) { state.editing = null; delete state.edit[ds.editCancel]; renderDetail(); return; }
+  if (ds.editSave || ds.editRevert) return saveEdit(key, ds.editSave || ds.editRevert, !!ds.editRevert);
   if (ds.act === "park") { if (state.detail) openPark(state.detail); return; }
   if (ds.act === "unpark" || ds.act === "unpark-only") {
     try { const r = await act(key, "unpark", { no_resume: ds.act === "unpark-only" }); toast(unparkMsg(key, r.resumed)); } catch {}

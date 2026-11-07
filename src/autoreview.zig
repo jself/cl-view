@@ -79,6 +79,9 @@ pub const Review = struct {
     @"error": []const u8 = "",
     /// When the findings were sent to the ticket's session, 0 if not.
     sent: i64 = 0,
+    /// What you made of `message` on the board (its Edit), sent in its
+    /// place; "" for the findings as they came. A new review drops it.
+    edited: []const u8 = "",
 };
 
 pub const Error = error{
@@ -830,11 +833,16 @@ fn where(a: std.mem.Allocator, f: Finding) ![]const u8 {
 /// what you asked for.
 pub const message_lead = "An automated review (a separate Claude that read your changes)";
 
-/// What the ticket's session is sent ("Send findings to Claude").
+/// `message`'s first line: what Claude is to do with the findings.
+pub const message_intro = message_lead ++ " found the problems below. Check each one against the code: fix what's real, say which you disagree with and why, then finish the same way as before.";
+
+/// What the ticket's session is sent ("Send findings to Claude"): your
+/// edit of it when you made one (`edit`).
 pub fn message(a: std.mem.Allocator, r: Review) ![]const u8 {
+    if (r.edited.len > 0) return r.edited;
     var aw: std.Io.Writer.Allocating = .init(a);
     const w = &aw.writer;
-    try w.print("{s} found the problems below. Check each one against the code: fix what's real, say which you disagree with and why, then finish the same way as before.\n", .{message_lead});
+    try w.print("{s}\n", .{message_intro});
     if (r.summary.len > 0) try w.print("\nIts verdict: {s}\n", .{r.summary});
     for (r.findings, 1..) |f, i| {
         const at = try where(a, f);
@@ -858,6 +866,64 @@ test message {
     try std.testing.expect(std.mem.indexOf(u8, text, "Its verdict: Two problems.") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "1. [high] Crash (src/a.zig:3-5)\n   It crashes.\n   Fix: check null.\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "2. [low] No tests\n   Add one.\n") != null);
+    try std.testing.expectEqualStrings("Only fix the crash.", try message(a, .{ .status = "done", .findings = &fs, .edited = "Only fix the crash." }));
+}
+
+/// Whether `r` has something to send or open: findings, or your edit.
+pub fn usable(r: Review) bool {
+    return std.mem.eql(u8, r.status, "done") and (r.findings.len > 0 or r.edited.len > 0);
+}
+
+/// Keep your edit of the message the findings are sent as ("" goes back to
+/// the findings as they came). Only a finished review of the current round.
+/// `base` is the message the edit started from: error.EditConflict when it
+/// is something else now (the review ran again, or it was edited
+/// elsewhere), so your edit isn't put on findings you haven't seen.
+pub fn edit(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, text: []const u8, base: []const u8) !void {
+    const t = try board.getTicket(db, a, key);
+    var r = load(a, t) orelse return error.NoFindings;
+    if (!std.mem.eql(u8, r.status, "done")) return error.NoFindings;
+    if (!current(r, t)) return error.OldFindings;
+    if (!std.mem.eql(u8, std.mem.trim(u8, base, " \t\r\n"), std.mem.trim(u8, try message(a, r), " \t\r\n"))) return error.EditConflict;
+    const trimmed = std.mem.trim(u8, text, " \t\r\n");
+    r.edited = "";
+    const original = std.mem.trim(u8, try message(a, r), " \t\r\n");
+    // Emptied, or saved as the findings read: nothing of yours to keep.
+    if (trimmed.len > 0 and !std.mem.eql(u8, trimmed, original)) r.edited = trimmed;
+    // Not if it changed meanwhile (a new review started, or it was sent).
+    if (!try board.setAutoreviewIf(db, t.id, try std.fmt.allocPrint(a, "{f}", .{std.json.fmt(r, .{})}), t.autoreview)) return error.EditConflict;
+    try board.logEvent(ctx, db, t.id, if (r.edited.len > 0) "autoreview edited" else "autoreview edit dropped", "");
+}
+
+test edit {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = a, .env = undefined, .home = "/tmp" };
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "qa", .dir = "/x" });
+    const k = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "T", .stage = .review });
+    const id = (try board.getTicket(db, a, k)).id;
+    try board.setAutoreview(db, id, "{\"status\":\"running\",\"round\":1}");
+    try std.testing.expectError(error.NoFindings, edit(ctx, db, a, k, "x", ""));
+    try board.setAutoreview(db, id, "{\"status\":\"done\",\"round\":1,\"findings\":[]}");
+    const first = try message(a, load(a, try board.getTicket(db, a, k)).?);
+    // Started from another review's message (it ran again meanwhile): refused.
+    try std.testing.expectError(error.EditConflict, edit(ctx, db, a, k, "x", "An older review's findings"));
+    try edit(ctx, db, a, k, "  Please also add a test.\n", first);
+    const r = load(a, try board.getTicket(db, a, k)).?;
+    try std.testing.expectEqualStrings("Please also add a test.", r.edited);
+    try std.testing.expect(usable(r));
+    try std.testing.expectEqualStrings("Please also add a test.", try message(a, r));
+    // Emptied, or saved as the findings already read: back to them.
+    try edit(ctx, db, a, k, "", "Please also add a test.");
+    try std.testing.expectEqualStrings("", load(a, try board.getTicket(db, a, k)).?.edited);
+    try std.testing.expect(!usable(load(a, try board.getTicket(db, a, k)).?));
+    // From an earlier round: no.
+    try db.exec("UPDATE tickets SET round = 2 WHERE id = ?1", .{id});
+    try std.testing.expectError(error.OldFindings, edit(ctx, db, a, k, "y", first));
 }
 
 /// gutter's -severity names (shown only when gutter runs with -severity).
@@ -874,6 +940,12 @@ pub fn gutterDraft(a: std.mem.Allocator, rev: []const u8, r: Review) ![]const u8
     const Comment = struct { path: []const u8, side: []const u8 = "new", line: i64, end_line: i64 = 0, snippet: []const u8 = "", body: []const u8, severity: []const u8 };
     var comments: std.ArrayList(Comment) = .empty;
     var general: std.Io.Writer.Allocating = .init(a);
+    // Your edit is one text: it goes in whole as the overall note, without
+    // the intro telling Claude what to do (gutter wraps the note as your review).
+    if (r.edited.len > 0) {
+        const note = if (std.mem.startsWith(u8, r.edited, message_intro)) std.mem.trimStart(u8, r.edited[message_intro.len..], " \t\r\n") else r.edited;
+        return std.fmt.allocPrint(a, "{f}", .{std.json.fmt(.{ .key = rev, .general = note, .comments = comments.items }, .{ .whitespace = .indent_2 })});
+    }
     try general.writer.print("Automated review: {s}", .{if (r.summary.len > 0) r.summary else "(no summary)"});
     for (r.findings) |f| {
         const body = try std.fmt.allocPrint(a, "**[{s}] {s}**\n\n{s}", .{ f.severity, f.title, f.body });
@@ -909,6 +981,13 @@ test gutterDraft {
     try std.testing.expectEqualStrings("**[high] Crash**\n\nIt crashes.", d.comments[0].body);
     try std.testing.expect(std.mem.startsWith(u8, d.general, "Automated review: Two problems."));
     try std.testing.expect(std.mem.indexOf(u8, d.general, "**[low] No tests**\n\nAdd one.") != null);
+    // Your edit goes in whole as the overall note, with no inline comments,
+    // and without the intro addressed to Claude.
+    for ([_][]const u8{ "Only fix the crash.", message_intro ++ "\n\nOnly fix the crash." }) |edited| {
+        const e = try std.json.parseFromSliceLeaky(D, a, try gutterDraft(a, "abc::", .{ .status = "done", .findings = &fs, .edited = edited }), .{ .ignore_unknown_fields = true });
+        try std.testing.expectEqualStrings("Only fix the crash.", e.general);
+        try std.testing.expectEqual(@as(usize, 0), e.comments.len);
+    }
 }
 
 pub const DraftResult = enum {
@@ -924,7 +1003,7 @@ pub const DraftResult = enum {
 /// reads a draft only as it starts.
 pub fn openInGutter(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: board.Ticket) !struct { port: u16, draft: DraftResult } {
     const r = load(a, t) orelse return error.NoFindings;
-    if (!std.mem.eql(u8, r.status, "done")) return error.NoFindings;
+    if (!usable(r)) return error.NoFindings;
     if (!current(r, t)) return error.OldFindings;
     if (try review.gutterPort(ctx, a, t.key) != null) return error.GutterOpen;
     const dir = try review.ticketDir(db, a, t);

@@ -1304,7 +1304,13 @@ fn writeAutoreview(w: *std.Io.Writer, a: std.mem.Allocator, t: board.Ticket, r: 
         var lines = std.mem.splitScalar(u8, f.body, '\n');
         while (lines.next()) |l| try w.print("     {s}\n", .{l});
     }
-    if (r.sent > 0) try w.print("  sent to the session {s}\n", .{try stamp(a, r.sent)}) else if (r.findings.len > 0) try w.print("  not sent to the session (cl ticket autoreview {s} --send)\n", .{t.key});
+    // Edited on the board: that is what --send sends.
+    if (r.edited.len > 0) {
+        try w.writeAll("  edited on the board; --send sends this instead of the findings:\n");
+        var lines = std.mem.splitScalar(u8, r.edited, '\n');
+        while (lines.next()) |l| try w.print("     {s}\n", .{l});
+    }
+    if (r.sent > 0) try w.print("  sent to the session {s}\n", .{try stamp(a, r.sent)}) else if (autoreview.usable(r)) try w.print("  not sent to the session (cl ticket autoreview {s} --send)\n", .{t.key});
 }
 
 /// What `t` waits on and what waits on it, a line each.
