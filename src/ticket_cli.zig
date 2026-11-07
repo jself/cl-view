@@ -22,12 +22,18 @@ pub const ticket_usage =
     \\
     \\  new <project> <title> [-m <body>] [--worktree | --queue] [--target <session>]
     \\      [--plan [--skill <name>]] [--stage <stage>] [--profile <name>] [--parent <key>]
-    \\      [--after <key,...>] [--parallel]
+    \\      [--after <key,...>] [--parallel] [--umbrella]
     \\                              create a ticket; prints its key. With --parent the
     \\                              project may be left out (it's the parent's). Sub-tickets
     \\                              run in order: each waits for the one ranked before it to
-    \\                              be done (--parallel: it doesn't). --after: it waits until
-    \\                              those tickets (any project) are done
+    \\                              be done (--parallel: it doesn't), and for their parent to
+    \\                              be done unless it's an umbrella. --after: it waits until
+    \\                              those tickets (any project) are done.
+    \\                              --umbrella: only a container for sub-tickets; it never
+    \\                              runs, and queueing it queues them. Queued, it moves to
+    \\                              running when a sub-ticket starts and to done when they
+    \\                              all are (in backlog it stays put). Any other parent is
+    \\                              flagged ready-to-close
     \\  sub <title> [-m <body>] [options of new]
     \\                              in a ticket's session: a sub-ticket of $CL_TICKET
     \\  list [--stage <s>] [--project <p>] [--flag <f>] [--needs] [--search <q>] [--open]
@@ -57,10 +63,11 @@ pub const ticket_usage =
     \\  hide <key> / unhide <key>   keep it out of the inbox (Needs You) without clearing its
     \\                              flags, or bring it back; a new flag brings it back too
     \\  show <key>                  details, flags, what it waits on and blocks, sub-tickets
-    \\                              (in order), comments and activity
+    \\                              (in order, how many done), comments and activity
     \\  edit <key> [--title <t>] [-m <body>] [--project <p>] [--worktree | --queue]
     \\      [--target <session>] [--plan | --no-plan] [--skill <name>] [--profile <name>]
     \\      [--after <key,...>] [--not-after <key,...>] [--parallel | --in-order]
+    \\      [--umbrella | --no-umbrella]
     \\                              --after: the dispatcher doesn't start it until those
     \\                              tickets are done (refused if they wait on it already);
     \\                              --not-after drops the link; --parallel / --in-order: a
@@ -481,7 +488,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
     const pos = args.pos.items;
 
     if (std.mem.eql(u8, cmd, "new") or std.mem.eql(u8, cmd, "sub")) {
-        args.only(&.{ "--body", "--worktree", "--queue", "--target", "--plan", "--skill", "--stage", "--profile", "--parent", "--json", "--after", "--parallel" }, ticket_usage);
+        args.only(&.{ "--body", "--worktree", "--queue", "--target", "--plan", "--skill", "--stage", "--profile", "--parent", "--json", "--after", "--parallel", "--umbrella" }, ticket_usage);
         const is_sub = std.mem.eql(u8, cmd, "sub");
         const parent = args.get("--parent") orelse if (is_sub) (env_key orelse fail("cl ticket sub runs in a ticket's session ($CL_TICKET); elsewhere use new --parent <key>", .{})) else null;
         // With a parent, the project is optional: new --parent QA-2 "title".
@@ -502,6 +509,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
             .skill = args.get("--skill"),
             .stage = if (args.get("--stage")) |s| parseStage(s) else null,
             .profile = args.get("--profile"),
+            .umbrella = args.has("--umbrella"),
         }) catch |e| boardFail(db, e, if (parent != null) "parent ticket or project" else "project");
         try applyDeps(ctx, db, a, key, args);
         if (args.has("--json")) return out(try std.fmt.allocPrint(a, "{f}\n", .{std.json.fmt(.{ .key = key }, .{})}));
@@ -570,7 +578,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         return out(try showText(ctx, a, t, blocks, subs, cs, evs));
     }
     if (std.mem.eql(u8, cmd, "edit")) {
-        args.only(&.{ "--title", "--body", "--project", "--worktree", "--queue", "--target", "--plan", "--no-plan", "--skill", "--profile", "--after", "--not-after", "--parallel", "--in-order" }, ticket_usage);
+        args.only(&.{ "--title", "--body", "--project", "--worktree", "--queue", "--target", "--plan", "--no-plan", "--skill", "--profile", "--after", "--not-after", "--parallel", "--in-order", "--umbrella", "--no-umbrella" }, ticket_usage);
         const key = keyArg(pos, 0, env_key, "cl ticket edit <key> [options]");
         try checkProfile(cfg, args.get("--profile"));
         board.updateTicket(ctx, db, a, key, .{
@@ -581,6 +589,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
             .target = args.get("--target"),
             .profile = args.get("--profile"),
             .skill = args.get("--skill"),
+            .umbrella = if (args.has("--umbrella")) true else if (args.has("--no-umbrella")) false else null,
         }) catch |e| boardFail(db, e, "ticket or project");
         try applyDeps(ctx, db, a, key, args);
         if (parseMode(args)) |m| return relocate(ctx, cfg, db, a, key, m);
@@ -716,12 +725,11 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         if (pos.len != 1) fail("usage: cl ticket start <key> [--now]", .{});
         const t = board.getTicket(db, a, pos[0]) catch |e| boardFail(db, e, "ticket");
         // By hand it starts anyway, as in a paused project; say what it skips.
-        if (board.hold(t)) |h| std.Io.File.stderr().writeStreamingAll(ctx.io, switch (h) {
-            .blocked => try std.fmt.allocPrint(a, "cl: {s} waits on {s}, not done yet; starting it anyway\n", .{ t.key, (try board.waitingOn(a, t))[0].key }),
-            .subtickets => try std.fmt.allocPrint(a, "cl: {s} has sub-tickets and no work of its own; starting it anyway\n", .{t.key}),
-        }) catch {};
+        // (An umbrella doesn't start at all: error.Umbrella below.)
+        if (board.hold(t) == .blocked) std.Io.File.stderr().writeStreamingAll(ctx.io, try std.fmt.allocPrint(a, "cl: {s} waits on {s}, not done yet; starting it anyway\n", .{ t.key, (try board.waitingOn(a, t))[0].key })) catch {};
         dispatch.start(ctx, cfg, db, a, t, args.has("--now")) catch |e| switch (e) {
             error.AlreadyStarted => fail("{s} already has a session: {s}", .{ t.key, t.tmux }),
+            error.Umbrella => fail("{s} is an umbrella: its sub-tickets run, not it (`cl ticket edit {s} --no-umbrella` makes it a ticket of its own)", .{ t.key, t.key }),
             error.TargetBusy => fail("{s}'s session is busy or has another ticket in progress; it waits in Queued (--now types it in anyway)", .{t.key}),
             error.WorktreeFailed => fail("cannot make the worktree: {s}", .{worktree.lastError()}),
             error.SessionFailed => fail("cannot start the session: {s}", .{dispatch.failureReason(e)}),
@@ -1132,6 +1140,8 @@ fn showText(ctx: Ctx, a: std.mem.Allocator, t: board.Ticket, blocks: []const []c
         if (t.mode == .queue and t.target.len > 0) try std.fmt.allocPrint(a, " in {s}", .{t.target}) else "",
     });
     if (t.parent.len > 0) try w.print("sub-ticket of: {s}{s}\n", .{ t.parent, if (t.parallel) " (parallel: doesn't wait for the one before it)" else "" });
+    if (t.umbrella) try w.writeAll("umbrella: only a container for its sub-tickets; it never runs\n");
+    if (t.children > 0) try w.print("sub-tickets: {d}/{d} done\n", .{ t.children_done, t.children });
     try writeDeps(w, a, t, blocks);
     if (t.tmux.len > 0) try w.print("session: {s}\n", .{t.tmux});
     if (t.park) |p| {
@@ -1149,7 +1159,7 @@ fn showText(ctx: Ctx, a: std.mem.Allocator, t: board.Ticket, blocks: []const []c
     for (t.flags) |f| try w.print("flag: {s} ({s}, {s}){s}{s}\n", .{ f.kind, f.source, try stamp(a, f.at), if (f.detail.len > 0) ": " else "", f.detail });
     if (t.body.len > 0) try w.print("\n{s}\n", .{t.body});
     if (subs.len > 0) {
-        try w.writeAll(if (t.started) "\nsub-tickets, in order:\n" else "\nsub-tickets, in order (it has no work of its own: it runs as them):\n");
+        try w.writeAll(if (t.umbrella) "\nsub-tickets, in order (it has no work of its own: it runs as them):\n" else "\nsub-tickets, in order (they wait for it to be done):\n");
         for (subs) |c| try w.print("  {s}\t{s}\t{s}\t{s}{s}\n", .{ c.key, @tagName(c.stage), try flagList(a, c.flags), c.title, try waitNote(a, c) });
     }
     if (cs.len > 0) {
@@ -1167,7 +1177,7 @@ fn showText(ctx: Ctx, a: std.mem.Allocator, t: board.Ticket, blocks: []const []c
 fn writeDeps(w: *std.Io.Writer, a: std.mem.Allocator, t: board.Ticket, blocks: []const []const u8) !void {
     if (t.blocked_by.len > 0) {
         try w.writeAll("waits on:");
-        for (t.blocked_by, 0..) |d, i| try w.print("{s} {s} ({s}{s})", .{ if (i > 0) "," else "", d.key, @tagName(d.stage), if (d.order) ", the sub-ticket before it" else "" });
+        for (t.blocked_by, 0..) |d, i| try w.print("{s} {s} ({s}{s})", .{ if (i > 0) "," else "", d.key, @tagName(d.stage), if (d.order) ", the sub-ticket before it" else if (d.parent) ", its parent" else "" });
         try w.writeAll(if (t.stage == .queued and board.hold(t) == .blocked) "; the dispatcher starts it once they're done\n" else "\n");
     }
     if (blocks.len > 0) try w.print("blocks: {s}\n", .{try std.mem.join(a, ", ", blocks)});

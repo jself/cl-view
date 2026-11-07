@@ -21,6 +21,7 @@
     --input: #ffc861; --input-bg: #3a2a0b; --question: #cdb8ff; --question-bg: #2c2440;
     --review: #9cc6ff; --review-bg: #11294a; --testing: #7ee6d6; --testing-bg: #0f3330;
     --other: #d6d7da; --other-bg: #2c2e33; --finishing: #b6e3a0; --finishing-bg: #1b3317; --parked: #c4b5fd; --parked-bg: #2a2342;
+    --umbrella: #e0692e; /* burnt orange, well apart from parked's lilac */
     --conflict: #ffb4b4; --conflict-bg: #3d1a1a;
     /* One color per board column (stage): a stage badge and its column header's dot. */
     --st-backlog: #8b8e94; --st-backlog-bg: #26282c; --st-planning: #cdb8ff; --st-planning-bg: #2c2440; --st-queued: #93c5fd; --st-queued-bg: #172437;
@@ -165,7 +166,7 @@
   /* Session status colors, the same hues as `cl list`: --sc for the label and dot, --sbg tints a card's title band, stronger on the left and faint on the right. */
   .s-busy { --sc: #facc15; --sbg: var(--sc); } .s-waiting { --sc: #e879f9; --sbg: var(--sc); } .s-blocked { --sc: #f87171; --sbg: var(--sc); }
   .s-idle { --sc: #4ade80; --sbg: var(--sc); } .s-shell { --sc: #22d3ee; --sbg: var(--sc); } .s-starting { --sc: #60a5fa; --sbg: var(--sc); }
-  .s-gone, .s-killed { --sc: #8b8e94; --sbg: var(--sc); } .s-parked { --sc: #c4b5fd; --sbg: var(--sc); } .s-paused { --sc: #fb923c; } .s-waits, .s-subs { --sc: #7dd3fc; } .s-unknown, .s-none { --sc: #a0a3a8; }
+  .s-umbrella { --sc: var(--umbrella); --sbg: var(--sc); } .s-gone, .s-killed { --sc: #8b8e94; --sbg: var(--sc); } .s-parked { --sc: #c4b5fd; --sbg: var(--sc); } .s-paused { --sc: #fb923c; } .s-waits { --sc: #7dd3fc; } .s-unknown, .s-none { --sc: #a0a3a8; }
   .status { display: inline-flex; align-items: center; gap: calc(7 * var(--u)); font-size: calc(12.5 * var(--u)); color: var(--sc, #d6d7da); }
   .status.s-none { color: #d6d7da; }
   .dot { width: calc(8 * var(--u)); height: calc(8 * var(--u)); border-radius: calc(4 * var(--u)); flex: none; display: inline-block; background: var(--sc, #5d6168); }
@@ -477,8 +478,8 @@
 "use strict";
 const STAGES = ["backlog", "planning", "queued", "running", "review", "testing", "done"];
 const STAGE_NAME = { backlog: "Backlog", planning: "Planning", queued: "Queued", running: "Running", review: "Review", testing: "Testing", done: "Done" };
-const FLAG_NAME = { input: "Needs input", question: "Question", review: "Ready for review", testing: "Needs testing", ended: "Session ended", "start-failed": "Didn't start", conflict: "Conflicts", "after-merge": "After-merge failed", "merge-failed": "Didn't land", unmerged: "Not merged", unparked: "Woke from park", "park-expired": "Park expired", idle: "Idle" };
-const STATUS_NAME = { waits: "Waits", subs: "Runs as its sub-tickets", paused: "Paused", busy: "Working", waiting: "Waiting on you", blocked: "Waiting on you", idle: "Idle", shell: "Idle · background task", starting: "Starting", gone: "Session ended", nosession: "No session", killed: "Killed · restart it", parked: "Parked", unknown: "Unknown" };
+const FLAG_NAME = { input: "Needs input", question: "Question", review: "Ready for review", testing: "Needs testing", ended: "Session ended", "start-failed": "Didn't start", conflict: "Conflicts", "after-merge": "After-merge failed", "merge-failed": "Didn't land", unmerged: "Not merged", unparked: "Woke from park", "park-expired": "Park expired", idle: "Idle", "ready-to-close": "Ready to close" };
+const STATUS_NAME = { waits: "Waits", paused: "Paused", busy: "Working", waiting: "Waiting on you", blocked: "Waiting on you", idle: "Idle", shell: "Idle · background task", starting: "Starting", gone: "Session ended", nosession: "No session", killed: "Killed · restart it", parked: "Parked", unknown: "Unknown" };
 
 const store = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch { return null; } };
 const state = {
@@ -595,6 +596,7 @@ function askLine(t, f, quick) {
   if (f.kind === "after-merge") return "After-merge command failed: " + f.detail.split("\n")[0];
   if (f.kind === "merge-failed") return "Merge didn't land: " + f.detail.split("\n")[0];
   if (f.kind === "unmerged") return "Done but not merged: " + f.detail.split("\n")[0];
+  if (f.kind === "ready-to-close") return `All ${t.children_done} sub-tickets done: close it?`;
   if (f.kind === "start-failed") return `${f.detail || "Didn't start"} · ` + (retries(t) ? "the dispatcher will retry" : "start it again");
   return askText(t, f);
 }
@@ -609,7 +611,7 @@ const DISMISS_TIP = "Remove this alert for good. The ticket itself doesn't chang
 // A failed start of a queued (or planning) ticket is retried by the dispatcher.
 const retries = (t) => (t.stage === "queued" || t.stage === "planning") && !t.tmux && !t.killed && !t.park;
 const flagLabel = (f) => f.kind === "review" && f.detail === "plan" ? "Plan ready" : (FLAG_NAME[f.kind] || f.kind);
-const flagClass = (k) => ["after-merge", "park-expired", "merge-failed", "unmerged"].includes(k) ? "f-conflict" : k === "unparked" ? "f-review" : ["input", "question", "review", "testing", "conflict"].includes(k) ? "f-" + k : "";
+const flagClass = (k) => ["after-merge", "park-expired", "merge-failed", "unmerged"].includes(k) ? "f-conflict" : k === "unparked" || k === "ready-to-close" ? "f-review" : ["input", "question", "review", "testing", "conflict"].includes(k) ? "f-" + k : "";
 // Finishing: Claude is merging the branch or opening a PR before it goes to Done.
 const finishPill = (t) => t.finishing ? `<span class="pill f-finishing" title="${t.finishing === "pr" ? "Claude is opening a PR" : t.finishing === "after-merge" ? "It's merged; Claude is doing the after-merge steps (rebuilding, restarting)" : t.finishing === "tell" ? "Claude is doing what you told it" : "Claude is merging its branch"}; it goes to Done after">Finishing</span>` : "";
 // Claude asked to close it its own way (cl ticket custom-close).
@@ -628,18 +630,21 @@ const pills = (t) => cardFlags(t).length || t.finishing || t.custom_close || t.p
 // A killed one waits for you to restart it.
 // A queued one in a paused project waits for it to resume, not for a slot.
 // One in Running, Review or Testing that never had a session has "No session" (it was moved there by hand).
-// One that waits on other tickets (board.zig hold: a link, or the sub-ticket
-// before it) waits for them to be Done, and a parent that never started runs
-// as its sub-tickets: neither is stuck, and the dispatcher won't start them.
+// One that waits on other tickets (board.zig hold: a link, its parent, or the
+// sub-ticket before it) waits for them to be Done: it isn't stuck, and the
+// dispatcher won't start it. An umbrella never has a session of its own: its
+// status is its sub-tickets'.
 const waitingOn = (t) => (t.blocked_by || []).filter((d) => d.stage !== "done");
-const holdOf = (t) => t.children && !t.started ? "subs" : waitingOn(t).length ? "waits" : "";
-const statusOf = (row) => row.status || (row.ticket.tmux.startsWith("(") ? "starting" : row.ticket.park ? "parked" : row.ticket.killed ? "killed" : row.ticket.tmux && !["backlog", "queued"].includes(row.ticket.stage) ? "gone"
+const holdOf = (t) => waitingOn(t).length ? "waits" : "";
+const statusOf = (row) => row.ticket.umbrella && !row.status ? "umbrella" : row.status || (row.ticket.tmux.startsWith("(") ? "starting" : row.ticket.park ? "parked" : row.ticket.killed ? "killed" : row.ticket.tmux && !["backlog", "queued"].includes(row.ticket.stage) ? "gone"
   : row.ticket.stage === "queued" && projectPaused(row.ticket.project) ? "paused" : ["running", "review", "testing"].includes(row.ticket.stage) ? "nosession" : row.ticket.stage === "queued" && !row.ticket.tmux && holdOf(row.ticket) || "none");
-const waitTitle = (t) => waitingOn(t).map((d) => `${d.key} (${STAGE_NAME[d.stage]}${d.order ? ", the sub-ticket before it" : ""}): ${d.title}`).join("\n");
+const waitTitle = (t) => waitingOn(t).map((d) => `${d.key} (${STAGE_NAME[d.stage]}${d.order ? ", the sub-ticket before it" : d.parent ? ", its parent: it runs first" : ""}): ${d.title}`).join("\n");
 // A Done ticket has no status unless its session is still live: "Not started" or "Session ended" says nothing about finished work.
+const umbrellaLabel = (t) => t.stage === "backlog" || t.stage === "planning" ? "Umbrella"
+  : t.stage === "queued" ? "Umbrella · waiting for a sub-ticket to start" : "Umbrella · sub-tickets under way";
 const statusHtml = (row) => { const s = statusOf(row); const t = row.ticket; if (t.stage === "done" && (!row.status || row.status === "gone")) return "";
-  const label = s === "none" ? (t.stage === "queued" ? "Waiting for a slot" : "Not started") : s === "waits" ? "Waits on " + waitingOn(t).map((d) => d.key).join(", ") : (STATUS_NAME[s] || s);
-  const title = s === "waits" ? ` title="${esc("Starts once these are done:\n" + waitTitle(t))}"` : s === "subs" ? ` title="It has no work of its own: queueing it queued its sub-tickets, which run in order"` : "";
+  const label = s === "umbrella" ? umbrellaLabel(t) : s === "none" ? (t.stage === "queued" ? "Waiting for a slot" : "Not started") : s === "waits" ? "Waits on " + waitingOn(t).map((d) => d.key).join(", ") : (STATUS_NAME[s] || s);
+  const title = s === "waits" ? ` title="${esc("Starts once these are done:\n" + waitTitle(t))}"` : s === "umbrella" ? ` title="It has no work of its own: queueing it queues its sub-tickets, which run in order. It moves to Running when one starts and to Done when they all are"` : "";
   return `<span class="status s-${esc(s)}"${title}><span class="dot"></span>${esc(label)}</span>`; };
 const stageBadge = (stage) => `<span class="badge st-${esc(stage)}">${esc(STAGE_NAME[stage] || stage)}</span>`;
 // A parent's progress from its sub-tickets' stages: "4/6 done · 1 running · 1 review" over a bar with a
@@ -840,6 +845,7 @@ function renderNeeds() {
       : f.kind === "after-merge" ? `<button type="button" class="btn primary" data-open="${esc(t.key)}" data-tab="after-merge">See the log</button>`
       : f.kind === "merge-failed" || f.kind === "unmerged" ? `<button type="button" class="btn primary" data-open="${esc(t.key)}" data-tab="landing">See why</button>`
       : f.kind === "idle" ? `<button type="button" class="btn primary" data-open="${esc(t.key)}" data-tab="session">Open session</button>`
+      : f.kind === "ready-to-close" ? `<button type="button" class="btn primary" data-to-done="${esc(t.key)}" title="Move it to Done (it asks how to finish when it has a branch of its own)">Move to Done</button>`
       : `<button type="button" class="btn primary" data-open="${esc(t.key)}" data-tab="needs">Open</button>`;
     const shell = t.tmux && r.status && r.status !== "gone" ? `<a class="btn" href="${shellHref(t)}">Shell</a>` : "";
     // Hiding keeps the flags (the card still shows them); a new flag brings it back.
@@ -889,7 +895,7 @@ function cardHtml(row, compact) {
     <span class="t">${esc(t.title)}</span></span>
     ${t.parent ? `<span class="sub">sub-ticket of ${esc(t.parent)}${t.parallel ? " · parallel" : ""}</span>` : ""}
     ${compact ? "" : `<span class="meta">${esc(t.project)} · ${esc(where(t))}</span>`}
-    ${t.children ? `<span class="meta">${t.children} sub-ticket${t.children > 1 ? "s" : ""}</span>` : ""}
+    ${t.children ? `<span class="meta" title="${t.children_done} of its ${t.children} sub-ticket${t.children > 1 ? "s are" : " is"} done">${t.children_done}/${t.children} sub-ticket${t.children > 1 ? "s" : ""} done</span>` : ""}
     ${statusHtml(row)}${pills(t)}${t.park ? `<span class="pills"><span class="unpark-ic" data-unpark="${esc(t.key)}" role="button" tabindex="0" title="End the park and resume its session now">Resume</span></span>` : ""}</button>`;
 }
 // Done is a column only when it's toggled on.
@@ -1171,14 +1177,14 @@ function renderDetailInner() {
   const ranBefore = t.killed || t.tmux || t.session_id;
   if (t.park) acts.push(`<button type="button" class="btn primary" data-act="unpark" title="End the park and resume its session now, told you unparked it">Resume now</button>`,
     `<button type="button" class="btn" data-act="unpark-only" title="End the park; its session stays stopped">Cancel park</button>`);
-  else if (!liveSession && t.stage !== "done") acts.push(`<button type="button" class="btn primary" data-act="start"${ranBefore ? ` title="A fresh session for it${t.session_id ? ", resuming its conversation where Claude still has it" : ""}"` : ""}>${ranBefore ? "Restart" : "Start now"}</button>`);
+  else if (!liveSession && t.stage !== "done" && !t.umbrella) acts.push(`<button type="button" class="btn primary" data-act="start"${ranBefore ? ` title="A fresh session for it${t.session_id ? ", resuming its conversation where Claude still has it" : ""}"` : ""}>${ranBefore ? "Restart" : "Start now"}</button>`);
   if (d.gutter && liveSession && (d.guide || t.worktree)) acts.push(`<button type="button" class="btn" data-act="gutter">Open in gutter</button>`);
   if (approve) acts.push(`<button type="button" class="btn" data-act="approve">${approve}</button>`);
   if (liveSession) acts.push(`<button type="button" class="btn danger" data-act="kill" title="End its session; it keeps its stage and can be restarted">Kill</button>`);
-  if (!t.park && t.stage !== "done") acts.push(`<button type="button" class="btn" data-act="park" title="Wait on something outside cl (a PR, a deploy) without a session; a check can wake it">Park</button>`);
+  if (!t.park && t.stage !== "done" && !t.umbrella) acts.push(`<button type="button" class="btn" data-act="park" title="Wait on something outside cl (a PR, a deploy) without a session; a check can wake it">Park</button>`);
   if (t.stage === "backlog") acts.push(`<button type="button" class="btn" data-move="queued">Queue it</button>`);
   // Moves it (with its change and conversation, once under way) to a worktree of its own or back.
-  if (t.stage !== "done") acts.push(t.mode === "queue"
+  if (t.stage !== "done" && !t.umbrella) acts.push(t.mode === "queue"
     ? `<button type="button" class="btn" data-relocate="worktree" title="Give it a worktree of its own; Claude goes on there and the queue session is free">Move to a worktree</button>`
     : `<button type="button" class="btn" data-relocate="queue" title="Go on in the project's main folder, in its session once that is free">Move to the queue</button>`);
   // The status line: a parent without a session of its own shows its sub-tickets' progress instead; one with a session shows both.
@@ -1207,7 +1213,7 @@ function depBox(d) {
   const t = d.ticket; const blocks = d.blocks || [];
   if (t.stage === "done" && !t.blocked_by.length && !blocks.length) return "";
   const chip = (k, extra, title) => `<button type="button" class="pill" data-open="${esc(k)}" title="${esc(title || "")}">${esc(k)}${extra}</button>`;
-  const waits = t.blocked_by.map((dep) => `<span class="dep">${chip(dep.key, dep.stage === "done" ? " ✓" : " · " + STAGE_NAME[dep.stage], dep.title + (dep.order ? " (the sub-ticket before it: rank or --parallel changes that)" : ""))}${dep.order ? ""
+  const waits = t.blocked_by.map((dep) => `<span class="dep">${chip(dep.key, dep.stage === "done" ? " ✓" : " · " + STAGE_NAME[dep.stage], dep.title + (dep.order ? " (the sub-ticket before it: rank or --parallel changes that)" : dep.parent ? " (its parent, which runs first: making it an umbrella changes that)" : ""))}${dep.order || dep.parent ? ""
     : `<button type="button" class="dep-x" data-unblock="${esc(dep.key)}" title="Stop waiting on ${esc(dep.key)}" aria-label="Stop waiting on ${esc(dep.key)}">×</button>`}</span>`).join(" ");
   const linked = new Set([t.key, ...t.blocked_by.map((x) => x.key)]);
   const choices = state.data.tickets.filter((r) => r.ticket.stage !== "done" && !linked.has(r.ticket.key))
@@ -1438,6 +1444,7 @@ function detailsTab(d) {
       <label>Runs as<select name="mode"><option value="queue" ${t.mode === "queue" ? "selected" : ""}>Queue in a session</option><option value="worktree" ${t.mode === "worktree" ? "selected" : ""}>Its own worktree</option></select></label>
       <label>Queue session<select name="target"><option value="">Project default / parent's</option>${sessions.map((s) => `<option value="${esc(s.tmux)}" ${s.tmux === t.target ? "selected" : ""}>${esc(s.name)} (${esc(s.status)})</option>`).join("")}</select></label></div>
     <div class="row2"><label>Plan first<select name="plan"><option value="0">No</option><option value="1" ${t.plan ? "selected" : ""}>Yes</option></select></label>
+      <label title="An umbrella is only a container for sub-tickets: it never runs. Queued, it moves to Running when a sub-ticket starts and to Done when they all are">Kind<select name="umbrella"><option value="0">Ticket</option><option value="1" ${t.umbrella ? "selected" : ""}>Umbrella for sub-tickets</option></select></label>
       <label>Planning skill<input type="text" name="skill" value="${esc(t.skill)}" placeholder="grilling, wayfinder"></label></div>
     <div class="actions"><button type="submit" class="btn primary" value="close">Save and close</button>
       <button type="submit" class="btn">Save</button>
@@ -1548,7 +1555,8 @@ function openNew(parentKey, pick = {}) {
       <div class="row2"><label>Queue session<select name="target"><option value="">Project default / parent's</option>${d.sessions.map((s) => `<option value="${esc(s.tmux)}">${esc(s.name)} (${esc(s.status)})</option>`).join("")}</select></label>
         <label>Planning skill (plan first)<input type="text" name="skill" placeholder="grilling, wayfinder"></label></div>
       <div class="row2"><label>Profile<select name="profile"><option value="">Project's</option>${d.profiles.map((x) => `<option>${esc(x)}</option>`).join("")}</select></label>
-        <label>Sub-ticket of<select name="parent"><option value="">None</option>${d.tickets.filter((r) => r.ticket.stage !== "done").map((r) => `<option value="${esc(r.ticket.key)}" ${r.ticket.key === parentKey ? "selected" : ""}>${esc(r.ticket.key)} ${esc(r.ticket.title)}</option>`).join("")}</select></label></div>
+        <label title="An umbrella is only a container for sub-tickets: it never runs. Queued, it moves to Running when a sub-ticket starts and to Done when they all are">Kind<select name="umbrella"><option value="0">Ticket</option><option value="1">Umbrella for sub-tickets</option></select></label></div>
+      <div class="row2"><label>Sub-ticket of<select name="parent"><option value="">None</option>${d.tickets.filter((r) => r.ticket.stage !== "done").map((r) => `<option value="${esc(r.ticket.key)}" ${r.ticket.key === parentKey ? "selected" : ""}>${esc(r.ticket.key)} ${esc(r.ticket.title)}</option>`).join("")}</select></label></div>
       <div class="actions"><button type="submit" class="btn primary">Create</button></div></form>`;
   const form = document.getElementById("newForm");
   for (const k of NEW_KEEP) {
@@ -1567,7 +1575,7 @@ async function submitNew(form) {
   try {
     if (f.pname) { await api("project", { name: f.pname, dir: f.pdir, mode: f.mode }); f.project = f.pname; }
     const r = await api("ticket", { project: f.project, title: f.title, body: f.body, mode: f.mode, target: f.target || undefined,
-      stage: f.when, plan: f.when === "planning", skill: f.skill || undefined, profile: f.profile || undefined, parent: f.parent || undefined });
+      stage: f.when, plan: f.when === "planning", skill: f.skill || undefined, profile: f.profile || undefined, parent: f.parent || undefined, umbrella: f.umbrella === "1" });
     store("cl-new", JSON.stringify({ project: f.project, ...Object.fromEntries(NEW_KEEP.map((k) => [k, f[k] ?? ""])) }));
     document.getElementById("newDlg").close(); toast(`${r.key} created`); await refresh();
   } catch (e) { toast(e.message, true); }
@@ -1862,6 +1870,7 @@ async function onClick(e) {
   if (el.id === "spinOff" || el.id === "spinCancel") { document.getElementById("subsDlg").close(el.id === "spinOff" ? "spin" : ""); return; }
   if (ds.kill !== undefined) { document.getElementById("killDlg").close(ds.kill); return; }
   if (el.id === "needsHiddenBtn") { state.needsHidden = !state.needsHidden; store("cl-needs-hidden", state.needsHidden ? "1" : "0"); renderNeeds(); return; }
+  if (ds.toDone) return moveTo(ds.toDone, "done");
   if (ds.hide) return act(ds.hide, "hide", {}, `${ds.hide} hidden from Needs you; a new flag brings it back`);
   if (ds.unhide) return act(ds.unhide, "unhide", {}, `${ds.unhide} is back in Needs you`);
   if (ds.dismiss) return act(ds.dismiss, "dismiss", { kind: ds.kind }, `${ds.dismiss}: ${(FLAG_NAME[ds.kind] || ds.kind).toLowerCase()} alert dismissed`).catch(() => {});
@@ -2287,7 +2296,7 @@ async function onSubmit(e) {
   if (e.target.id === "editForm") {
     const f = Object.fromEntries(new FormData(e.target));
     const was = state.detail?.ticket?.mode;
-    let r; try { r = await act(state.open, "edit", { title: f.title, body: f.body, project: f.project, mode: f.mode, target: f.target, plan: f.plan === "1", skill: f.skill }); } catch { return; }
+    let r; try { r = await act(state.open, "edit", { title: f.title, body: f.body, project: f.project, mode: f.mode, target: f.target, plan: f.plan === "1", umbrella: f.umbrella === "1", skill: f.skill }); } catch { return; }
     toast(r?.result && was && was !== f.mode ? "Saved. " + relocatedMsg(r.result, f.mode) : "Saved");
     if (e.submitter?.value === "close") document.getElementById("ticketDlg").close();
   }

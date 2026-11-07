@@ -928,10 +928,23 @@ needs no permission). Deleting the ticket deletes its images.
   in queue and worktree projects alike. `--parallel` (on `new` or `edit`)
   lets one run without waiting; `--in-order` puts it back. A sub-ticket after
   a parallel one waits for it too, back to the first one in order.
-- A parent that never started has no work of its own: queueing it queues its
-  sub-tickets (Backlog to Queued; back to Backlog shelves the ones not
-  started), and it stays in Queued, "runs as its sub-tickets", without a
-  session. A parent that ran (and split work off) starts as usual.
+- An umbrella (`cl t new --umbrella`, `edit --umbrella`, or Kind on the
+  board) is only a container for sub-tickets: it never gets a session, and
+  the dispatcher and Start leave it alone. Queueing it queues its sub-tickets
+  (Backlog to Queued; back to Backlog shelves the ones not started); in
+  Backlog (or Planning) it stays put while you add sub-tickets. Queued, it
+  moves to Running when one of them starts, and to Done by itself when the
+  last unfinished one reaches Done (or is deleted), which may finish its own
+  umbrella too. Its card says Umbrella and what its sub-tickets are doing
+  instead of a session status. Boards from before umbrellas had their
+  parents that never started made umbrellas, once.
+- Any other parent has work of its own, and runs first: its sub-tickets wait
+  until it is Done (split-off work builds on it). If its sub-tickets are
+  still all done before it is, it is flagged `ready-to-close` (Ready to
+  close): Needs You offers Move to Done, which finishes it the usual way
+  (Merge, PR or Close), or Dismiss to keep it open. A new sub-ticket, or one
+  taken back out of Done, clears the flag.
+- A parent's card and `show` count its sub-tickets done (`3/5`).
 - Dependencies: `cl t edit QA-5 --after QA-3,WEB-2` makes QA-5 wait until
   those (any project) are Done; `--not-after QA-3` drops the link, and `new`
   takes `--after` too. On the board, a ticket's Blocked by row does the same:

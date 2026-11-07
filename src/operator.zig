@@ -184,12 +184,16 @@ const tickets_skill =
     \\
     \\Several pieces of work: one ticket each, or a parent ticket with sub-tickets when they
     \\belong together. Make sure the human wants all of them before creating more than two.
+    \\A parent with no work of its own is an umbrella (`--umbrella`): it never runs. Queued, it
+    \\moves to running when a sub-ticket starts and to done when they all are; in backlog it
+    \\stays put. No need to write "close this when its sub-tickets are done" in its body. Any
+    \\other parent has work of its own and runs first: its sub-tickets wait until it is done.
     \\
     \\## Roadmaps and dependencies
     \\
-    \\A roadmap is a parent ticket with sub-tickets, created in the order they should run:
+    \\A roadmap is an umbrella with sub-tickets, created in the order they should run:
     \\
-    \\  cl ticket new <project> "<goal>" -m "<the bigger picture>"          (prints QA-10)
+    \\  cl ticket new <project> "<goal>" --umbrella -m "<the bigger picture>"   (prints QA-10)
     \\  cl ticket new --parent QA-10 "<first step>" -m "<details>"           (QA-11)
     \\  cl ticket new --parent QA-10 "<second step>" -m "<details>"          (QA-12)
     \\  cl ticket move QA-10 queued                                          when asked to start
@@ -197,8 +201,9 @@ const tickets_skill =
     \\- Sub-tickets run in order, in queue and worktree projects alike: each waits until the
     \\  one ranked before it is done. `cl ticket rank` reorders them, and the order follows.
     \\  `--parallel` (on new or edit) for one that needn't wait; `--in-order` undoes it.
-    \\- The parent has no work of its own: queueing it is the one action that queues its
-    \\  sub-tickets. It stays in queued ("runs as its sub-tickets") and never gets a session.
+    \\- The umbrella has no work of its own: queueing it is the one action that queues its
+    \\  sub-tickets. It never gets a session. Without --umbrella the parent runs first and
+    \\  its sub-tickets wait until it is done.
     \\- Any ticket can wait on others, in any project: `cl ticket edit QA-5 --after QA-3,WEB-2`
     \\  (or `new ... --after`); `--not-after QA-3` drops it. The dispatcher starts it only once
     \\  they're all done. A link that would make tickets wait on each other is refused.

@@ -126,11 +126,11 @@ pub const CardStatus = enum {
     paused,
     /// Queued, waiting on other tickets to be done (board.hold).
     blocked,
-    /// Queued, a parent that runs as its sub-tickets (board.hold).
-    subtickets,
     waiting_slot,
     not_started,
     done,
+    /// An umbrella under way: its sub-tickets are, it never has a session.
+    umbrella,
 
     pub fn label(s: CardStatus) []const u8 {
         return switch (s) {
@@ -144,10 +144,10 @@ pub const CardStatus = enum {
             .parked => "parked",
             .paused => "paused",
             .blocked => "waits on other tickets",
-            .subtickets => "runs as its sub-tickets",
             .waiting_slot => "waiting for a slot",
             .not_started => "not started",
             .done => "done",
+            .umbrella => "umbrella",
         };
     }
 
@@ -159,7 +159,8 @@ pub const CardStatus = enum {
             .starting => .{ .index = 4 },
             .parked => .{ .index = 5 },
             .paused => .{ .index = 6 },
-            .blocked, .subtickets => .{ .index = 6 },
+            .blocked => .{ .index = 6 },
+            .umbrella => .{ .index = 166 }, // burnt orange, apart from parked's magenta
             .gone, .killed => .{ .index = 8 },
             else => .default,
         };
@@ -189,12 +190,13 @@ pub fn cardStatus(t: board.Ticket, live: ?claude.Status, paused: bool) CardStatu
     if (t.park != null) return .parked;
     if (t.killed) return .killed;
     if (t.stage == .done) return .done;
+    if (t.umbrella) return .umbrella;
     if (t.tmux.len > 0 and t.stage != .backlog and t.stage != .queued) return .gone;
     if (t.stage != .queued) return .not_started;
     if (paused) return .paused;
     return switch (board.hold(t) orelse return .waiting_slot) {
         .blocked => .blocked,
-        .subtickets => .subtickets,
+        .subtickets => .umbrella, // caught above
     };
 }
 
@@ -206,7 +208,7 @@ pub fn flagLabel(f: board.Flag) []const u8 {
 fn flagColor(kind: []const u8) vaxis.Color {
     const eql = std.mem.eql;
     if (eql(u8, kind, board.flag_question) or eql(u8, kind, board.flag_input)) return .{ .index = 1 };
-    if (eql(u8, kind, board.flag_review) or eql(u8, kind, board.flag_unparked)) return .{ .index = 2 };
+    if (eql(u8, kind, board.flag_review) or eql(u8, kind, board.flag_unparked) or eql(u8, kind, board.flag_ready_to_close)) return .{ .index = 2 };
     if (eql(u8, kind, board.flag_testing)) return .{ .index = 6 };
     if (eql(u8, kind, board.flag_conflict) or eql(u8, kind, board.flag_after_merge) or eql(u8, kind, board.flag_park_expired) or
         eql(u8, kind, board.flag_merge_failed) or eql(u8, kind, board.flag_unmerged)) return .{ .index = 5 };
@@ -465,6 +467,7 @@ pub fn detailLines(a: std.mem.Allocator, now: i64, t: board.Ticket, status: Card
         stageName(t.stage), t.project, @tagName(t.mode), if (t.plan) " · plans first" else "", t.round, status.label(),
     }), dim, 0);
     if (t.parent.len > 0) try add(a, &l, try std.fmt.allocPrint(a, "sub-ticket of {s}", .{t.parent}), dim, 0);
+    if (t.children > 0) try add(a, &l, try std.fmt.allocPrint(a, "sub-tickets {d}/{d} done", .{ t.children_done, t.children }), dim, 0);
     if (t.tmux.len > 0 and t.tmux[0] != '(') try add(a, &l, try std.fmt.allocPrint(a, "session {s}", .{t.tmux}), dim, 0);
     if (t.worktree.len > 0) try add(a, &l, try std.fmt.allocPrint(a, "worktree {s}  branch {s}", .{ t.worktree, t.branch }), dim, 0);
     if (t.park) |p| try add(a, &l, try std.fmt.allocPrint(a, "parked {s} ago: {s}", .{ try ui.ageText(a, now - p.at), p.reason }), .{ .fg = .{ .index = 5 } }, 0);
@@ -1278,6 +1281,7 @@ pub const View = struct {
             .{ .text = " " },
             .{ .text = t.key, .style = .{ .bold = true } },
             .{ .text = if (t.parent.len > 0) try std.fmt.allocPrint(a, " ↳{s}", .{t.parent}) else "", .style = dim },
+            .{ .text = if (t.children > 0) try std.fmt.allocPrint(a, " {d}/{d}", .{ t.children_done, t.children }) else "", .style = dim },
         };
         if (sel) for (&segs) |*s| {
             s.style.reverse = true;
@@ -1387,6 +1391,7 @@ pub fn errText(err: anyerror) []const u8 {
         error.NothingAsked => "nothing is waiting for an answer",
         error.BadAnswer => "one answer per question, separated by |: an option number or your own words (\"1,3\" for a multi-select one)",
         error.NotDelivered => "Claude didn't take the answer; it's still waiting. Check the session (o)",
+        error.Umbrella => "it's an umbrella: its sub-tickets run, not it",
         error.OpenSubtickets => "it has sub-tickets that aren't done yet; finish them or spin them off",
         error.CustomClose => "Claude asked to close it its own way; tell Claude, or just close it",
         error.Conflicts => "merging it back conflicts (the files are on the ticket); it stays in Testing",
@@ -1603,9 +1608,9 @@ test cardStatus {
     try testing.expectEqual(CardStatus.blocked, cardStatus(t, null, false));
     deps[0].stage = .done;
     try testing.expectEqual(CardStatus.waiting_slot, cardStatus(t, null, false));
-    t.children = 2;
-    try testing.expectEqual(CardStatus.subtickets, cardStatus(t, null, false));
-    t.children = 0;
+    t.umbrella = true;
+    try testing.expectEqual(CardStatus.umbrella, cardStatus(t, null, false));
+    t.umbrella = false;
     t.stage = .done;
     t.tmux = "cl_qa_1";
     try testing.expectEqual(CardStatus.done, cardStatus(t, null, false));

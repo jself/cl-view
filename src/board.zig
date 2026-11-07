@@ -53,6 +53,7 @@ pub const flag_unmerged = "unmerged"; // Done, but its branch's work isn't on tr
 pub const flag_unparked = "unparked"; // its park's condition came true; it resumed
 pub const flag_park_expired = "park-expired"; // its park's check never passed in time
 pub const flag_idle = "idle"; // Claude ended its turn; nothing else asks, so it waits on you
+pub const flag_ready_to_close = "ready-to-close"; // its sub-tickets are all done, but it has work of its own
 
 pub const Project = struct {
     name: []const u8,
@@ -138,6 +139,8 @@ pub const Dep = struct {
     stage: Stage,
     /// From the order of sub-tickets (the one before it), not a link of its own.
     order: bool = false,
+    /// Its parent, which has work of its own and runs first.
+    parent: bool = false,
 };
 
 pub const Ticket = struct {
@@ -198,6 +201,12 @@ pub const Ticket = struct {
     parent: []const u8,
     /// Number of sub-tickets.
     children: i64,
+    /// How many of them are Done.
+    children_done: i64 = 0,
+    /// Only a container for its sub-tickets, with no work of its own: it
+    /// never gets a session. Queued, it moves to Running when one of them
+    /// starts, and to Done when the last one is done (see `subticketsSettled`).
+    umbrella: bool = false,
     /// On its way to Done: "merge" or "pr" while Claude merges its branch or
     /// opens a PR (it moves to Done when Claude is finished), else "".
     finishing: []const u8 = "",
@@ -291,6 +300,7 @@ const schema =
     \\  review_guide TEXT NOT NULL DEFAULT '',
     \\  asking TEXT NOT NULL DEFAULT '',
     \\  parallel INTEGER NOT NULL DEFAULT 0,
+    \\  umbrella INTEGER NOT NULL DEFAULT 0,
     \\  created INTEGER NOT NULL,
     \\  updated INTEGER NOT NULL
     \\);
@@ -400,29 +410,36 @@ pub fn migrate(db: Db) !void {
     // still lack these. Test plans used to be read from .claude/test-plan.md
     // in the ticket's directory, which tickets without a worktree shared.
     if (have >= 1) {
-        try addColumn(db, "tickets", "test_plan", "TEXT NOT NULL DEFAULT ''");
-        try addColumn(db, "tickets", "test_progress", "TEXT NOT NULL DEFAULT ''");
+        _ = try addColumn(db, "tickets", "test_plan", "TEXT NOT NULL DEFAULT ''");
+        _ = try addColumn(db, "tickets", "test_progress", "TEXT NOT NULL DEFAULT ''");
         // Version 10: the after-merge command and its run queue.
-        try addColumn(db, "projects", "after_merge", "TEXT NOT NULL DEFAULT ''");
-        try addColumn(db, "projects", "after_merge_pid", "INTEGER NOT NULL DEFAULT 0");
-        try addColumn(db, "projects", "after_merge_pending", "TEXT NOT NULL DEFAULT ''");
-        try addColumn(db, "projects", "after_merge_claude", "TEXT NOT NULL DEFAULT ''");
-        try addColumn(db, "tickets", "custom_close", "TEXT NOT NULL DEFAULT ''");
-        try addColumn(db, "projects", "hidden", "INTEGER NOT NULL DEFAULT 0");
+        _ = try addColumn(db, "projects", "after_merge", "TEXT NOT NULL DEFAULT ''");
+        _ = try addColumn(db, "projects", "after_merge_pid", "INTEGER NOT NULL DEFAULT 0");
+        _ = try addColumn(db, "projects", "after_merge_pending", "TEXT NOT NULL DEFAULT ''");
+        _ = try addColumn(db, "projects", "after_merge_claude", "TEXT NOT NULL DEFAULT ''");
+        _ = try addColumn(db, "tickets", "custom_close", "TEXT NOT NULL DEFAULT ''");
+        _ = try addColumn(db, "projects", "hidden", "INTEGER NOT NULL DEFAULT 0");
         try db.execMulti(parks_schema);
         // Planning sessions used to run in the ticket's own session, so
         // nothing had to carry the plan over.
-        try addColumn(db, "tickets", "plan_md", "TEXT NOT NULL DEFAULT ''");
-        try addColumn(db, "projects", "planners", std.fmt.comptimePrint("INTEGER NOT NULL DEFAULT {d}", .{default_planners}));
+        _ = try addColumn(db, "tickets", "plan_md", "TEXT NOT NULL DEFAULT ''");
+        _ = try addColumn(db, "projects", "planners", std.fmt.comptimePrint("INTEGER NOT NULL DEFAULT {d}", .{default_planners}));
         // Review guides used to be read from .claude/review-guide.md in the
         // ticket's directory, which tickets without a worktree shared.
-        try addColumn(db, "tickets", "review_guide", "TEXT NOT NULL DEFAULT ''");
-        try addColumn(db, "projects", "paused", "INTEGER NOT NULL DEFAULT 0");
+        _ = try addColumn(db, "tickets", "review_guide", "TEXT NOT NULL DEFAULT ''");
+        _ = try addColumn(db, "projects", "paused", "INTEGER NOT NULL DEFAULT 0");
         // AskUserQuestion's questions used to come only from the transcript.
-        try addColumn(db, "tickets", "asking", "TEXT NOT NULL DEFAULT ''");
+        _ = try addColumn(db, "tickets", "asking", "TEXT NOT NULL DEFAULT ''");
         // Dependencies: links of their own, and sub-tickets in order.
-        try addColumn(db, "tickets", "parallel", "INTEGER NOT NULL DEFAULT 0");
+        _ = try addColumn(db, "tickets", "parallel", "INTEGER NOT NULL DEFAULT 0");
         try db.execMulti(deps_schema);
+        // Umbrellas used to be guessed: a parent that never started had no
+        // work of its own. Those become umbrellas, once, as the column comes.
+        if (try addColumn(db, "tickets", "umbrella", "INTEGER NOT NULL DEFAULT 0")) try db.execMulti(
+            \\UPDATE tickets SET umbrella = 1 WHERE stage != 'done'
+            \\  AND EXISTS (SELECT 1 FROM tickets c WHERE c.parent = tickets.id)
+            \\  AND NOT EXISTS (SELECT 1 FROM events e WHERE e.ticket = tickets.id AND e.kind = 'started')
+        );
     }
     if (have >= version) return;
     // Version 1 had no sub-tickets, version 2 no planning skill.
@@ -436,8 +453,8 @@ pub fn migrate(db: Db) !void {
     // Version 7 had no kill, nor hiding from Needs You. Added only if missing:
     // another branch's build may have taken version 8 for a column of its own.
     if (have >= 1 and have < 9) {
-        try addColumn(db, "tickets", "killed", "INTEGER NOT NULL DEFAULT 0");
-        try addColumn(db, "flags", "hidden", "INTEGER NOT NULL DEFAULT 0");
+        _ = try addColumn(db, "tickets", "killed", "INTEGER NOT NULL DEFAULT 0");
+        _ = try addColumn(db, "flags", "hidden", "INTEGER NOT NULL DEFAULT 0");
     }
     try db.execMulti(schema);
     try db.execMulti(parks_schema);
@@ -445,9 +462,11 @@ pub fn migrate(db: Db) !void {
     try db.execMulti(std.fmt.comptimePrint("PRAGMA user_version = {d}", .{version}));
 }
 
-fn addColumn(db: Db, comptime table: []const u8, comptime column: []const u8, comptime decl: []const u8) !void {
-    if ((try db.int("SELECT 1 FROM pragma_table_info('" ++ table ++ "') WHERE name = '" ++ column ++ "'", .{})) != null) return;
+/// Add a column unless the table has it; true when it was added.
+fn addColumn(db: Db, comptime table: []const u8, comptime column: []const u8, comptime decl: []const u8) !bool {
+    if ((try db.int("SELECT 1 FROM pragma_table_info('" ++ table ++ "') WHERE name = '" ++ column ++ "'", .{})) != null) return false;
     try db.execMulti("ALTER TABLE " ++ table ++ " ADD COLUMN " ++ column ++ " " ++ decl);
+    return true;
 }
 
 test "an approved plan queues, and the plan is kept" {
@@ -776,6 +795,8 @@ pub const TicketInput = struct {
     parent: ?[]const u8 = null,
     /// Planning skill.
     skill: ?[]const u8 = null,
+    /// An umbrella (see `Ticket.umbrella`).
+    umbrella: ?bool = null,
     /// createTicket: the body to store once the key is known, or null to
     /// keep it (images pasted before the ticket had a key move to its own
     /// folder). Called before the ticket is visible, so nothing starts it
@@ -810,19 +831,24 @@ pub fn createTicket(ctx: Ctx, db: Db, a: std.mem.Allocator, in: TicketInput) Err
     };
     const t = now(ctx);
     try db.exec(
-        \\INSERT INTO tickets (key, project, title, body, stage, mode, plan, target, profile, parent, skill, created, updated, rank)
-        \\VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, (SELECT coalesce(max(rank), 0) + ?13 FROM tickets))
-    , .{ key, p.name, title, body, @tagName(stage), @tagName(in.mode orelse p.mode), plan, in.target orelse "", in.profile orelse p.profile, if (parent) |pt| pt.id else null, in.skill orelse "", t, rank_gap });
+        \\INSERT INTO tickets (key, project, title, body, stage, mode, plan, target, profile, parent, skill, created, updated, rank, umbrella)
+        \\VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, (SELECT coalesce(max(rank), 0) + ?13 FROM tickets), ?14)
+    , .{ key, p.name, title, body, @tagName(stage), @tagName(in.mode orelse p.mode), plan, in.target orelse "", in.profile orelse p.profile, if (parent) |pt| pt.id else null, in.skill orelse "", t, rank_gap, in.umbrella orelse false });
     const id = db.lastId();
     try logEvent(ctx, db, id, "created", @tagName(stage));
-    if (parent) |pt| try logEvent(ctx, db, pt.id, "sub-ticket", key);
+    if (parent) |pt| {
+        try logEvent(ctx, db, pt.id, "sub-ticket", key);
+        // Something new to do under it: it isn't ready to close any more.
+        if (stage != .done) try clearFlagId(ctx, db, pt.id, flag_ready_to_close);
+    }
     try db.execMulti("COMMIT");
     return key;
 }
 
 const ticket_cols = "t.id, t.key, t.project, t.title, t.body, t.stage, t.mode, t.plan, t.target, t.worktree, t.branch, t.profile, t.tmux, t.session_id, t.summary, t.round, t.created, t.updated, " ++
     "coalesce((SELECT p.key FROM tickets p WHERE p.id = t.parent), ''), (SELECT count(*) FROM tickets c WHERE c.parent = t.id), t.skill, t.base, t.finishing, t.change_id, t.rank, t.killed, t.test_plan, t.test_progress, t.custom_close, t.plan_md, t.review_guide, t.asking, t.parallel, " ++
-    "EXISTS (SELECT 1 FROM events e WHERE e.ticket = t.id AND e.kind = 'started')";
+    "EXISTS (SELECT 1 FROM events e WHERE e.ticket = t.id AND e.kind = 'started'), " ++
+    "(SELECT count(*) FROM tickets c WHERE c.parent = t.id AND c.stage = 'done'), t.umbrella";
 
 fn readTicket(st: sqlite.Stmt, a: std.mem.Allocator) !Ticket {
     return .{
@@ -860,6 +886,8 @@ fn readTicket(st: sqlite.Stmt, a: std.mem.Allocator) !Ticket {
         .asking = try st.dupe(a, 31),
         .parallel = st.int(32) != 0,
         .started = st.int(33) != 0,
+        .children_done = st.int(34),
+        .umbrella = st.int(35) != 0,
     };
 }
 
@@ -1029,12 +1057,15 @@ pub fn updateTicket(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, in:
     if (in.target) |v| try db.exec("UPDATE tickets SET target = ?2 WHERE id = ?1", .{ t.id, v });
     if (in.profile) |v| try db.exec("UPDATE tickets SET profile = ?2 WHERE id = ?1", .{ t.id, v });
     if (in.skill) |v| try db.exec("UPDATE tickets SET skill = ?2 WHERE id = ?1", .{ t.id, v });
+    if (in.umbrella) |v| try db.exec("UPDATE tickets SET umbrella = ?2 WHERE id = ?1", .{ t.id, v });
     if (in.project.len > 0 and !std.mem.eql(u8, in.project, t.project)) {
         _ = try getProject(db, a, in.project);
         try db.exec("UPDATE tickets SET project = ?2 WHERE id = ?1", .{ t.id, in.project });
     }
     try touch(ctx, db, t.id);
     try logEvent(ctx, db, t.id, "edited", "");
+    // Made an umbrella when its sub-tickets are done already.
+    if (in.umbrella == true) try subticketsSettled(ctx, db, t.id);
 }
 
 /// Record what a session did for a ticket (set when the dispatcher starts it).
@@ -1107,6 +1138,7 @@ pub fn spinOff(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8) Error!vo
 
 /// Remove a ticket; refused while it has sub-tickets. The tickets linked to
 /// wait on it go on without it: their keys come back, so the caller can say so.
+/// A sub-ticket's parent may be left with only Done ones: see `subticketsSettled`.
 pub fn removeTicket(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8) Error![]const []const u8 {
     const t = try getTicket(db, a, key);
     if (t.children > 0) return error.Exists;
@@ -1126,7 +1158,12 @@ pub fn removeTicket(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8) Err
         }
     }
     try db.exec("DELETE FROM deps WHERE ticket = ?1 OR blocker = ?1", .{t.id});
+    const pid = try parentId(db, t.id);
     try db.exec("DELETE FROM tickets WHERE id = ?1", .{t.id});
+    if (pid) |p| if (t.stage != .done) {
+        try logEvent(ctx, db, p, "sub-ticket deleted", t.key);
+        try subticketsSettled(ctx, db, p);
+    };
     return freed.toOwnedSlice(a);
 }
 
@@ -1136,14 +1173,27 @@ fn readDep(st: sqlite.Stmt, a: std.mem.Allocator, order: bool) !Dep {
     return .{ .id = st.int(0), .key = try st.dupe(a, 1), .title = try st.dupe(a, 2), .stage = Stage.parse(st.text(3)) orelse .backlog, .order = order };
 }
 
-/// What ticket `id` waits on (see Ticket.blocked_by): its links, then the
-/// sub-tickets before it.
+/// What ticket `id` waits on (see Ticket.blocked_by): its links, its parent
+/// when that has work of its own (isn't an umbrella), then the sub-tickets
+/// before it.
 pub fn blockers(db: Db, a: std.mem.Allocator, id: i64) Error![]Dep {
     var out: std.ArrayList(Dep) = .empty;
     {
         var st = try db.query("SELECT b.id, b.key, b.title, b.stage FROM deps d JOIN tickets b ON b.id = d.blocker WHERE d.ticket = ?1 ORDER BY b.rank, b.id", .{id});
         defer st.finalize();
         while (try st.step()) try out.append(a, try readDep(st, a, false));
+    }
+    {
+        // The parent runs first: split-off work builds on it.
+        var st = try db.query("SELECT p.id, p.key, p.title, p.stage FROM tickets t JOIN tickets p ON p.id = t.parent WHERE t.id = ?1 AND p.umbrella = 0", .{id});
+        defer st.finalize();
+        if (try st.step()) {
+            var d = try readDep(st, a, false);
+            d.parent = true;
+            for (out.items) |x| {
+                if (x.id == d.id) break;
+            } else try out.append(a, d);
+        }
     }
     const linked = out.items.len;
     var st = try db.query(
@@ -1170,12 +1220,12 @@ pub fn blockers(db: Db, a: std.mem.Allocator, id: i64) Error![]Dep {
 pub const Hold = enum {
     /// A ticket it waits on isn't Done yet.
     blocked,
-    /// It has sub-tickets and never started: it has no work of its own.
+    /// An umbrella: it has no work of its own, its sub-tickets run.
     subtickets,
 };
 
 pub fn hold(t: Ticket) ?Hold {
-    if (t.children > 0 and !t.started) return .subtickets;
+    if (t.umbrella) return .subtickets;
     for (t.blocked_by) |d| if (d.stage != .done) return .blocked;
     return null;
 }
@@ -1253,12 +1303,13 @@ pub fn setParallel(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, on: 
     try db.execMulti("COMMIT");
 }
 
-/// The tickets that wait on `id`: linked to it, or the sub-tickets after it.
+/// The tickets that wait on `id`: linked to it, the sub-tickets after it,
+/// or its own sub-tickets (when it isn't an umbrella).
 pub fn dependents(db: Db, a: std.mem.Allocator, id: i64) Error![]const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
     var st = try db.query(
         \\SELECT w.id, w.key FROM tickets w WHERE w.id IN (SELECT ticket FROM deps WHERE blocker = ?1)
-        \\  OR w.parent = (SELECT parent FROM tickets WHERE id = ?1)
+        \\  OR w.parent = (SELECT parent FROM tickets WHERE id = ?1) OR w.parent = ?1
         \\ORDER BY w.rank, w.id
     , .{id});
     defer st.finalize();
@@ -1274,11 +1325,11 @@ pub fn dependents(db: Db, a: std.mem.Allocator, id: i64) Error![]const []const u
     return out.items;
 }
 
-/// Queueing a parent that never started queues its sub-tickets (it has no
-/// work of its own: it runs as them), and shelving it in Backlog shelves the
-/// ones that haven't started yet.
+/// Queueing an umbrella queues its sub-tickets (it has no work of its own:
+/// it runs as them), and shelving it in Backlog shelves the ones that
+/// haven't started yet.
 fn moveSubtickets(ctx: Ctx, db: Db, id: i64, from: Stage, to: Stage) Error!void {
-    if ((try db.int("SELECT 1 FROM events WHERE ticket = ?1 AND kind = 'started'", .{id})) != null) return;
+    if ((try db.int("SELECT 1 FROM tickets WHERE id = ?1 AND umbrella != 0", .{id})) == null) return;
     while (try db.int(
         \\SELECT id FROM tickets c WHERE c.parent = ?1 AND c.stage = ?2 AND c.tmux = ''
         \\  AND NOT EXISTS (SELECT 1 FROM events e WHERE e.ticket = c.id AND e.kind = 'started') ORDER BY c.rank, c.id LIMIT 1
@@ -1286,6 +1337,60 @@ fn moveSubtickets(ctx: Ctx, db: Db, id: i64, from: Stage, to: Stage) Error!void 
         try moveId(ctx, db, c, from, to);
         try logEvent(ctx, db, c, if (to == .queued) "queued" else "shelved", "with its parent");
     }
+}
+
+fn parentId(db: Db, id: i64) Error!?i64 {
+    return db.int("SELECT parent FROM tickets WHERE id = ?1 AND parent IS NOT NULL", .{id});
+}
+
+/// Under way: queued, or further along but not Done. An umbrella in
+/// Backlog or Planning is still being filled with sub-tickets.
+fn underWay(stage: Stage) bool {
+    return switch (stage) {
+        .queued, .running, .review, .testing => true,
+        .backlog, .planning, .done => false,
+    };
+}
+
+/// A sub-ticket of `pid` reached Done (or an unfinished one was deleted, or
+/// `pid` became an umbrella under way). Once none is left unfinished, and at
+/// least one is Done:
+/// - an umbrella under way goes to Done by itself, which may in turn finish
+///   its own umbrella; one in Backlog or Planning stays put (more sub-tickets
+///   may come);
+/// - any other parent gets `ready-to-close`: it may have work of its own
+///   left, so the human decides.
+fn subticketsSettled(ctx: Ctx, db: Db, pid: i64) Error!void {
+    if ((try db.int("SELECT 1 FROM tickets WHERE parent = ?1 AND stage != 'done'", .{pid})) != null) return;
+    const n = (try db.int("SELECT count(*) FROM tickets WHERE parent = ?1", .{pid})) orelse 0;
+    if (n == 0) return;
+    var st = try db.query("SELECT stage, umbrella FROM tickets WHERE id = ?1", .{pid});
+    const stage, const umbrella = blk: {
+        defer st.finalize();
+        if (!try st.step()) return;
+        break :blk .{ Stage.parse(st.text(0)) orelse return, st.int(1) != 0 };
+    };
+    if (stage == .done) return;
+    var buf: [256]u8 = undefined;
+    const all = std.fmt.bufPrint(&buf, "{s} {d} sub-ticket{s} done", .{ if (n == 1) "its" else "all", n, if (n == 1) " is" else "s are" }) catch unreachable;
+    if (umbrella) {
+        if (!underWay(stage)) return;
+        try db.exec("UPDATE tickets SET summary = ?2 WHERE id = ?1 AND summary = ''", .{ pid, std.fmt.bufPrint(buf[all.len..], "Closed by cl: {s}.", .{all}) catch unreachable });
+        try logEvent(ctx, db, pid, "closed", all);
+        try moveId(ctx, db, pid, stage, .done);
+        return;
+    }
+    var dbuf: [512]u8 = undefined;
+    const detail = std.fmt.bufPrint(&dbuf, "{s}. Move it to Done if nothing of its own is left, or dismiss this to keep it open.", .{all}) catch unreachable;
+    try setFlagId(ctx, db, pid, flag_ready_to_close, "auto", detail);
+}
+
+/// A sub-ticket of `pid` got under way: a Queued umbrella moves to Running,
+/// since its sub-tickets are being worked on (and so may its own umbrella).
+fn pickUp(ctx: Ctx, db: Db, pid: i64) Error!void {
+    if ((try db.int("SELECT 1 FROM tickets WHERE id = ?1 AND umbrella != 0 AND stage = 'queued'", .{pid})) == null) return;
+    try logEvent(ctx, db, pid, "picked up", "a sub-ticket started");
+    try moveId(ctx, db, pid, .queued, .running);
 }
 
 fn touch(ctx: Ctx, db: Db, id: i64) Error!void {
@@ -1322,8 +1427,19 @@ fn moveId(ctx: Ctx, db: Db, id: i64, from: Stage, to: Stage) Error!void {
     // Out of Done, it is under way again: "done without merging" no longer holds.
     if (from == .done) try clearFlagId(ctx, db, id, flag_unmerged);
     if (to == .queued) try moveSubtickets(ctx, db, id, .backlog, .queued);
-    if (from == .queued and to == .backlog) try moveSubtickets(ctx, db, id, .queued, .backlog);
+    // Picked up (see `pickUp`), an umbrella may be shelved from Running too.
+    if (underWay(from) and to == .backlog) try moveSubtickets(ctx, db, id, .queued, .backlog);
     try touch(ctx, db, id);
+    // Its parent: one sub-ticket fewer to wait on, or one more again, or
+    // one being worked on.
+    if (try parentId(db, id)) |pid| {
+        if (to == .done) try subticketsSettled(ctx, db, pid);
+        if (from == .done) try clearFlagId(ctx, db, pid, flag_ready_to_close);
+        if (to == .running or to == .review or to == .testing) try pickUp(ctx, db, pid);
+    }
+    // An umbrella queued with its sub-tickets all done has nothing to wait for.
+    if (underWay(to) and !underWay(from) and (try db.int("SELECT 1 FROM tickets WHERE id = ?1 AND umbrella != 0", .{id})) != null)
+        try subticketsSettled(ctx, db, id);
 }
 
 /// Set a flag (a no-op if it is already set).
@@ -2158,7 +2274,7 @@ test "dependencies: links, cycles, a removed blocker, and shelving a parent" {
 
     // Sub-tickets: a link against their order is a circle, and so is a
     // reorder or a return to order that would make one.
-    const kp = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Parent" });
+    const kp = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Parent", .umbrella = true });
     const s1 = try createTicket(ctx, db, a, .{ .parent = kp, .title = "S1" });
     const s2 = try createTicket(ctx, db, a, .{ .parent = kp, .title = "S2" });
     try testing.expectError(error.Cycle, addBlocker(ctx, db, a, s1, s2));
@@ -2173,16 +2289,174 @@ test "dependencies: links, cycles, a removed blocker, and shelving a parent" {
     try testing.expectError(error.Cycle, rankTicket(db, a, s1, s2, null));
     try testing.expectEqual(r1, (try getTicket(db, a, s1)).rank);
 
-    // Queued with its parent, shelved with it while not started.
+    // Queued with their umbrella, shelved with it while not started.
     try move(ctx, db, a, kp, .queued);
     try testing.expectEqual(Stage.queued, (try getTicket(db, a, s1)).stage);
     try testing.expectEqual(Stage.queued, (try getTicket(db, a, s2)).stage);
     try move(ctx, db, a, kp, .backlog);
     try testing.expectEqual(Stage.backlog, (try getTicket(db, a, s1)).stage);
     try testing.expectEqual(Stage.backlog, (try getTicket(db, a, s2)).stage);
-    // A parent that ran has work of its own: queueing it leaves them be.
-    try logEvent(ctx, db, (try getTicket(db, a, kp)).id, "started", "cl_qa_1");
+    try testing.expectEqual(Hold.subtickets, hold(try getTicket(db, a, kp)).?);
+    // A parent that isn't an umbrella has work of its own: queueing it leaves
+    // them be, and it starts first.
+    try updateTicket(ctx, db, a, kp, .{ .umbrella = false });
     try move(ctx, db, a, kp, .queued);
     try testing.expectEqual(Stage.backlog, (try getTicket(db, a, s1)).stage);
     try testing.expect(hold(try getTicket(db, a, kp)) == null);
+}
+
+test "an umbrella is picked up when a sub-ticket starts and closes when they are all done" {
+    const ctx = testCtx();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try Db.open(":memory:");
+    defer db.close();
+    try migrate(db);
+    try addProject(db, .{ .name = "qa", .dir = "/x/qa" });
+    const top = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Roadmap", .umbrella = true, .stage = .queued });
+    const u = try createTicket(ctx, db, a, .{ .parent = top, .title = "Venues v1", .umbrella = true, .stage = .queued });
+    const s1 = try createTicket(ctx, db, a, .{ .parent = u, .title = "One", .stage = .queued });
+    const s2 = try createTicket(ctx, db, a, .{ .parent = u, .title = "Two", .stage = .queued });
+    const s3 = try createTicket(ctx, db, a, .{ .parent = u, .title = "Three" });
+    try testing.expect((try getTicket(db, a, u)).umbrella);
+
+    // A sub-ticket starting picks up its umbrella, and that one's umbrella.
+    try move(ctx, db, a, s1, .running);
+    try testing.expectEqual(Stage.running, (try getTicket(db, a, u)).stage);
+    try testing.expectEqual(Stage.running, (try getTicket(db, a, top)).stage);
+
+    // Progress: how many of its sub-tickets are done.
+    try move(ctx, db, a, s1, .done);
+    var t = try getTicket(db, a, u);
+    try testing.expectEqual(@as(i64, 3), t.children);
+    try testing.expectEqual(@as(i64, 1), t.children_done);
+    try testing.expectEqual(Stage.running, t.stage);
+
+    // A deleted unfinished one no longer holds it up, nor counts.
+    try move(ctx, db, a, s2, .done);
+    _ = try removeTicket(ctx, db, a, s3);
+    t = try getTicket(db, a, u);
+    try testing.expectEqual(Stage.done, t.stage);
+    try testing.expectEqual(@as(i64, 2), t.children);
+    try testing.expectEqualStrings("Closed by cl: all 2 sub-tickets are done.", t.summary);
+    try testing.expectEqual(@as(usize, 0), t.flags.len);
+    // Its own umbrella had only it left: it closes as well.
+    try testing.expectEqual(Stage.done, (try getTicket(db, a, top)).stage);
+}
+
+test "an umbrella in Backlog stays put; queued with its sub-tickets done, it closes" {
+    const ctx = testCtx();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try Db.open(":memory:");
+    defer db.close();
+    try migrate(db);
+    try addProject(db, .{ .name = "qa", .dir = "/x/qa" });
+    const u = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Later", .umbrella = true });
+    const s1 = try createTicket(ctx, db, a, .{ .parent = u, .title = "One", .stage = .queued });
+
+    // Sub-tickets run on their own stage; the Backlog umbrella isn't moved,
+    // nor closed or flagged: more sub-tickets may come.
+    try move(ctx, db, a, s1, .running);
+    try move(ctx, db, a, s1, .done);
+    const t = try getTicket(db, a, u);
+    try testing.expectEqual(Stage.backlog, t.stage);
+    try testing.expectEqual(@as(usize, 0), t.flags.len);
+
+    // Queued now, it has nothing left to wait for.
+    try move(ctx, db, a, u, .queued);
+    try testing.expectEqual(Stage.done, (try getTicket(db, a, u)).stage);
+
+    // Made an umbrella while queued with its sub-tickets done: the same.
+    const p = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Parent", .stage = .queued });
+    try move(ctx, db, a, try createTicket(ctx, db, a, .{ .parent = p, .title = "Sub" }), .done);
+    try testing.expectEqualStrings(flag_ready_to_close, (try getTicket(db, a, p)).flags[0].kind);
+    try updateTicket(ctx, db, a, p, .{ .umbrella = true });
+    try testing.expectEqual(Stage.done, (try getTicket(db, a, p)).stage);
+
+    // No sub-tickets left at all (all deleted) isn't "all done".
+    const empty = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Nothing yet", .umbrella = true, .stage = .queued });
+    _ = try removeTicket(ctx, db, a, try createTicket(ctx, db, a, .{ .parent = empty, .title = "Dropped" }));
+    try testing.expectEqual(Stage.queued, (try getTicket(db, a, empty)).stage);
+}
+
+test "a parent that isn't an umbrella is flagged ready-to-close instead, in any stage" {
+    const ctx = testCtx();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try Db.open(":memory:");
+    defer db.close();
+    try migrate(db);
+    try addProject(db, .{ .name = "qa", .dir = "/x/qa" });
+    const p = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Parent", .stage = .queued });
+    const s1 = try createTicket(ctx, db, a, .{ .parent = p, .title = "One", .stage = .queued });
+
+    // It runs first: its sub-tickets wait until it's Done (started by hand
+    // here). Waiting on a sub-ticket in turn would be a circle.
+    const w = try getTicket(db, a, s1);
+    try testing.expectEqual(Hold.blocked, hold(w).?);
+    try testing.expectEqualStrings(p, w.blocked_by[0].key);
+    try testing.expect(w.blocked_by[0].parent);
+    try testing.expect(hold(try getTicket(db, a, p)) == null);
+    try testing.expectEqualStrings(s1, (try dependents(db, a, (try getTicket(db, a, p)).id))[0]);
+    try testing.expectError(error.Cycle, addBlocker(ctx, db, a, p, s1));
+
+    // Not picked up either: it has work of its own to start.
+    try move(ctx, db, a, s1, .running);
+    try testing.expectEqual(Stage.queued, (try getTicket(db, a, p)).stage);
+    try move(ctx, db, a, s1, .done);
+    var t = try getTicket(db, a, p);
+    try testing.expectEqual(Stage.queued, t.stage);
+    try testing.expectEqual(@as(usize, 1), t.flags.len);
+    try testing.expectEqualStrings(flag_ready_to_close, t.flags[0].kind);
+    try testing.expectEqualStrings("its 1 sub-ticket is done. Move it to Done if nothing of its own is left, or dismiss this to keep it open.", t.flags[0].detail);
+    try testing.expectEqual(@as(usize, 1), (try listTickets(db, a, .{ .needs = true })).len);
+    // Dismissable: "keep it open".
+    try testing.expect(!waitingFlag(flag_ready_to_close));
+
+    // A new sub-ticket, or one taken out of Done, means it isn't ready after all.
+    const s2 = try createTicket(ctx, db, a, .{ .parent = p, .title = "Two" });
+    try testing.expectEqual(@as(usize, 0), (try getTicket(db, a, p)).flags.len);
+    try move(ctx, db, a, s2, .done);
+    try testing.expectEqual(@as(usize, 1), (try getTicket(db, a, p)).flags.len);
+    try move(ctx, db, a, s2, .review);
+    try testing.expectEqual(@as(usize, 0), (try getTicket(db, a, p)).flags.len);
+
+    // In Backlog too; going to Done clears it.
+    try move(ctx, db, a, p, .backlog);
+    try move(ctx, db, a, s2, .done);
+    t = try getTicket(db, a, p);
+    try testing.expectEqual(Stage.backlog, t.stage);
+    try testing.expectEqualStrings(flag_ready_to_close, t.flags[0].kind);
+    try move(ctx, db, a, p, .done);
+    try testing.expectEqual(@as(usize, 0), (try getTicket(db, a, p)).flags.len);
+}
+
+test "migrate: a board from before umbrellas gets the column, and its parents that never started become umbrellas" {
+    const ctx = testCtx();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try Db.open(":memory:");
+    defer db.close();
+    try migrate(db);
+    try addProject(db, .{ .name = "qa", .dir = "/x/qa" });
+    const roadmap = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Roadmap" });
+    _ = try createTicket(ctx, db, a, .{ .parent = roadmap, .title = "Step" });
+    const ran = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Ran" });
+    try logEvent(ctx, db, (try getTicket(db, a, ran)).id, "started", "cl_qa_1");
+    _ = try createTicket(ctx, db, a, .{ .parent = ran, .title = "Split off" });
+    const lone = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Alone" });
+    try db.execMulti("ALTER TABLE tickets DROP COLUMN umbrella");
+    try migrate(db);
+    try testing.expect((try getTicket(db, a, roadmap)).umbrella);
+    try testing.expect(!(try getTicket(db, a, ran)).umbrella);
+    try testing.expect(!(try getTicket(db, a, lone)).umbrella);
+    // Once: marked by hand afterwards, it stays as it was set.
+    try updateTicket(ctx, db, a, roadmap, .{ .umbrella = false });
+    try migrate(db);
+    try testing.expect(!(try getTicket(db, a, roadmap)).umbrella);
 }

@@ -643,6 +643,7 @@ fn startIn(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: 
         try db.exec("UPDATE tickets SET tmux = '' WHERE id = ?1 AND tmux = ?2", .{ t.id, t.tmux });
     }
     if (t.stage == .planning) return startPlanning(ctx, cfg, db, a, t);
+    if (t.umbrella) return error.Umbrella;
     if (try parentPlanning(db, a, t)) return error.TargetBusy;
     const p = try board.getProject(db, a, t.project);
     const target = if (t.mode == .queue) try queueTarget(db, a, t, view, p) else "";
@@ -936,13 +937,15 @@ pub fn tick(ctx: Ctx, cfg: config.Config, db: board.Db) !usize {
 /// restart it, and a parked one for its park to end, in whatever stage
 /// (moving it to Queued doesn't start it). A paused project's queued
 /// tickets wait, in their place, for it to resume. One that waits on
-/// another ticket (board.hold: a link, or the sub-ticket before it) waits
-/// until that one is Done, and a parent that never started runs as its
+/// another ticket (board.hold: a link, its parent, or the sub-ticket before
+/// it) waits until that one is Done, and an umbrella runs as its
 /// sub-tickets, so it doesn't start itself.
 fn waitingToStart(db: board.Db, a: std.mem.Allocator) ![]board.Ticket {
     const paused = try pausedProjects(db, a);
     var waiting: std.ArrayList(board.Ticket) = .empty;
     for (try board.listTickets(db, a, .{ .stage = .queued })) |t| {
+        // An umbrella has no work of its own (its sub-tickets run, not it), and
+        // a ticket waiting on others waits: see board.hold.
         if (t.tmux.len == 0 and !t.killed and t.park == null and !paused.contains(t.project) and board.hold(t) == null) try waiting.append(a, t);
     }
     std.mem.sort(board.Ticket, waiting.items, {}, byRank);
@@ -1452,6 +1455,23 @@ test "a parked ticket isn't started, even moved to Queued" {
     try std.testing.expectEqual(@as(usize, 2), (try waitingToStart(db, a)).len);
 }
 
+test "an umbrella is never started; its sub-tickets are" {
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp" };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "qa", .dir = "/x/qa-tool" });
+    const ku = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Umbrella", .stage = .queued, .umbrella = true });
+    const ks = try board.createTicket(ctx, db, a, .{ .parent = ku, .title = "Piece", .stage = .queued });
+    const w = try waitingToStart(db, a);
+    try std.testing.expectEqual(@as(usize, 1), w.len);
+    try std.testing.expectEqualStrings(ks, w[0].key);
+    try std.testing.expectError(error.Umbrella, startIn(ctx, undefined, db, a, try board.getTicket(db, a, ku), false, View{ .sessions = &.{}, .statuses = .empty }, false));
+}
+
 test "a running ticket moved back to Queued is stopped, then started again where it left off" {
     const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp" };
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -1708,14 +1728,14 @@ test "ordered sub-tickets in a worktree project start one at a time" {
     defer db.close();
     try board.migrate(db);
     try board.addProject(db, .{ .name = "qa", .dir = "/x/qa", .mode = .worktree, .slots = 3 });
-    const kp = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Roadmap" });
+    const kp = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Roadmap", .umbrella = true });
     const k1 = try board.createTicket(ctx, db, a, .{ .parent = kp, .title = "One" });
     const k2 = try board.createTicket(ctx, db, a, .{ .parent = kp, .title = "Two" });
     const k3 = try board.createTicket(ctx, db, a, .{ .parent = kp, .title = "Three" });
     const kx = try board.createTicket(ctx, db, a, .{ .parent = kp, .title = "Alongside" });
     try board.setParallel(ctx, db, a, kx, true);
 
-    // Queueing the parent queues its sub-tickets; it has no work of its own.
+    // Queueing the umbrella queues its sub-tickets; it has no work of its own.
     try board.move(ctx, db, a, kp, .queued);
     for ([_][]const u8{ k1, k2, k3, kx }) |k| try std.testing.expectEqual(board.Stage.queued, (try board.getTicket(db, a, k)).stage);
     try std.testing.expectEqual(board.Hold.subtickets, board.hold(try board.getTicket(db, a, kp)).?);
