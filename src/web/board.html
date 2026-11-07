@@ -372,6 +372,7 @@
   <select id="projectSel" aria-label="Project"></select>
   <label class="switch"><input type="checkbox" role="switch" id="subsSw"><span class="track"></span>Sub-tickets</label>
   <label class="switch"><input type="checkbox" role="switch" id="doneSw"><span class="track"></span>Done<span class="n" id="doneN"></span></label>
+  <label class="switch" title="Show parked tickets (waiting on something outside cl)"><input type="checkbox" role="switch" id="parkedSw"><span class="track"></span>Parked<span class="n" id="parkedN"></span></label>
   <label class="switch" id="hiddenProjWrap" title="Show the tickets of projects you hid (Projects view)" hidden><input type="checkbox" role="switch" id="hiddenProjSw"><span class="track"></span>Hidden projects<span class="n" id="hiddenProjN"></span></label>
   <input id="search" type="search" placeholder="Search tickets" aria-label="Search tickets">
 </nav>
@@ -419,7 +420,7 @@ const STATUS_NAME = { paused: "Paused", busy: "Working", waiting: "Waiting on yo
 
 const store = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch { return null; } };
 const state = {
-  data: null, view: store("cl-view") || "board", filter: "all", project: "", subs: store("cl-subs") === "1", done: store("cl-done") === "1",
+  data: null, view: store("cl-view") || "board", filter: "all", project: "", subs: store("cl-subs") === "1", done: store("cl-done") === "1", parked: store("cl-parked") !== "0",
   search: "", needsOpen: store("cl-needs") !== "0", needsHidden: store("cl-needs-hidden") === "1", open: null, detail: null, tab: null, picks: {}, other: {}, checks: {},
   sending: false, hiddenProjects: store("cl-hidden-projects") === "1",
 };
@@ -598,6 +599,7 @@ function visible() {
     const t = row.ticket;
     if (!state.subs && t.parent) return false;
     if (!state.done && t.stage === "done") return false;
+    if (!state.parked && t.park) return false;
     if (state.project && t.project !== state.project) return false;
     if (!state.project && !projectShown(t.project)) return false;
     if (q && !(t.key + " " + t.title + " " + t.body).toLowerCase().includes(q)) return false;
@@ -740,7 +742,8 @@ function renderNeeds() {
 
 function renderFilters() {
   const d = state.data; const mine = d.tickets.filter((r) => (state.subs || !r.ticket.parent) && (state.project ? r.ticket.project === state.project : projectShown(r.ticket.project)));
-  const done = mine.filter((r) => r.ticket.stage === "done").length; const all = state.done ? mine : mine.filter((r) => r.ticket.stage !== "done");
+  const done = mine.filter((r) => r.ticket.stage === "done").length; const all = mine.filter((r) => (state.done || r.ticket.stage !== "done") && (state.parked || !r.ticket.park));
+  const parked = mine.filter((r) => r.ticket.park && (state.done || r.ticket.stage !== "done")).length;
   const n = (f) => all.filter((r) => f === "all" || (f === "me" ? needsMe(r) : f === "working" ? r.status === "busy" : r.ticket.flags.some((x) => x.kind === f))).length;
   const statuses = [["all", "All tickets"], ["me", "Needs me"], ["input", "Needs input"], ["question", "Questions"], ["review", "Review"], ["testing", "Testing"], ["working", "Working"]];
   setHtml(document.getElementById("statusSel"), statuses.map(([k, l]) =>
@@ -757,6 +760,8 @@ function renderFilters() {
   document.getElementById("subsSw").checked = state.subs;
   document.getElementById("doneSw").checked = state.done;
   document.getElementById("doneN").textContent = !state.done && done ? `${done} hidden` : "";
+  document.getElementById("parkedSw").checked = state.parked;
+  document.getElementById("parkedN").textContent = !state.parked && parked ? `${parked} hidden` : "";
 }
 
 function cardHtml(row, compact) {
@@ -1767,6 +1772,7 @@ document.addEventListener("change", (e) => {
   if (e.target.id === "projectSel") { state.project = e.target.value; render(); }
   if (e.target.id === "doneSw") { state.done = e.target.checked; store("cl-done", state.done ? "1" : "0"); render(); }
   if (e.target.id === "hiddenProjSw") { state.hiddenProjects = e.target.checked; store("cl-hidden-projects", state.hiddenProjects ? "1" : "0"); render(); }
+  if (e.target.id === "parkedSw") { state.parked = e.target.checked; store("cl-parked", state.parked ? "1" : "0"); render(); }
   if (e.target.id === "subsSw") { state.subs = e.target.checked; store("cl-subs", state.subs ? "1" : "0"); render(); }
   if (e.target.id === "stageSel" && state.open) moveTo(state.open, e.target.value);
 });

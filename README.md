@@ -634,7 +634,7 @@ ticket gets the `unparked` flag and its session resumes, told "Parked
 condition met: <reason>. Continue." No pass within `--max` (default 7d)
 ends it with `park-expired`, and the session stays stopped. Without
 `--until` nothing checks it. On the board, Park in the ticket popup does the
-same with a form. `unpark` (the board's Resume, `P` in the
+same with a form, and the Parked switch over the board hides parked tickets. `unpark` (the board's Resume, `P` in the
 chooser) ends it by hand and resumes the session; `--no-resume` (Cancel
 park) only ends it. Claude can park its own ticket from its session (the
 key may be left out); the session closes after the command answers.
@@ -909,7 +909,7 @@ needs no permission). Deleting the ticket deletes its images.
 per stage, each card with its key, title, session status and flags, in the
 same order as the web board's columns. It shows what the web board shows:
 hidden projects' tickets, sub-tickets and Done only when switched on (`H`,
-`S`, `D`). It re-reads
+`S`, `D`), and parked tickets unless switched off (`P`). It re-reads
 the board every second and keeps the cursor on its ticket as cards move. The
 operator's alert shows at the top right, as in the session list, and `o`
 opens the operator from the board too.

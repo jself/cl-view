@@ -54,6 +54,8 @@ pub const Options = struct {
     subs: bool = false,
     /// The tickets of hidden projects (`cl project hide`).
     hidden_projects: bool = false,
+    /// Parked tickets (`cl t park`).
+    parked: bool = true,
     /// Case-insensitive text in the key, title or body.
     search: []const u8 = "",
 };
@@ -79,6 +81,7 @@ pub fn shows(t: board.Ticket, projects: []const board.Project, o: Options) bool 
     if (!o.hidden_projects and projectHidden(projects, t.project)) return false;
     if (!o.subs and t.parent.len > 0) return false;
     if (!o.done and t.stage == .done) return false;
+    if (!o.parked and t.park != null) return false;
     if (o.search.len > 0) {
         for ([_][]const u8{ t.key, t.title, t.body }) |f| {
             if (std.ascii.indexOfIgnoreCase(f, o.search) != null) return true;
@@ -844,6 +847,7 @@ pub const View = struct {
             if (key.matches('D', .{}) or key.matches('d', .{ .shift = true })) return self.toggle(&self.opts.done, "Done column shown", "Done column hidden");
             if (key.matches('S', .{}) or key.matches('s', .{ .shift = true })) return self.toggle(&self.opts.subs, "sub-tickets shown", "sub-tickets hidden");
             if (key.matches('H', .{}) or key.matches('h', .{ .shift = true })) return self.toggle(&self.opts.hidden_projects, "hidden projects shown", "hidden projects hidden");
+            if (key.matches('P', .{}) or key.matches('p', .{ .shift = true })) return self.toggle(&self.opts.parked, "parked tickets shown", "parked tickets hidden");
             if (key.matches('/', .{})) {
                 self.prompt = .search;
                 return .{ .prompt = .{ .label = " search: ", .prefill = self.search.get() } };
@@ -1149,6 +1153,7 @@ pub const View = struct {
         if (!self.needs_open and self.needs.len > 0) try notes.appendSlice(a, " · N shows what needs you");
         if (self.opts.done) try notes.appendSlice(a, " · with Done");
         if (self.opts.subs) try notes.appendSlice(a, " · with sub-tickets");
+        if (!self.opts.parked) try notes.appendSlice(a, " · without parked (P)");
         if (hidden_n > 0) try notes.appendSlice(a, if (self.opts.hidden_projects) " · with hidden projects" else try std.fmt.allocPrint(a, " · {d} hidden project{s} (H)", .{ hidden_n, if (hidden_n == 1) "" else "s" }));
         for (self.projects) |p| if (p.paused) try notes.appendSlice(a, try std.fmt.allocPrint(a, " · {s} paused", .{p.name}));
         if (self.search.len > 0) try notes.appendSlice(a, try std.fmt.allocPrint(a, " · matching \"{s}\"", .{self.search.get()}));
@@ -1340,7 +1345,7 @@ pub const View = struct {
         return &.{
             "enter details",  "t session",        "n new ticket",       "a approve",       "A answer",
             "m move",         "</> stage back/on", "c note",            "s send to session", "o operator",
-            "tab needs you/board", "N fold needs you", "D done column",    "S sub-tickets",      "H hidden projects", "/ search",
+            "tab needs you/board", "N fold needs you", "D done column",    "S sub-tickets",      "H hidden projects", "P parked", "/ search",
             "h/j/k/l move",   "gg/G top/bottom",  "esc back to sessions",
         };
     }
@@ -1397,7 +1402,7 @@ fn testTicket(key: []const u8, stage: Stage, rank: i64) board.Ticket {
     };
 }
 
-test "columns: by stage in rank order; Done, sub-tickets and hidden projects only when asked" {
+test "columns: by stage in rank order; Done, sub-tickets and hidden projects only when asked, parked unless hidden" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -1425,6 +1430,10 @@ test "columns: by stage in rank order; Done, sub-tickets and hidden projects onl
     try testing.expectEqual(@as(usize, 7), all.len);
     try testing.expectEqualSlices(usize, &.{ 1, 5, 4, 0 }, all[2].cards);
     try testing.expectEqualSlices(usize, &.{2}, all[6].cards);
+
+    ts[0].park = .{ .reason = "PR", .at = 0 };
+    try testing.expectEqualSlices(usize, &.{ 1, 0 }, (try columns(a, &ts, &projects, .{}))[2].cards);
+    try testing.expectEqualSlices(usize, &.{1}, (try columns(a, &ts, &projects, .{ .parked = false }))[2].cards);
 
 
     const found = try columns(a, &ts, &projects, .{ .search = "qa-2" });
