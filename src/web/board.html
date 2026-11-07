@@ -976,7 +976,8 @@ function openProject(name) {
       <label>Directory<input type="text" name="dir" class="mono" required value="${esc(p?.dir || "")}" placeholder="~/devel/project" autocomplete="off"></label>
       <div class="row2"><label>New tickets run as<select name="mode"><option value="queue" ${p?.mode !== "worktree" ? "selected" : ""}>Queue in a session</option><option value="worktree" ${p?.mode === "worktree" ? "selected" : ""}>Their own worktrees</option></select></label>
         <label>Worktree slots<input type="number" name="slots" min="1" value="${p ? p.slots : ""}" placeholder="3"></label></div>
-      <label>Profile<select name="profile"><option value="">Default</option>${profiles.map((x) => `<option ${x === p?.profile ? "selected" : ""}>${esc(x)}</option>`).join("")}</select></label>
+      <div class="row2"><label>Profile<select name="profile"><option value="">Default</option>${profiles.map((x) => `<option ${x === p?.profile ? "selected" : ""}>${esc(x)}</option>`).join("")}</select></label>
+        <label>Target branch<input type="text" name="onto" class="mono" value="${esc(p?.onto || "")}" placeholder="Trunk" autocomplete="off" title="A jj bookmark or git branch its tickets start from and merge into instead of trunk; a ticket's own target wins. Merges into it don't run the after-merge steps"></label></div>
       ${p ? `<p class="muted" style="margin:0;font-size:calc(12.5 * var(--u))">A new prefix applies to new tickets; existing keys stay as they are.</p>` : ""}
       <p class="formerr" id="projErr" role="alert" hidden></p>
       <div class="actions"><button type="submit" class="btn primary">${p ? "Save" : "Add project"}</button></div></form>`;
@@ -984,7 +985,7 @@ function openProject(name) {
 }
 async function submitProject(form) {
   const f = Object.fromEntries(new FormData(form)); const old = form.dataset.name;
-  const body = { name: f.name.trim(), dir: f.dir.trim(), prefix: f.prefix.trim().toUpperCase(), mode: f.mode, profile: f.profile };
+  const body = { name: f.name.trim(), dir: f.dir.trim(), prefix: f.prefix.trim().toUpperCase(), mode: f.mode, profile: f.profile, onto: f.onto.trim() };
   if (f.slots !== "") body.slots = Number(f.slots);
   // An unchanged directory isn't sent: one that's gone since would refuse the save.
   if (old && body.dir === state.data.projects.find((x) => x.name === old)?.dir) delete body.dir;
@@ -1200,7 +1201,7 @@ function renderDetailInner() {
         <select id="stageSel">${STAGES.map((s) => `<option value="${s}" ${s === t.stage ? "selected" : ""}>${STAGE_NAME[s]}</option>`).join("")}</select></label>
       <button type="button" class="btn" id="closeDlg">Close</button></div>
     <h1>${esc(t.title)}</h1>
-    <div class="facts">${status}${ws}${t.tmux ? `<span class="mono">${esc(t.tmux)}</span>` : ""}
+    <div class="facts">${status}${ws}${t.onto ? `<span class="mono" title="It starts from this branch and merges into it, not trunk${t.onto_own ? "" : " (the project's target)"}">onto ${esc(t.onto)}</span>` : ""}${t.tmux ? `<span class="mono">${esc(t.tmux)}</span>` : ""}
       ${t.round > 1 ? `<span>round ${t.round}</span>` : ""}${t.plan ? `<span>plan first${t.skill ? " · " + esc(t.skill) : ""}</span>` : ""}${parent}</div>
     <div class="actions">${acts.join("")}</div>${parkBox(t)}${depBox(d)}
     <div class="tabs" role="tablist">${tabs.map(([k, l]) => `<button type="button" role="tab" class="${state.tab === k ? "on" : ""}" aria-selected="${state.tab === k}" data-tab="${k}">${esc(l)}</button>`).join("")}</div>
@@ -1271,7 +1272,8 @@ function landingTab(d) {
   const t = d.ticket;
   return t.flags.filter((x) => x.kind === "merge-failed" || x.kind === "unmerged").map((f) => {
     const [head, ...rest] = f.detail.split("\n");
-    const merge = t.change ? `<button type="button" class="btn primary" data-merge-now="1" title="cl merges its change into trunk now (conflicts come back here)">Merge it now</button>` : "";
+    const into = d.main_branch || t.onto || "trunk";
+    const merge = t.change ? `<button type="button" class="btn primary" data-merge-now="1" title="cl merges its change into ${esc(into)} now (conflicts come back here)">Merge into ${esc(into)}</button>` : "";
     return `<div class="q"><span class="muted" style="font-size:calc(12 * var(--u))">${f.kind === "unmerged" ? "Done, but its work isn't merged" : "Its merge didn't land"}: ${esc(head)}</span>
       ${rest.length ? `<pre class="term">${esc(rest.join("\n"))}</pre>` : ""}
       <div class="actions">${merge}<button type="button" class="btn" data-unflag="${esc(f.kind)}" title="Remove this alert for good (you meant it not to be merged, or you dealt with it); the ticket doesn't change">Dismiss</button></div></div>`;
@@ -1446,6 +1448,7 @@ function detailsTab(d) {
     <div class="row2"><label>Plan first<select name="plan"><option value="0">No</option><option value="1" ${t.plan ? "selected" : ""}>Yes</option></select></label>
       <label title="An umbrella is only a container for sub-tickets: it never runs. Queued, it moves to Running when a sub-ticket starts and to Done when they all are">Kind<select name="umbrella"><option value="0">Ticket</option><option value="1" ${t.umbrella ? "selected" : ""}>Umbrella for sub-tickets</option></select></label>
       <label>Planning skill<input type="text" name="skill" value="${esc(t.skill)}" placeholder="grilling, wayfinder"></label></div>
+    <label>Target branch<input type="text" name="onto" class="mono" value="${esc(t.onto_own)}" autocomplete="off" placeholder="${t.onto && !t.onto_own ? "The project's: " + esc(t.onto) : "Trunk"}" title="A jj bookmark or git branch it starts from and merges into instead of trunk, like a long-lived feature branch. Empty: the project's target, else trunk"></label>
     <div class="actions"><button type="submit" class="btn primary" value="close">Save and close</button>
       <button type="submit" class="btn">Save</button>
       ${t.worktree && t.stage === "done" ? `<button type="button" class="btn" data-act="cleanup">Remove worktree</button>` : ""}
@@ -1556,7 +1559,8 @@ function openNew(parentKey, pick = {}) {
         <label>Planning skill (plan first)<input type="text" name="skill" placeholder="grilling, wayfinder"></label></div>
       <div class="row2"><label>Profile<select name="profile"><option value="">Project's</option>${d.profiles.map((x) => `<option>${esc(x)}</option>`).join("")}</select></label>
         <label title="An umbrella is only a container for sub-tickets: it never runs. Queued, it moves to Running when a sub-ticket starts and to Done when they all are">Kind<select name="umbrella"><option value="0">Ticket</option><option value="1">Umbrella for sub-tickets</option></select></label></div>
-      <div class="row2"><label>Sub-ticket of<select name="parent"><option value="">None</option>${d.tickets.filter((r) => r.ticket.stage !== "done").map((r) => `<option value="${esc(r.ticket.key)}" ${r.ticket.key === parentKey ? "selected" : ""}>${esc(r.ticket.key)} ${esc(r.ticket.title)}</option>`).join("")}</select></label></div>
+      <div class="row2"><label>Sub-ticket of<select name="parent"><option value="">None</option>${d.tickets.filter((r) => r.ticket.stage !== "done").map((r) => `<option value="${esc(r.ticket.key)}" ${r.ticket.key === parentKey ? "selected" : ""}>${esc(r.ticket.key)} ${esc(r.ticket.title)}</option>`).join("")}</select></label>
+        <label>Target branch<input type="text" name="onto" class="mono" autocomplete="off" placeholder="${esc(newOntoHint(d, proj, parentKey))}" title="A jj bookmark or git branch it starts from and merges into instead of trunk, like a long-lived feature branch. Empty: the parent's, else the project's, else trunk"></label></div>
       <div class="actions"><button type="submit" class="btn primary">Create</button></div></form>`;
   const form = document.getElementById("newForm");
   for (const k of NEW_KEEP) {
@@ -1568,14 +1572,26 @@ function openNew(parentKey, pick = {}) {
   }
   // Only backlog, planning and queued are choices under When; other columns keep the default.
   if (pick.when && [...form.elements.when.options].some((o) => o.value === pick.when)) form.elements.when.value = pick.when;
+  // The empty Target branch's hint follows the chosen project and parent.
+  form.addEventListener("change", (e) => {
+    if (e.target.name === "project" || e.target.name === "parent") form.elements.onto.placeholder = newOntoHint(d, form.elements.project?.value || proj, form.elements.parent.value);
+  });
   document.getElementById("newDlg").showModal();
+}
+// What an empty Target branch means for a new ticket: its parent's target,
+// else the project's, else trunk.
+function newOntoHint(d, proj, parentKey) {
+  const parent = parentKey ? d.tickets.find((r) => r.ticket.key === parentKey)?.ticket : null;
+  if (parent?.onto_own) return "The parent's: " + parent.onto_own;
+  const p = d.projects.find((x) => x.name === (parent?.project || proj));
+  return p?.onto ? "The project's: " + p.onto : "Trunk";
 }
 async function submitNew(form) {
   const f = Object.fromEntries(new FormData(form));
   try {
     if (f.pname) { await api("project", { name: f.pname, dir: f.pdir, mode: f.mode }); f.project = f.pname; }
     const r = await api("ticket", { project: f.project, title: f.title, body: f.body, mode: f.mode, target: f.target || undefined,
-      stage: f.when, plan: f.when === "planning", skill: f.skill || undefined, profile: f.profile || undefined, parent: f.parent || undefined, umbrella: f.umbrella === "1" });
+      stage: f.when, plan: f.when === "planning", skill: f.skill || undefined, profile: f.profile || undefined, parent: f.parent || undefined, umbrella: f.umbrella === "1", onto: f.onto?.trim() || undefined });
     store("cl-new", JSON.stringify({ project: f.project, ...Object.fromEntries(NEW_KEEP.map((k) => [k, f[k] ?? ""])) }));
     document.getElementById("newDlg").close(); toast(`${r.key} created`); await refresh();
   } catch (e) { toast(e.message, true); }
@@ -1719,7 +1735,7 @@ async function chooseFinish(key) {
       <div style="display:flex;gap:calc(8 * var(--u))"><input type="text" id="finishTell" style="flex:1;min-width:0" aria-label="What Claude should do first" placeholder="Tell Claude what to do: …" value="${esc(custom)}">
         <button type="button" class="btn ${custom ? "primary" : ""}" data-finish="tell">Tell Claude</button></div>
       <button type="button" class="btn" data-finish="">Cancel</button></div>
-    <p class="muted" style="margin:0;font-size:calc(12.5 * var(--u))">${t.change ? "Merge: cl rebases its jj change onto " + esc(main) + " and moves " + esc(main) + " to it; Claude settles any conflicts and restarts what runs from the checkout. PR: Claude pushes it and opens the PR." : "Merge and PR ask Claude to do it in the ticket's session."} Tell Claude: it gets your words in its session instead, for anything else. It stays where it is, marked Finishing, until Claude is through; then it goes to Done and the session closes.</p>`;
+    <p class="muted" style="margin:0;font-size:calc(12.5 * var(--u))">${t.change ? "Merge: cl rebases its jj change onto " + esc(main) + " and moves " + esc(main) + " to it; Claude settles any conflicts" + (t.onto ? " (" + esc(t.onto) + " isn't trunk, so nothing is rebuilt or restarted)" : " and restarts what runs from the checkout") + ". PR: Claude pushes it and opens the PR." : "Merge and PR ask Claude to do it in the ticket's session."} Tell Claude: it gets your words in its session instead, for anything else. It stays where it is, marked Finishing, until Claude is through; then it goes to Done and the session closes.</p>`;
   dlg.returnValue = ""; dlg.dataset.tell = ""; dlg.showModal();
   return new Promise((res) => { dlg.onclose = () => res(dlg.returnValue || null); });
 }
@@ -2296,7 +2312,7 @@ async function onSubmit(e) {
   if (e.target.id === "editForm") {
     const f = Object.fromEntries(new FormData(e.target));
     const was = state.detail?.ticket?.mode;
-    let r; try { r = await act(state.open, "edit", { title: f.title, body: f.body, project: f.project, mode: f.mode, target: f.target, plan: f.plan === "1", umbrella: f.umbrella === "1", skill: f.skill }); } catch { return; }
+    let r; try { r = await act(state.open, "edit", { title: f.title, body: f.body, project: f.project, mode: f.mode, target: f.target, plan: f.plan === "1", umbrella: f.umbrella === "1", skill: f.skill, onto: f.onto.trim() }); } catch { return; }
     toast(r?.result && was && was !== f.mode ? "Saved. " + relocatedMsg(r.result, f.mode) : "Saved");
     if (e.submitter?.value === "close") document.getElementById("ticketDlg").close();
   }

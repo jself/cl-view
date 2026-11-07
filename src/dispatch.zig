@@ -114,6 +114,16 @@ pub fn prompt(a: std.mem.Allocator, t: board.Ticket, notes: []const board.Commen
         \\  don't commit (git or jj), start other changes or switch branches. When it's done, cl merges it.
         \\
     , .{ t.change[0..@min(t.change.len, 12)], if (t.branch.len > 0) ", bookmark " else "", t.branch });
+    if (t.onto.len > 0) try w.print(
+        \\- This ticket targets the branch {s}, not trunk: {s}. Don't merge it into trunk
+        \\  (master/main) or base it there; when {s} goes into trunk is my decision, not this ticket's.
+        \\
+    , .{ t.onto, if (t.change.len > 0)
+        try std.fmt.allocPrint(a, "its change is on top of {s}, and cl merges it into {s}", .{ t.onto, t.onto })
+    else if (t.mode == .worktree)
+        try std.fmt.allocPrint(a, "its branch starts from {s} and merges into it", .{t.onto})
+    else
+        try std.fmt.allocPrint(a, "do the work on top of {s} (check it out if the checkout isn't on it) and it merges into {s}", .{ t.onto, t.onto }), t.onto });
     return aw.written();
 }
 
@@ -409,7 +419,8 @@ fn startPlanning(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocato
     if (!try board.claimStart(db, t.id)) return error.AlreadyStarted;
     errdefer board.releaseStart(db, t.id) catch {};
     _ = worktree.ensureJj(ctx, a, p.dir);
-    const trunk = worktree.trunkBookmark(ctx, a, p.dir);
+    // On its target: the code it will be built on.
+    const trunk = worktree.target(ctx, a, p.dir, t.onto) orelse if (t.onto.len > 0) t.onto else null;
     const path = try worktree.planPath(ctx, a, cfg, p.name, t.key);
     var dir = path;
     var where: PlanDir = .{ .trunk = trunk orelse "HEAD" };
@@ -571,7 +582,7 @@ fn relocateMode(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator
     const view = try View.read(ctx, a, cfg);
     const p = try board.getProject(db, a, t.project);
     const live = t.tmux.len > 0 and view.alive(t.tmux);
-    const trunk = worktree.trunkBookmark(ctx, a, p.dir);
+    const trunk = worktree.target(ctx, a, p.dir, t.onto);
     const own = trunk != null and t.change.len > 0 and worktree.changeState(ctx, a, p.dir, t.change, trunk.?) == .open;
     if (!own) {
         // Work under way with nothing to carry it in: it would be left behind.
@@ -671,11 +682,12 @@ fn startIn(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: 
     // Projects added before jj was set up on add get it on their first start.
     if (worktree.ensureJj(ctx, a, p.dir)) try board.logEvent(ctx, db, t.id, "jj init", p.dir);
     // What gutter will diff against: the repo as it is now.
-    const base = worktree.baseRev(ctx, a, p.dir);
+    const base = worktree.baseRev(ctx, a, p.dir, t.onto);
     try board.setBase(db, t.id, base);
-    // jj: the ticket's own change, on top of trunk. A queue ticket takes the
-    // project's checkout over only when it gets the session to itself.
-    const trunk = worktree.trunkBookmark(ctx, a, p.dir);
+    // jj: the ticket's own change, on top of trunk (or its target branch). A
+    // queue ticket takes the project's checkout over only when it gets the
+    // session to itself.
+    const trunk = worktree.target(ctx, a, p.dir, t.onto);
     if (trunk != null) worktree.excludeClFiles(ctx, a, p.dir);
     const desc = try std.fmt.allocPrint(a, "{s}: {s}", .{ t.key, t.title });
     var tc = t;
@@ -689,7 +701,8 @@ fn startIn(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: 
             wt = (if (own)
                 worktree.createOn(ctx, a, cfg, p.dir, p.name, t.key, t.title, t.change, t.branch, trunk.?)
             else
-                worktree.create(ctx, a, cfg, p.dir, p.name, t.key, t.title, trunk orelse "", desc)) catch |err| {
+                // git: the branch starts from its target, else the checkout's HEAD.
+                worktree.create(ctx, a, cfg, p.dir, p.name, t.key, t.title, trunk orelse t.onto, desc)) catch |err| {
                 try board.logEvent(ctx, db, t.id, "start failed", worktree.lastError());
                 return if (err == error.OutOfMemory) err else error.WorktreeFailed;
             };
@@ -1773,4 +1786,65 @@ test "ordered sub-tickets in a worktree project start one at a time" {
     try std.testing.expectEqual(@as(usize, 2), t4.blocked_by.len);
     try std.testing.expectEqualStrings(k2, t4.blocked_by[0].key);
     try std.testing.expectEqualStrings(kx, t4.blocked_by[1].key);
+}
+
+test "a ticket with a target branch starts on it, queued or in a worktree, and its session is told" {
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp", .tmux_blocked = true };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const sh = struct {
+        fn run(c: Ctx, al: std.mem.Allocator, argv: []const []const u8) ![]const u8 {
+            const r = try std.process.run(al, c.io, .{ .argv = argv });
+            if (r.term != .exited or r.term.exited != 0) return error.CommandFailed;
+            return std.mem.trim(u8, r.stdout, " \n");
+        }
+    }.run;
+    _ = sh(ctx, a, &.{ "jj", "--version" }) catch return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = try tmp.dir.realPathFileAlloc(ctx.io, ".", a);
+    const repo = try std.fmt.allocPrint(a, "{s}/repo", .{base});
+    _ = sh(ctx, a, &.{ "git", "init", "-q", "-b", "master", repo }) catch return error.SkipZigTest;
+    const git = [_][]const u8{ "git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t" };
+    _ = try sh(ctx, a, &(git ++ [_][]const u8{ "commit", "-q", "--allow-empty", "-m", "init" }));
+    _ = try sh(ctx, a, &(git ++ [_][]const u8{ "checkout", "-q", "-b", "feature/venues" }));
+    _ = try sh(ctx, a, &(git ++ [_][]const u8{ "commit", "-q", "--allow-empty", "-m", "venues" }));
+    _ = try sh(ctx, a, &(git ++ [_][]const u8{ "checkout", "-q", "master" }));
+    try std.testing.expect(worktree.ensureJj(ctx, a, repo));
+    const feature_at = try sh(ctx, a, &.{ "git", "-C", repo, "rev-parse", "feature/venues" });
+    const parentOf = struct {
+        fn of(c: Ctx, al: std.mem.Allocator, dir: []const u8, change: []const u8) ![]const u8 {
+            return sh(c, al, &.{ "jj", "-R", dir, "log", "--no-graph", "-r", try std.fmt.allocPrint(al, "{s}-", .{change}), "-T", "commit_id" });
+        }
+    }.of;
+
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "qa", .dir = repo });
+    var cfg: config.Config = .{ .profiles = &.{}, .default = "", .operator = "" };
+    cfg.board.worktrees = try std.fmt.allocPrint(a, "{s}/wt", .{base});
+
+    // Queued: the project's checkout goes onto a new change on the feature branch.
+    const kq = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Queued", .onto = "feature/venues" });
+    const tq = try board.getTicket(db, a, kq);
+    const c = (try ticketChange(ctx, db, a, repo, tq, worktree.target(ctx, a, repo, tq.onto).?, "QA-1: Queued")).?;
+    try std.testing.expectEqualStrings(feature_at, try parentOf(ctx, a, repo, c.change.id));
+
+    // A worktree: its workspace's change is on the feature branch too.
+    const kw = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Own", .mode = .worktree, .onto = "feature/venues" });
+    const tw = try board.getTicket(db, a, kw);
+    const wt = try worktree.create(ctx, a, cfg, repo, "qa", kw, tw.title, worktree.target(ctx, a, repo, tw.onto) orelse tw.onto, "QA-2: Own");
+    try std.testing.expectEqualStrings(feature_at, try parentOf(ctx, a, repo, wt.change));
+
+    // Its session hears where the work goes, and not to take it to trunk.
+    var t = tq;
+    t.change = c.change.id;
+    const text = try prompt(a, t, &.{}, null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "targets the branch feature/venues, not trunk") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "cl merges it into feature/venues") != null);
+    // A ticket on trunk hears nothing of the kind.
+    t.onto = "";
+    try std.testing.expect(std.mem.indexOf(u8, try prompt(a, t, &.{}, null), "targets the branch") == null);
 }

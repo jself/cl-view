@@ -49,7 +49,7 @@ pub const flag_testing = "testing"; // try it out
 pub const flag_conflict = "conflict"; // merging it back conflicts
 pub const flag_after_merge = "after-merge"; // the project's after-merge command failed
 pub const flag_merge_failed = "merge-failed"; // approved, but its merge (or PR) didn't land
-pub const flag_unmerged = "unmerged"; // Done, but its branch's work isn't on trunk
+pub const flag_unmerged = "unmerged"; // Done, but its branch's work isn't on its target (trunk, or Ticket.onto)
 pub const flag_unparked = "unparked"; // its park's condition came true; it resumed
 pub const flag_park_expired = "park-expired"; // its park's check never passed in time
 pub const flag_idle = "idle"; // Claude ended its turn; nothing else asks, so it waits on you
@@ -83,6 +83,10 @@ pub const Project = struct {
     /// ticket, planning session or park check's resume. What already runs
     /// goes on; what you start by hand starts.
     paused: bool = false,
+    /// The branch (jj bookmark or git branch) its tickets start from and
+    /// merge into, when it isn't trunk; "" for trunk. A ticket's own
+    /// `Ticket.onto` wins.
+    onto: []const u8 = "",
 };
 
 pub const Flag = struct {
@@ -163,6 +167,13 @@ pub const Ticket = struct {
     worktree: []const u8,
     /// Its branch (git) or bookmark (jj).
     branch: []const u8,
+    /// The branch it starts from and merges into (a jj bookmark or git
+    /// branch, like a long-lived feature branch), "" for trunk: its own
+    /// (`onto_own`), else its project's (`Project.onto`).
+    onto: []const u8 = "",
+    /// The target set on the ticket itself (`cl ticket new/edit --onto`,
+    /// or its parent's when it was made), "" to go by the project's.
+    onto_own: []const u8 = "",
     /// jj: the change its work goes in (change ids survive rewrites), "" for
     /// none (git, or a sub-ticket going on in its parent's change).
     change: []const u8 = "",
@@ -266,6 +277,7 @@ const schema =
     \\  after_merge_claude TEXT NOT NULL DEFAULT '',
     \\  hidden INTEGER NOT NULL DEFAULT 0,
     \\  paused INTEGER NOT NULL DEFAULT 0,
+    \\  onto TEXT NOT NULL DEFAULT '',
     \\  planners INTEGER NOT NULL DEFAULT
 ++ std.fmt.comptimePrint(" {d}\n", .{default_planners}) ++
     \\);
@@ -301,6 +313,7 @@ const schema =
     \\  asking TEXT NOT NULL DEFAULT '',
     \\  parallel INTEGER NOT NULL DEFAULT 0,
     \\  umbrella INTEGER NOT NULL DEFAULT 0,
+    \\  onto TEXT NOT NULL DEFAULT '',
     \\  created INTEGER NOT NULL,
     \\  updated INTEGER NOT NULL
     \\);
@@ -440,6 +453,9 @@ pub fn migrate(db: Db) !void {
             \\  AND EXISTS (SELECT 1 FROM tickets c WHERE c.parent = tickets.id)
             \\  AND NOT EXISTS (SELECT 1 FROM events e WHERE e.ticket = tickets.id AND e.kind = 'started')
         );
+        // Target branches other than trunk.
+        _ = try addColumn(db, "projects", "onto", "TEXT NOT NULL DEFAULT ''");
+        _ = try addColumn(db, "tickets", "onto", "TEXT NOT NULL DEFAULT ''");
     }
     if (have >= version) return;
     // Version 1 had no sub-tickets, version 2 no planning skill.
@@ -515,6 +531,44 @@ test "feedback on a ready plan keeps it ready to approve" {
     try std.testing.expectEqual(Stage.queued, (try getTicket(db, a, k)).stage);
 }
 
+test "a ticket's target branch: its own, else its parent's when made, else the project's" {
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp" };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try Db.open(":memory:");
+    defer db.close();
+    try migrate(db);
+    try addProject(db, .{ .name = "qa", .dir = "/x/qa" });
+    const plain = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Plain" });
+    try std.testing.expectEqualStrings("", (try getTicket(db, a, plain)).onto);
+    const parent = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Venues", .onto = "feature/venues" });
+    const sub = try createTicket(ctx, db, a, .{ .parent = parent, .title = "Part" });
+    const st = try getTicket(db, a, sub);
+    try std.testing.expectEqualStrings("feature/venues", st.onto);
+    try std.testing.expectEqualStrings("feature/venues", st.onto_own);
+    // The project's target, for tickets without one of their own.
+    try updateProject(db, "qa", .{ .name = "", .dir = "", .onto = "develop" });
+    try std.testing.expectEqualStrings("develop", (try getProject(db, a, "qa")).onto);
+    const p = try getTicket(db, a, plain);
+    try std.testing.expectEqualStrings("develop", p.onto);
+    try std.testing.expectEqualStrings("", p.onto_own);
+    try std.testing.expectEqualStrings("feature/venues", (try getTicket(db, a, sub)).onto);
+    // Cleared, it goes by the project's again.
+    try updateTicket(ctx, db, a, sub, .{ .onto = "" });
+    try std.testing.expectEqualStrings("develop", (try getTicket(db, a, sub)).onto);
+}
+
+test "migrate: a board from before target branches gets the onto columns" {
+    const db = try Db.open(":memory:");
+    defer db.close();
+    try migrate(db);
+    try db.execMulti("ALTER TABLE tickets DROP COLUMN onto; ALTER TABLE projects DROP COLUMN onto");
+    try migrate(db);
+    try std.testing.expect((try db.int("SELECT 1 FROM pragma_table_info('tickets') WHERE name = 'onto'", .{})) != null);
+    try std.testing.expect((try db.int("SELECT 1 FROM pragma_table_info('projects') WHERE name = 'onto'", .{})) != null);
+}
+
 test "migrate: a board from before planning sessions gets the plan and planners columns" {
     const db = try Db.open(":memory:");
     defer db.close();
@@ -553,6 +607,7 @@ pub const ProjectInput = struct {
     after_merge: ?[]const u8 = null,
     after_merge_claude: ?[]const u8 = null,
     planners: ?i64 = null,
+    onto: ?[]const u8 = null,
 };
 
 /// A key prefix from a project name: a short first word as is (`qa-tool` →
@@ -614,8 +669,8 @@ pub fn addProject(db: Db, in: ProjectInput) Error!void {
     const prefix = in.prefix orelse defaultPrefix(&buf, in.name);
     if (!validPrefix(prefix)) return error.BadInput;
     if (try db.int("SELECT 1 FROM projects WHERE name = ?1 OR prefix = ?2", .{ in.name, prefix }) != null) return error.Exists;
-    try db.exec("INSERT INTO projects (name, dir, prefix, slots, mode, profile, after_merge, after_merge_claude, planners) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)", .{
-        in.name, in.dir, prefix, in.slots orelse default_slots, @tagName(in.mode orelse .queue), in.profile orelse "", in.after_merge orelse "", in.after_merge_claude orelse "", in.planners orelse default_planners,
+    try db.exec("INSERT INTO projects (name, dir, prefix, slots, mode, profile, after_merge, after_merge_claude, planners, onto) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)", .{
+        in.name, in.dir, prefix, in.slots orelse default_slots, @tagName(in.mode orelse .queue), in.profile orelse "", in.after_merge orelse "", in.after_merge_claude orelse "", in.planners orelse default_planners, in.onto orelse "",
     });
 }
 
@@ -634,6 +689,7 @@ pub fn updateProject(db: Db, name: []const u8, in: ProjectInput) Error!void {
     if (in.profile) |p| try db.exec("UPDATE projects SET profile = ?2 WHERE name = ?1", .{ name, p });
     if (in.after_merge) |c| try db.exec("UPDATE projects SET after_merge = ?2 WHERE name = ?1", .{ name, c });
     if (in.after_merge_claude) |c| try db.exec("UPDATE projects SET after_merge_claude = ?2 WHERE name = ?1", .{ name, c });
+    if (in.onto) |o| try db.exec("UPDATE projects SET onto = ?2 WHERE name = ?1", .{ name, o });
     // Renaming last, so the lookups above still match.
     if (in.name.len > 0 and !std.mem.eql(u8, in.name, name)) {
         if (try db.int("SELECT 1 FROM projects WHERE name = ?1", .{in.name}) != null) return error.Exists;
@@ -670,7 +726,7 @@ pub fn removeProject(db: Db, name: []const u8) Error!void {
     try db.exec("DELETE FROM projects WHERE name = ?1", .{name});
 }
 
-const project_cols = "name, dir, prefix, slots, mode, profile, after_merge, after_merge_claude, hidden, planners, paused";
+const project_cols = "name, dir, prefix, slots, mode, profile, after_merge, after_merge_claude, hidden, planners, paused, onto";
 
 fn readProject(st: sqlite.Stmt, a: std.mem.Allocator) !Project {
     return .{
@@ -685,6 +741,7 @@ fn readProject(st: sqlite.Stmt, a: std.mem.Allocator) !Project {
         .hidden = st.int(8) != 0,
         .planners = st.int(9),
         .paused = st.int(10) != 0,
+        .onto = try st.dupe(a, 11),
     };
 }
 
@@ -797,6 +854,9 @@ pub const TicketInput = struct {
     skill: ?[]const u8 = null,
     /// An umbrella (see `Ticket.umbrella`).
     umbrella: ?bool = null,
+    /// Target branch (`Ticket.onto_own`); "" for the project's. A new
+    /// sub-ticket without one takes its parent's.
+    onto: ?[]const u8 = null,
     /// createTicket: the body to store once the key is known, or null to
     /// keep it (images pasted before the ticket had a key move to its own
     /// folder). Called before the ticket is visible, so nothing starts it
@@ -831,9 +891,9 @@ pub fn createTicket(ctx: Ctx, db: Db, a: std.mem.Allocator, in: TicketInput) Err
     };
     const t = now(ctx);
     try db.exec(
-        \\INSERT INTO tickets (key, project, title, body, stage, mode, plan, target, profile, parent, skill, created, updated, rank, umbrella)
-        \\VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, (SELECT coalesce(max(rank), 0) + ?13 FROM tickets), ?14)
-    , .{ key, p.name, title, body, @tagName(stage), @tagName(in.mode orelse p.mode), plan, in.target orelse "", in.profile orelse p.profile, if (parent) |pt| pt.id else null, in.skill orelse "", t, rank_gap, in.umbrella orelse false });
+        \\INSERT INTO tickets (key, project, title, body, stage, mode, plan, target, profile, parent, skill, created, updated, rank, umbrella, onto)
+        \\VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, (SELECT coalesce(max(rank), 0) + ?13 FROM tickets), ?14, ?15)
+    , .{ key, p.name, title, body, @tagName(stage), @tagName(in.mode orelse p.mode), plan, in.target orelse "", in.profile orelse p.profile, if (parent) |pt| pt.id else null, in.skill orelse "", t, rank_gap, in.umbrella orelse false, in.onto orelse if (parent) |pt| pt.onto_own else "" });
     const id = db.lastId();
     try logEvent(ctx, db, id, "created", @tagName(stage));
     if (parent) |pt| {
@@ -848,7 +908,8 @@ pub fn createTicket(ctx: Ctx, db: Db, a: std.mem.Allocator, in: TicketInput) Err
 const ticket_cols = "t.id, t.key, t.project, t.title, t.body, t.stage, t.mode, t.plan, t.target, t.worktree, t.branch, t.profile, t.tmux, t.session_id, t.summary, t.round, t.created, t.updated, " ++
     "coalesce((SELECT p.key FROM tickets p WHERE p.id = t.parent), ''), (SELECT count(*) FROM tickets c WHERE c.parent = t.id), t.skill, t.base, t.finishing, t.change_id, t.rank, t.killed, t.test_plan, t.test_progress, t.custom_close, t.plan_md, t.review_guide, t.asking, t.parallel, " ++
     "EXISTS (SELECT 1 FROM events e WHERE e.ticket = t.id AND e.kind = 'started'), " ++
-    "(SELECT count(*) FROM tickets c WHERE c.parent = t.id AND c.stage = 'done'), t.umbrella";
+    "(SELECT count(*) FROM tickets c WHERE c.parent = t.id AND c.stage = 'done'), t.umbrella, " ++
+    "t.onto, coalesce((SELECT p.onto FROM projects p WHERE p.name = t.project), '')";
 
 fn readTicket(st: sqlite.Stmt, a: std.mem.Allocator) !Ticket {
     return .{
@@ -888,6 +949,8 @@ fn readTicket(st: sqlite.Stmt, a: std.mem.Allocator) !Ticket {
         .started = st.int(33) != 0,
         .children_done = st.int(34),
         .umbrella = st.int(35) != 0,
+        .onto_own = try st.dupe(a, 36),
+        .onto = if (st.text(36).len > 0) try st.dupe(a, 36) else try st.dupe(a, 37),
     };
 }
 
@@ -1058,6 +1121,7 @@ pub fn updateTicket(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, in:
     if (in.profile) |v| try db.exec("UPDATE tickets SET profile = ?2 WHERE id = ?1", .{ t.id, v });
     if (in.skill) |v| try db.exec("UPDATE tickets SET skill = ?2 WHERE id = ?1", .{ t.id, v });
     if (in.umbrella) |v| try db.exec("UPDATE tickets SET umbrella = ?2 WHERE id = ?1", .{ t.id, v });
+    if (in.onto) |v| try db.exec("UPDATE tickets SET onto = ?2 WHERE id = ?1", .{ t.id, v });
     if (in.project.len > 0 and !std.mem.eql(u8, in.project, t.project)) {
         _ = try getProject(db, a, in.project);
         try db.exec("UPDATE tickets SET project = ?2 WHERE id = ?1", .{ t.id, in.project });

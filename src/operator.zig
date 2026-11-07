@@ -176,6 +176,8 @@ const tickets_skill =
     \\     --parent <key>       a sub-ticket; the project may be left out. It runs after the
     \\                          sub-tickets created before it (see Roadmaps below)
     \\     --after <key,...>    wait until these tickets are done before starting
+    \\     --onto <branch>      it belongs on that branch (jj bookmark or git branch), not
+    \\                          trunk: see Feature branches below
     \\     --stage queued       start as soon as a slot or session frees up; without it
     \\                          the ticket waits in backlog until someone queues it
     \\     --profile <name>     the Claude profile for its session
@@ -210,6 +212,22 @@ const tickets_skill =
     \\- `cl ticket show <key>` says what it waits on and what it blocks (`--json`: blocked_by,
     \\  blocks). A queued ticket waiting on others isn't stuck: don't alert about it or start
     \\  it by hand (`cl ticket start` ignores what it waits on) unless the human asks.
+    \\
+    \\## Feature branches
+    \\
+    \\Work that belongs on a long-lived branch rather than trunk (master/main) targets it:
+    \\`--onto <branch>` on new or edit (`--onto ""` goes back to the default), or for a whole
+    \\project `cl project set <name> --onto <branch>`. A sub-ticket takes its parent's, a ticket
+    \\without one the project's. Its session starts on that branch, Merge and PR go into it,
+    \\the after-merge command and steps don't run (they are for trunk), and the Done check
+    \\flags it only when its work isn't on that branch. Use this rather than telling Claude in
+    \\the body to rebase onto the branch. Whenever the human names a branch for the work
+    \\(build it on feature/x, base it on develop, merge it into release-2, it's for the
+    \\venues branch), that is --onto: check it exists (`jj bookmark list` or `git branch` in
+    \\the project's directory) and ask if it doesn't. A ticket for a project with a default
+    \\(`cl project list --json`: onto) goes there unless they say otherwise. When the branch
+    \\itself goes into trunk is the human's decision: don't make a ticket for that unless
+    \\they ask.
     \\
     \\## Reading the board
     \\
@@ -301,18 +319,86 @@ pub const name = launch.operator_name;
 
 /// Return the operator's tmux name, creating the session if it is not running.
 pub fn ensure(ctx: Ctx, cfg: config.Config) ![]const u8 {
+    return (try ensureNoting(ctx, cfg)).name;
+}
+
+const Ensured = struct {
+    name: []const u8,
+    /// The operator's directory (`skillNoted` takes it).
+    dir: []const u8,
+    /// The cl-tickets skill on disk was another version (cl was upgraded):
+    /// the operator's conversation, which goes on across restarts, may hold
+    /// the old one.
+    skill_changed: bool,
+};
+
+/// What goes before a message to the operator after its skill changed, so
+/// it reads the new one instead of going by the copy in its conversation.
+pub const skill_changed_note = "(cl was updated and the cl-tickets skill changed since you last loaded it: load it again before acting on this.)\n\n";
+
+/// `ensure`, also saying whether the skill had to be rewritten.
+fn ensureNoting(ctx: Ctx, cfg: config.Config) !Ensured {
     var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const dir = try launch.operatorDir(ctx, ctx.perm);
-    const skill_dir = try std.fmt.allocPrint(arena, "{s}/.claude/skills/cl-tickets", .{dir});
-    try std.Io.Dir.cwd().createDirPath(ctx.io, skill_dir);
-    try std.Io.Dir.cwd().writeFile(ctx.io, .{
-        .sub_path = try std.fmt.allocPrint(arena, "{s}/SKILL.md", .{skill_dir}),
-        .data = tickets_skill,
-    });
-    if (try tmux.operator(ctx, arena)) |s| return ctx.perm.dupe(u8, s.tmux_name);
+    _ = try writeSkill(ctx, arena, dir);
+    const changed = if (std.Io.Dir.cwd().access(ctx.io, try markerPath(arena, dir), .{})) |_| true else |_| false;
+    if (try tmux.operator(ctx, arena)) |s| return .{ .name = try ctx.perm.dupe(u8, s.tmux_name), .dir = dir, .skill_changed = changed };
+    return .{ .name = try start(ctx, cfg, arena, dir), .dir = dir, .skill_changed = changed };
+}
 
+/// Left by `writeSkill` when the skill changed, until a message to the
+/// operator has carried `skill_changed_note` (attaching to it doesn't).
+fn markerPath(a: std.mem.Allocator, dir: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(a, "{s}/.claude/skills/cl-tickets/.changed", .{dir});
+}
+
+/// The note went out with a message: drop the marker.
+fn skillNoted(ctx: Ctx, dir: []const u8) void {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = std.fmt.bufPrint(&buf, "{s}/.claude/skills/cl-tickets/.changed", .{dir}) catch return;
+    std.Io.Dir.cwd().deleteFile(ctx.io, path) catch {};
+}
+
+/// Write the cl-tickets skill into the operator's directory `dir`; true when
+/// what was there differed (an older or newer cl's), false when it was the
+/// same or there was none (a first start loads it fresh).
+fn writeSkill(ctx: Ctx, a: std.mem.Allocator, dir: []const u8) !bool {
+    const skill_dir = try std.fmt.allocPrint(a, "{s}/.claude/skills/cl-tickets", .{dir});
+    try std.Io.Dir.cwd().createDirPath(ctx.io, skill_dir);
+    const path = try std.fmt.allocPrint(a, "{s}/SKILL.md", .{skill_dir});
+    const old = std.Io.Dir.cwd().readFileAlloc(ctx.io, path, a, .limited(1 << 20)) catch "";
+    if (std.mem.eql(u8, old, tickets_skill)) return false;
+    try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = path, .data = tickets_skill });
+    if (old.len == 0) return false;
+    try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = try markerPath(a, dir), .data = "" });
+    return true;
+}
+
+test writeSkill {
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp" };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realPathFileAlloc(ctx.io, ".", a);
+    // First write: nothing to have been loaded before.
+    try std.testing.expect(!try writeSkill(ctx, a, dir));
+    try std.testing.expect(!try writeSkill(ctx, a, dir));
+    // Another cl's version on disk: changed.
+    try tmp.dir.writeFile(ctx.io, .{ .sub_path = ".claude/skills/cl-tickets/SKILL.md", .data = "old skill" });
+    try std.testing.expect(try writeSkill(ctx, a, dir));
+    try std.testing.expect(!try writeSkill(ctx, a, dir));
+    // The marker stays until a message carries the note.
+    try std.Io.Dir.cwd().access(ctx.io, try markerPath(a, dir), .{});
+    skillNoted(ctx, dir);
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(ctx.io, try markerPath(a, dir), .{}));
+}
+
+/// Start the operator's session in `dir`.
+fn start(ctx: Ctx, cfg: config.Config, arena: std.mem.Allocator, dir: []const u8) ![]const u8 {
     // --continue keeps the chat going across restarts (a fresh one the first time).
     var extra: std.ArrayList([]const u8) = .empty;
     try extra.appendSlice(arena, &.{ "--append-system-prompt", try withSelfPath(ctx, arena) });
@@ -363,10 +449,12 @@ pub fn sendInBackground(ctx: Ctx, cfg: config.Config, text: []const u8) !bool {
     var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);
     defer arena_state.deinit();
     const was_running = (try tmux.operator(ctx, arena_state.allocator())) != null;
-    const tmux_name = try ensure(ctx, cfg);
-    const owned = try ctx.gpa.dupe(u8, text);
+    const e = try ensureNoting(ctx, cfg);
+    const tmux_name = e.name;
+    const owned = if (e.skill_changed) try std.mem.concat(ctx.gpa, u8, &.{ skill_changed_note, text }) else try ctx.gpa.dupe(u8, text);
     errdefer ctx.gpa.free(owned);
-    const t = try std.Thread.spawn(.{}, deliver, .{ ctx, tmux_name, owned, !was_running });
+    const noted: ?[]const u8 = if (e.skill_changed) e.dir else null;
+    const t = try std.Thread.spawn(.{}, deliver, .{ ctx, tmux_name, owned, !was_running, noted });
     t.detach();
     return !was_running;
 }
@@ -377,15 +465,17 @@ pub fn send(ctx: Ctx, cfg: config.Config, text: []const u8) !void {
     var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);
     defer arena_state.deinit();
     const was_running = (try tmux.operator(ctx, arena_state.allocator())) != null;
-    const tmux_name = try ensure(ctx, cfg);
+    const e = try ensureNoting(ctx, cfg);
+    const tmux_name = e.name;
     if (!was_running) {
         try claude.waitForPrompt(ctx, tmux_name, false);
         ctx.sleepMs(300);
     }
-    try claude.submit(ctx, tmux_name, text, true);
+    try claude.submit(ctx, tmux_name, if (e.skill_changed) try std.mem.concat(arena_state.allocator(), u8, &.{ skill_changed_note, text }) else text, true);
+    if (e.skill_changed) skillNoted(ctx, e.dir);
 }
 
-fn deliver(ctx: Ctx, tmux_name: []const u8, text: []const u8, fresh: bool) void {
+fn deliver(ctx: Ctx, tmux_name: []const u8, text: []const u8, fresh: bool, noted: ?[]const u8) void {
     defer ctx.gpa.free(text);
     if (fresh) {
         claude.waitForPrompt(ctx, tmux_name, false) catch |err| {
@@ -394,8 +484,11 @@ fn deliver(ctx: Ctx, tmux_name: []const u8, text: []const u8, fresh: bool) void 
         };
         ctx.sleepMs(300);
     }
-    claude.submit(ctx, tmux_name, text, true) catch |err|
+    claude.submit(ctx, tmux_name, text, true) catch |err| {
         std.log.err("quick ticket: couldn't type into the operator ({s})", .{@errorName(err)});
+        return;
+    };
+    if (noted) |d| skillNoted(ctx, d);
 }
 
 /// What the Quick Ticket button sends: the prefix, then the human's words.

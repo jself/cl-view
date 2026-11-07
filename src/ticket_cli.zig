@@ -22,7 +22,7 @@ pub const ticket_usage =
     \\
     \\  new <project> <title> [-m <body>] [--worktree | --queue] [--target <session>]
     \\      [--plan [--skill <name>]] [--stage <stage>] [--profile <name>] [--parent <key>]
-    \\      [--after <key,...>] [--parallel] [--umbrella]
+    \\      [--after <key,...>] [--parallel] [--umbrella] [--onto <branch>]
     \\                              create a ticket; prints its key. With --parent the
     \\                              project may be left out (it's the parent's). Sub-tickets
     \\                              run in order: each waits for the one ranked before it to
@@ -33,7 +33,13 @@ pub const ticket_usage =
     \\                              runs, and queueing it queues them. Queued, it moves to
     \\                              running when a sub-ticket starts and to done when they
     \\                              all are (in backlog it stays put). Any other parent is
-    \\                              flagged ready-to-close
+    \\                              flagged ready-to-close.
+    \\                              --onto: it targets that branch (jj bookmark or git branch)
+    \\                              instead of trunk: it starts from it, and --merge / --pr go
+    \\                              into it. Without it a ticket takes its parent's, else the
+    \\                              project's (project set --onto). The after-merge command and
+    \\                              steps run only for merges into trunk; merging the branch
+    \\                              itself into trunk is yours to do
     \\  sub <title> [-m <body>] [options of new]
     \\                              in a ticket's session: a sub-ticket of $CL_TICKET
     \\  list [--stage <s>] [--project <p>] [--flag <f>] [--needs] [--search <q>] [--open]
@@ -67,8 +73,9 @@ pub const ticket_usage =
     \\  edit <key> [--title <t>] [-m <body>] [--project <p>] [--worktree | --queue]
     \\      [--target <session>] [--plan | --no-plan] [--skill <name>] [--profile <name>]
     \\      [--after <key,...>] [--not-after <key,...>] [--parallel | --in-order]
-    \\      [--umbrella | --no-umbrella]
-    \\                              --after: the dispatcher doesn't start it until those
+    \\      [--umbrella | --no-umbrella] [--onto <branch>]
+    \\                              --onto "" goes back to the project's target. --after: the
+    \\                              dispatcher doesn't start it until those
     \\                              tickets are done (refused if they wait on it already);
     \\                              --not-after drops the link; --parallel / --in-order: a
     \\                              sub-ticket doesn't / does wait for the one before it
@@ -169,7 +176,7 @@ pub const project_usage =
     \\      [--profile <name>] [--after-merge <command>] [--after-merge-claude <steps> | none]
     \\  set <name> [--name <new>] [--dir <dir>] [--prefix <KEY>] [--slots <n>] [--planners <n>]
     \\      [--mode queue|worktree] [--profile <name>] [--after-merge <command>]
-    \\      [--after-merge-claude <steps> | none]
+    \\      [--after-merge-claude <steps> | none] [--onto <branch>]
     \\  rm <name>                   (refused while it has tickets)
     \\  hide <name> / unhide <name> keep its tickets out of the board's views, Needs You,
     \\                              `cl ticket needs` and `cl ticket list`, or bring them back;
@@ -184,8 +191,12 @@ pub const project_usage =
     \\  list [--json]
     \\  after-merge <name>          run the after-merge command now, on trunk as it is
     \\
-    \\--after-merge: a shell command cl runs after it merges a ticket into trunk, in a
-    \\  clean checkout of the merged commit (not the project's own), detached. It
+    \\--onto: the branch (jj bookmark or git branch) its tickets start from and merge
+    \\  into instead of trunk, like a long-lived feature branch; a ticket's own --onto
+    \\  wins. "" (the default): trunk.
+    \\--after-merge: a shell command cl runs after it merges a ticket into trunk (not
+    \\  into an --onto branch), in a clean checkout of the merged commit (not the
+    \\  project's own), detached. It
     \\  gets CL_TICKET, CL_TICKETS, CL_PROJECT, CL_COMMIT, CL_PROJECT_DIR and
     \\  CL_CHECKOUT; output goes to ~/.local/state/cl/after-merge-<name>.log, and a
     \\  failure flags the ticket. "" removes it.
@@ -338,7 +349,7 @@ pub fn projectMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void
     defer arena_state.deinit();
     const a = arena_state.allocator();
     const cmd = argv[0];
-    const args = try Args.parse(a, argv[1..], &.{ "--prefix", "--slots", "--planners", "--mode", "--profile", "--name", "--dir", "--after-merge", "--after-merge-claude" }, project_usage);
+    const args = try Args.parse(a, argv[1..], &.{ "--prefix", "--slots", "--planners", "--mode", "--profile", "--name", "--dir", "--after-merge", "--after-merge-claude", "--onto" }, project_usage);
     const db = openBoard(ctx, cfg);
     defer db.close();
 
@@ -347,8 +358,9 @@ pub fn projectMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void
         const ps = board.listProjects(db, a) catch |e| boardFail(db, e, "project");
         if (args.has("--json")) return out(try std.fmt.allocPrint(a, "{f}\n", .{std.json.fmt(ps, .{})}));
         var aw: std.Io.Writer.Allocating = .init(a);
-        for (ps) |p| try aw.writer.print("{s}\t{s}\t{s}\tslots {d}\tplanners {d}\t{s}{s}{s}{s}{s}{s}{s}{s}{s}\n", .{
+        for (ps) |p| try aw.writer.print("{s}\t{s}\t{s}\tslots {d}\tplanners {d}\t{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}\n", .{
             p.name, p.prefix, try ctx.shortenHomeIn(a, p.dir), p.slots, p.planners, @tagName(p.mode),
+            if (p.onto.len > 0) "\tonto " else "", p.onto,
             if (p.hidden) "\thidden" else "",
             if (p.paused) "\tpaused" else "",
             if (p.profile.len > 0) "\t" else "", p.profile,
@@ -358,10 +370,11 @@ pub fn projectMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void
         return out(aw.writer.buffered());
     }
     if (std.mem.eql(u8, cmd, "add")) {
-        args.only(&.{ "--prefix", "--slots", "--planners", "--mode", "--profile", "--after-merge", "--after-merge-claude" }, project_usage);
+        args.only(&.{ "--prefix", "--slots", "--planners", "--mode", "--profile", "--after-merge", "--after-merge-claude", "--onto" }, project_usage);
         if (args.pos.items.len != 2) fail("usage: cl project add <name> <dir> [options]", .{});
         const dir = try realDir(ctx, a, args.pos.items[1]);
         try checkProfile(cfg, args.get("--profile"));
+        checkOnto(ctx, a, dir, args.get("--onto"));
         board.addProject(db, .{
             .name = args.pos.items[0],
             .dir = dir,
@@ -372,15 +385,17 @@ pub fn projectMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void
             .profile = args.get("--profile"),
             .after_merge = args.get("--after-merge"),
             .after_merge_claude = args.get("--after-merge-claude"),
+            .onto = args.get("--onto"),
         }) catch |e| boardFail(db, e, "project (name or prefix)");
         const p = board.getProject(db, a, args.pos.items[0]) catch |e| boardFail(db, e, "project");
         const jj = worktree.ensureJj(ctx, a, dir);
         return out(try std.fmt.allocPrint(a, "{s}: tickets are {s}-1, {s}-2, ...{s}\n", .{ p.name, p.prefix, p.prefix, if (jj) "\n(set up jj alongside git: jj git init --colocate)" else "" }));
     }
     if (std.mem.eql(u8, cmd, "set")) {
-        args.only(&.{ "--prefix", "--slots", "--planners", "--mode", "--profile", "--name", "--dir", "--after-merge", "--after-merge-claude" }, project_usage);
+        args.only(&.{ "--prefix", "--slots", "--planners", "--mode", "--profile", "--name", "--dir", "--after-merge", "--after-merge-claude", "--onto" }, project_usage);
         if (args.pos.items.len != 1) fail("usage: cl project set <name> [options]", .{});
         try checkProfile(cfg, args.get("--profile"));
+        if (args.get("--onto") != null) checkOnto(ctx, a, (board.getProject(db, a, args.pos.items[0]) catch |e| boardFail(db, e, "project")).dir, args.get("--onto"));
         board.updateProject(db, args.pos.items[0], .{
             .name = args.get("--name") orelse "",
             .dir = if (args.get("--dir")) |d| try realDir(ctx, a, d) else "",
@@ -391,6 +406,7 @@ pub fn projectMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void
             .profile = args.get("--profile"),
             .after_merge = args.get("--after-merge"),
             .after_merge_claude = args.get("--after-merge-claude"),
+            .onto = args.get("--onto"),
         }) catch |e| boardFail(db, e, "project (name or prefix)");
         return;
     }
@@ -480,7 +496,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
     const cmd = argv[0];
     const args = try Args.parse(a, argv[1..], &.{
         "--body", "--target", "--stage", "--profile", "--project", "--flag", "--search", "--title", "--as", "--summary", "--test-plan", "--step", "--parent", "--skill", "--pr-url", "--before", "--after", "--tell",
-        "--reason", "--until", "--every", "--max", "--at", "--change", "--not-after",
+        "--reason", "--until", "--every", "--max", "--at", "--change", "--not-after", "--onto",
     }, ticket_usage);
     const env_key = ctx.env.get("CL_TICKET");
     const db = openBoard(ctx, cfg);
@@ -488,7 +504,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
     const pos = args.pos.items;
 
     if (std.mem.eql(u8, cmd, "new") or std.mem.eql(u8, cmd, "sub")) {
-        args.only(&.{ "--body", "--worktree", "--queue", "--target", "--plan", "--skill", "--stage", "--profile", "--parent", "--json", "--after", "--parallel", "--umbrella" }, ticket_usage);
+        args.only(&.{ "--body", "--worktree", "--queue", "--target", "--plan", "--skill", "--stage", "--profile", "--parent", "--json", "--after", "--parallel", "--umbrella", "--onto" }, ticket_usage);
         const is_sub = std.mem.eql(u8, cmd, "sub");
         const parent = args.get("--parent") orelse if (is_sub) (env_key orelse fail("cl ticket sub runs in a ticket's session ($CL_TICKET); elsewhere use new --parent <key>", .{})) else null;
         // With a parent, the project is optional: new --parent QA-2 "title".
@@ -497,6 +513,10 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         // Checked first, so a mistyped key doesn't leave a ticket behind.
         for (try ticket_watch.splitList(a, args.get("--after"))) |k| {
             _ = board.getTicket(db, a, k) catch |e| boardFail(db, e, try std.fmt.allocPrint(a, "ticket {s}", .{k}));
+        }
+        if (args.get("--onto") != null) {
+            const pname = if (project.len > 0) project else (board.getTicket(db, a, parent.?) catch |e| boardFail(db, e, "parent ticket")).project;
+            checkOnto(ctx, a, (board.getProject(db, a, pname) catch |e| boardFail(db, e, "project")).dir, args.get("--onto"));
         }
         const key = board.createTicket(ctx, db, a, .{
             .project = project,
@@ -510,6 +530,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
             .stage = if (args.get("--stage")) |s| parseStage(s) else null,
             .profile = args.get("--profile"),
             .umbrella = args.has("--umbrella"),
+            .onto = args.get("--onto"),
         }) catch |e| boardFail(db, e, if (parent != null) "parent ticket or project" else "project");
         try applyDeps(ctx, db, a, key, args);
         if (args.has("--json")) return out(try std.fmt.allocPrint(a, "{f}\n", .{std.json.fmt(.{ .key = key }, .{})}));
@@ -578,9 +599,13 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         return out(try showText(ctx, a, t, blocks, subs, cs, evs));
     }
     if (std.mem.eql(u8, cmd, "edit")) {
-        args.only(&.{ "--title", "--body", "--project", "--worktree", "--queue", "--target", "--plan", "--no-plan", "--skill", "--profile", "--after", "--not-after", "--parallel", "--in-order", "--umbrella", "--no-umbrella" }, ticket_usage);
+        args.only(&.{ "--title", "--body", "--project", "--worktree", "--queue", "--target", "--plan", "--no-plan", "--skill", "--profile", "--after", "--not-after", "--parallel", "--in-order", "--umbrella", "--no-umbrella", "--onto" }, ticket_usage);
         const key = keyArg(pos, 0, env_key, "cl ticket edit <key> [options]");
         try checkProfile(cfg, args.get("--profile"));
+        if (args.get("--onto") != null) {
+            const cur = board.getTicket(db, a, key) catch |e| boardFail(db, e, "ticket");
+            checkOnto(ctx, a, (board.getProject(db, a, args.get("--project") orelse cur.project) catch |e| boardFail(db, e, "project")).dir, args.get("--onto"));
+        }
         board.updateTicket(ctx, db, a, key, .{
             .project = args.get("--project") orelse "",
             .title = args.get("--title"),
@@ -590,6 +615,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
             .profile = args.get("--profile"),
             .skill = args.get("--skill"),
             .umbrella = if (args.has("--umbrella")) true else if (args.has("--no-umbrella")) false else null,
+            .onto = args.get("--onto"),
         }) catch |e| boardFail(db, e, "ticket or project");
         try applyDeps(ctx, db, a, key, args);
         if (parseMode(args)) |m| return relocate(ctx, cfg, db, a, key, m);
@@ -1001,7 +1027,7 @@ fn walkTest(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8) !void
     var send = !res.passed;
     if (res.passed and res.commented) send = yes(try ask.line(&in, a, "\nAll passed, with comments. Send them to Claude for another round? [Y/n] "));
     if (res.passed and !send and cur.stage == .testing and (cur.branch.len > 0 or cur.change.len > 0)) {
-        const main = worktree.mainBranch(ctx, a, (board.getProject(db, a, cur.project) catch |e| boardFail(db, e, "project")).dir);
+        const main = worktree.mergeBranch(ctx, a, (board.getProject(db, a, cur.project) catch |e| boardFail(db, e, "project")).dir, cur.onto);
         const ans = try ask.line(&in, a, try std.fmt.allocPrint(a, "\nAll passed. [m]erge {s} into {s}, open a [p]R, or just [c]lose? ", .{ if (cur.branch.len > 0) cur.branch else "its change", main }));
         if (ans.len > 0) finish = switch (std.ascii.toLower(ans[0])) {
             'm' => .merge,
@@ -1113,6 +1139,15 @@ fn isFlagWord(s: []const u8) bool {
     return s.len > 0;
 }
 
+/// Refuse an --onto that names no branch (jj bookmark or git branch) in the
+/// project's repo at `dir`, so a typo doesn't make every start fail. ""
+/// (back to the default) is fine.
+fn checkOnto(ctx: Ctx, a: std.mem.Allocator, dir: []const u8, onto: ?[]const u8) void {
+    const name = onto orelse return;
+    if (name.len == 0 or worktree.branchExists(ctx, a, dir, name)) return;
+    fail("--onto: {s} has no branch or bookmark {s} (create it first)", .{ dir, name });
+}
+
 fn flagList(a: std.mem.Allocator, flags: []const board.Flag) ![]const u8 {
     if (flags.len == 0) return "-";
     var out_buf: std.ArrayList(u8) = .empty;
@@ -1139,6 +1174,7 @@ fn showText(ctx: Ctx, a: std.mem.Allocator, t: board.Ticket, blocks: []const []c
         @tagName(t.stage), if (t.plan) " (plan first" else "", if (!t.plan) "" else if (t.skill.len > 0) try std.fmt.allocPrint(a, ", {s})", .{t.skill}) else ")", t.round, t.project, @tagName(t.mode),
         if (t.mode == .queue and t.target.len > 0) try std.fmt.allocPrint(a, " in {s}", .{t.target}) else "",
     });
+    if (t.onto.len > 0) try w.print("onto: {s}{s} (starts from it and merges into it, not trunk)\n", .{ t.onto, if (t.onto_own.len == 0) ", the project's" else "" });
     if (t.parent.len > 0) try w.print("sub-ticket of: {s}{s}\n", .{ t.parent, if (t.parallel) " (parallel: doesn't wait for the one before it)" else "" });
     if (t.umbrella) try w.writeAll("umbrella: only a container for its sub-tickets; it never runs\n");
     if (t.children > 0) try w.print("sub-tickets: {d}/{d} done\n", .{ t.children_done, t.children });

@@ -192,7 +192,10 @@ It continues its last conversation when it starts again, so the chat carries
 on across restarts (`/clear` in it starts a new one). For the board it has a
 `cl-tickets` skill (written to `~/.config/cl/operator/.claude/skills/` each
 time it is opened): ask it for a ticket and it picks the project, writes the
-ticket's first message, and creates it.
+ticket's first message, and creates it. Its conversation goes on across
+upgrades, so it may still hold an older version of the skill: when a new cl
+rewrites it, the next message cl sends the operator (a Quick Ticket, a job
+for it) starts by telling it to load the skill again.
 
 The operator keeps notes in `~/.config/cl/operator/notes/` (an `index.md` plus
 a file per topic), reads them when it starts, and updates them as it goes, so
@@ -546,6 +549,21 @@ A ticket runs one of two ways (`--queue` is the default, a project can set
   own session, up to the project's `--slots` in progress at once (3 by
   default).
 
+A ticket starts from trunk unless it targets another branch: `--onto
+<branch>` (a jj bookmark or git branch, like a long-lived feature branch that
+mustn't reach trunk yet) on `cl t new` or `cl t edit` (`--onto ""` clears
+it), or a project's default with `cl project set <name> --onto <branch>`.
+A ticket without one of its own takes the project's, and a new sub-ticket
+takes its parent's. The branch has to exist. Such a ticket starts on it: a
+jj change on top of it (queue or worktree), a git worktree branch made from
+it, a planning workspace on it, and a git queue ticket's session is told to
+work on top of it. Its session is also told not to take the work to trunk.
+`cl t show`, `--json` (`onto`, and `onto_own` for the ticket's own setting)
+and the board's ticket view show it, and the New ticket dialog, the
+ticket's Details tab and the project's dialog set it. A Quick Ticket that
+names a branch to build on or merge into gets it as `--onto`. Finishing it merges into that branch, not trunk
+(below); merging the branch itself into trunk stays yours to do.
+
 A ticket can switch ways at any time (`cl t relocate QA-1 worktree|queue`, or
 **Move to a worktree** / **Move to the queue** on the board, or the ticket's
 **Runs as** and `cl t edit QA-1 --worktree|--queue`). One that hasn't
@@ -777,7 +795,7 @@ when a card is dropped on Done (or Done is picked, or it is approved out of
 testing), and the CLI takes a flag:
 
 ```
-cl t move QA-1 done --merge        merge it into the main branch (see below)
+cl t move QA-1 done --merge        merge it into the main branch, or its --onto branch (see below)
 cl t move QA-1 done --pr           Claude pushes it and opens a PR
 cl t move QA-1 done --tell "<text>"  Claude does what you say first (anything)
 cl t move QA-1 done [--close]      just close (the default; also approve and test)
@@ -810,6 +828,13 @@ is asked to settle them in the change and run `cl t done QA-1 --close`, which
 merges it then (and refuses while any are left). Git branches are merged by
 Claude as before.
 
+A ticket with a target branch (`--onto`) goes into that branch instead
+everywhere above: cl rebases the jj change onto it and moves its bookmark,
+Claude merges a git branch into it, and a PR is opened against it. The
+project's checkout then stays where it was unless it was on the merged
+change itself, rather than moving onto the branch. Nothing after-merge runs
+(see After merge).
+
 #### When it doesn't land
 
 Work that was approved but didn't reach trunk is flagged, so it shows in
@@ -824,7 +849,9 @@ Needs You with the ticket's key and why, Done or not:
   Trying again (Merge, PR, Tell Claude) clears it, and so does reaching Done.
 - `unmerged` (Not merged): it went to Done without cl merging it (Close, a
   Tell Claude, or a git branch Claude said it merged) while its jj change or
-  branch still holds work trunk doesn't have. A custom close isn't checked:
+  branch still holds work its target doesn't have: trunk, or its `--onto`
+  branch, which the flag names (work on the branch that trunk lacks is
+  where it belongs, not left behind). A custom close isn't checked:
   Claude said what to do with it instead, and you chose that. Its Not merged
   tab merges a jj change from there (`cl t move QA-1 done --merge` does the
   same), which clears it; so does reopening the ticket. Dismiss it when it
@@ -861,6 +888,11 @@ flag on the ticket with the log's tail; it shows in Needs you even though the
 ticket is Done, and its After merge tab can run the command again or dismiss
 the flag. One run per project goes at a time. Tickets merged during a run get one
 more run after it, on the newest trunk.
+
+It runs only for merges into trunk. A merge into a ticket's `--onto` branch
+runs no command and asks Claude for no after-merge steps: what runs is built
+from trunk, which hasn't changed. When that branch goes into trunk (your
+call, by hand), run `cl project after-merge <name>` if it needs the steps.
 
 When cl merges it: a jj change, right after cl moves trunk to it (a change with
 no edits runs nothing). A git branch, which Claude merges, when Claude runs

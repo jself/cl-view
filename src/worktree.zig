@@ -94,12 +94,13 @@ test slug {
     try std.testing.expectEqualStrings("qa-17-flaky-login-spec-on-ci", s);
 }
 
-/// The revision a ticket starts from in `dir`: git HEAD, or for jj the parent
-/// of the working copy (new workspaces start on top of it). "" if unknown.
-pub fn baseRev(ctx: Ctx, a: std.mem.Allocator, dir: []const u8) []const u8 {
+/// The revision a ticket starts from in `dir`: git HEAD (its target branch
+/// `onto` when it has one), or for jj the parent of the working copy (new
+/// workspaces start on top of it). "" if unknown.
+pub fn baseRev(ctx: Ctx, a: std.mem.Allocator, dir: []const u8, onto: []const u8) []const u8 {
     const vcs = detect(ctx, a, dir) catch return "";
     const outp = switch (vcs) {
-        .git => run(ctx, a, &.{ "git", "-C", dir, "rev-parse", "HEAD" }),
+        .git => run(ctx, a, &.{ "git", "-C", dir, "rev-parse", if (onto.len > 0) onto else "HEAD" }),
         .jj => run(ctx, a, &.{ "jj", "-R", dir, "log", "--no-graph", "-r", "@-", "-T", "commit_id" }),
     } catch return "";
     return std.mem.trim(u8, outp, " \n");
@@ -150,8 +151,9 @@ pub fn reviewRev(ctx: Ctx, a: std.mem.Allocator, dir: []const u8, base: []const 
     };
 }
 
-/// Create the ticket's worktree: git from the repo's current revision, jj as
-/// a new change on top of `trunk` described `desc` (see `newChange`).
+/// Create the ticket's worktree: git from `trunk` (a branch: the ticket's
+/// target), or the repo's current revision when it is "", jj as a new change
+/// on top of `trunk` described `desc` (see `newChange`).
 pub fn create(ctx: Ctx, a: std.mem.Allocator, cfg: config.Config, repo: []const u8, project: []const u8, key: []const u8, title: []const u8, trunk: []const u8, desc: []const u8) Error!Worktree {
     const vcs = try detect(ctx, a, repo);
     const name = try slug(a, key, title);
@@ -168,7 +170,7 @@ pub fn create(ctx: Ctx, a: std.mem.Allocator, cfg: config.Config, repo: []const 
             if (exists) {
                 _ = try run(ctx, a, &.{ "git", "-C", repo, "worktree", "add", path, name });
             } else {
-                _ = try run(ctx, a, &.{ "git", "-C", repo, "worktree", "add", "-b", name, path, "HEAD" });
+                _ = try run(ctx, a, &.{ "git", "-C", repo, "worktree", "add", "-b", name, path, if (trunk.len > 0) trunk else "HEAD" });
             }
         },
         .jj => {
@@ -226,7 +228,8 @@ pub fn planPath(ctx: Ctx, a: std.mem.Allocator, cfg: config.Config, project: []c
 }
 
 /// Make the planning workspace at `path` (kept if it is there already): jj
-/// on `trunk` (trunk() when null or not a local bookmark), git detached at the repo's HEAD. The
+/// on `trunk` (trunk() when null or not a local bookmark), git detached at
+/// `trunk` (a branch), else the repo's HEAD. The
 /// project's local Claude settings come along, so its allowed commands
 /// don't ask again.
 pub fn createPlan(ctx: Ctx, a: std.mem.Allocator, repo: []const u8, path: []const u8, trunk: ?[]const u8) Error!void {
@@ -235,7 +238,7 @@ pub fn createPlan(ctx: Ctx, a: std.mem.Allocator, repo: []const u8, path: []cons
     std.Io.Dir.cwd().createDirPath(ctx.io, std.fs.path.dirname(path) orelse ".") catch return error.CommandFailed;
     switch (vcs) {
         .jj => _ = try run(ctx, a, &.{ "jj", "-R", repo, "workspace", "add", "--name", std.fs.path.basename(path), "-r", if (trunk) |t| try std.fmt.allocPrint(a, "coalesce(present({s}), trunk())", .{try sym(a, t)}) else "trunk()", path }),
-        .git => _ = try run(ctx, a, &.{ "git", "-C", repo, "worktree", "add", "--detach", path, "HEAD" }),
+        .git => _ = try run(ctx, a, &.{ "git", "-C", repo, "worktree", "add", "--detach", path, trunk orelse "HEAD" }),
     }
     const settings = try std.fmt.allocPrint(a, "{s}/.claude/settings.local.json", .{repo});
     if (std.Io.Dir.cwd().access(ctx.io, settings, .{})) |_| {
@@ -305,6 +308,46 @@ pub fn trunkBookmark(ctx: Ctx, a: std.mem.Allocator, dir: []const u8) ?[]const u
     const outp = run(ctx, a, &.{ "jj", "-R", dir, "log", "--no-graph", "-r", "trunk()", "-T", "local_bookmarks.map(|b| b.name()).join(\"\\n\")" }) catch return null;
     var it = std.mem.tokenizeAny(u8, outp, " \n");
     return it.next();
+}
+
+/// What a ticket's work starts from and merges into, as a jj bookmark: its
+/// target `onto` when it has one, else trunk (`trunkBookmark`). null for git
+/// repos (see `mergeBranch`) or when there is no trunk bookmark.
+pub fn target(ctx: Ctx, a: std.mem.Allocator, dir: []const u8, onto: []const u8) ?[]const u8 {
+    if ((detect(ctx, a, dir) catch return null) != .jj) return null;
+    if (onto.len > 0) return onto;
+    return trunkBookmark(ctx, a, dir);
+}
+
+/// The branch a ticket's git branch merges into (or a PR goes against): its
+/// target `onto` when it has one, else the main branch.
+pub fn mergeBranch(ctx: Ctx, a: std.mem.Allocator, dir: []const u8, onto: []const u8) []const u8 {
+    return if (onto.len > 0) onto else mainBranch(ctx, a, dir);
+}
+
+/// `onto` is trunk itself: none, or the trunk bookmark / main branch by
+/// name. Merging into trunk runs the project's after-merge steps; merging
+/// into another branch doesn't.
+pub fn isTrunk(ctx: Ctx, a: std.mem.Allocator, dir: []const u8, onto: []const u8) bool {
+    if (onto.len == 0) return true;
+    if (trunkBookmark(ctx, a, dir)) |b| return std.mem.eql(u8, b, onto);
+    return std.mem.eql(u8, mainBranch(ctx, a, dir), onto);
+}
+
+/// `name` is a local jj bookmark or git branch in `dir`.
+pub fn branchExists(ctx: Ctx, a: std.mem.Allocator, dir: []const u8, name: []const u8) bool {
+    switch (detect(ctx, a, dir) catch return false) {
+        .jj => {
+            const revs = std.fmt.allocPrint(a, "present(bookmarks(exact:{s}))", .{sym(a, name) catch return false}) catch return false;
+            const outp = run(ctx, a, &.{ "jj", "-R", dir, "log", "--no-graph", "-r", revs, "-T", "change_id" }) catch return false;
+            return std.mem.trim(u8, outp, " \n").len > 0;
+        },
+        .git => {
+            const ref = std.fmt.allocPrint(a, "refs/heads/{s}", .{name}) catch return false;
+            _ = run(ctx, a, &.{ "git", "-C", dir, "rev-parse", "--verify", "--quiet", ref }) catch return false;
+            return true;
+        },
+    }
 }
 
 /// A bookmark or change id as a revset symbol (bookmarks may hold '-' or '/').
@@ -471,15 +514,21 @@ pub fn mergeChange(ctx: Ctx, a: std.mem.Allocator, dir: []const u8, work_dir: []
 /// a new change on top (or its edits would rewrite trunk), and one with
 /// nothing of its own moves up to trunk so it has the merged code. A working
 /// copy with work of its own stays where it is. True when it moved.
+/// Without `follow` (a merge into a branch that isn't trunk) only the first
+/// holds: a checkout with nothing of its own stays on what it was on rather
+/// than moving onto that branch.
 ///
 /// A ticket's workspace is stale first: the merge rewrote its change from
 /// the project's checkout. It is brought up to date (the files on disk too),
 /// or jj refuses to look at it and it would keep the pre-merge files, as if
 /// work were left there.
-pub fn catchUp(ctx: Ctx, a: std.mem.Allocator, dir: []const u8, trunk: []const u8) bool {
+pub fn catchUp(ctx: Ctx, a: std.mem.Allocator, dir: []const u8, trunk: []const u8, follow: bool) bool {
     _ = run(ctx, a, &.{ "jj", "-R", dir, "workspace", "update-stale" }) catch {};
     const t = sym(a, trunk) catch return false;
-    const revs = std.fmt.allocPrint(a, "@ & (::{0s} | ((empty() & description(exact:\"\") & (::{0s})+) ~ {0s}+))", .{t}) catch return false;
+    const revs = (if (follow)
+        std.fmt.allocPrint(a, "@ & (::{0s} | ((empty() & description(exact:\"\") & (::{0s})+) ~ {0s}+))", .{t})
+    else
+        std.fmt.allocPrint(a, "@ & ::{s}", .{t})) catch return false;
     const hit = changes(ctx, a, dir, revs) catch return false;
     if (hit.len == 0) return false;
     _ = run(ctx, a, &.{ "jj", "-R", dir, "new", t }) catch return false;
@@ -607,8 +656,8 @@ test "a change per ticket: switch, merge back, conflicts" {
     try tmp.dir.writeFile(ctx.io, .{ .sub_path = "a.txt", .data = "three\n" });
     try std.testing.expect((try mergeChange(ctx, a, repo, "", three.id, three.bookmark, trunk)).merged);
     // The checkout sat on T-3, which is master now: it gets a change on top.
-    try std.testing.expect(catchUp(ctx, a, repo, trunk));
-    try std.testing.expect(!catchUp(ctx, a, repo, trunk));
+    try std.testing.expect(catchUp(ctx, a, repo, trunk, true));
+    try std.testing.expect(!catchUp(ctx, a, repo, trunk, true));
     const master_before = try run(ctx, a, &.{ "git", "-C", repo, "rev-parse", "master" });
     const m1 = try mergeChange(ctx, a, repo, "", one.id, one.bookmark, trunk);
     try std.testing.expect(!m1.merged);
@@ -624,7 +673,7 @@ test "a change per ticket: switch, merge back, conflicts" {
     try std.testing.expectEqualStrings("two\n", try run(ctx, a, &.{ "git", "-C", repo, "show", "master:b.txt" }));
 
     // A change with nothing in it is dropped, not merged.
-    _ = catchUp(ctx, a, repo, trunk);
+    _ = catchUp(ctx, a, repo, trunk, true);
     const master_now = try run(ctx, a, &.{ "git", "-C", repo, "rev-parse", "master" });
     const four = try newChange(ctx, a, repo, trunk, "T-4: nothing", "t-4-nothing");
     try std.testing.expect((try mergeChange(ctx, a, repo, "", four.id, four.bookmark, trunk)).empty);
@@ -633,7 +682,7 @@ test "a change per ticket: switch, merge back, conflicts" {
 
     // Undescribed edits in the working copy are stray work; an adopted one
     // is a ticket's change and merges like one.
-    _ = catchUp(ctx, a, repo, trunk);
+    _ = catchUp(ctx, a, repo, trunk, true);
     try std.testing.expect(strayWork(ctx, a, repo, trunk) == null);
     try tmp.dir.writeFile(ctx.io, .{ .sub_path = "c.txt", .data = "stray\n" });
     const stray = strayWork(ctx, a, repo, trunk).?;
@@ -649,7 +698,7 @@ test "a change per ticket: switch, merge back, conflicts" {
     var wt_root = std.testing.tmpDir(.{});
     defer wt_root.cleanup();
     cfg.board.worktrees = try wt_root.dir.realPathFileAlloc(ctx.io, ".", a);
-    _ = catchUp(ctx, a, repo, trunk);
+    _ = catchUp(ctx, a, repo, trunk, true);
     const six = try newChange(ctx, a, repo, trunk, "T-6: moves", "t-6-moves");
     try tmp.dir.writeFile(ctx.io, .{ .sub_path = "d.txt", .data = "main\n" });
     const wt = try createOn(ctx, a, cfg, repo, "demo", "T-6", "moves", six.id, six.bookmark, trunk);
@@ -678,12 +727,12 @@ test "a change per ticket: switch, merge back, conflicts" {
     defer wdir7.close(ctx.io);
     try wdir7.writeFile(ctx.io, .{ .sub_path = "e.txt", .data = "seven\n" });
     // Master moves on meanwhile, so the merge rebases T-7.
-    _ = catchUp(ctx, a, repo, trunk);
+    _ = catchUp(ctx, a, repo, trunk, true);
     const eight = try newChange(ctx, a, repo, trunk, "T-8: first", "t-8-first");
     try tmp.dir.writeFile(ctx.io, .{ .sub_path = "f.txt", .data = "eight\n" });
     try std.testing.expect((try mergeChange(ctx, a, repo, "", eight.id, eight.bookmark, trunk)).merged);
     try std.testing.expect((try mergeChange(ctx, a, repo, wt7.path, seven.id, seven.bookmark, trunk)).merged);
-    try std.testing.expect(catchUp(ctx, a, wt7.path, trunk));
+    try std.testing.expect(catchUp(ctx, a, wt7.path, trunk, true));
     try std.testing.expectEqualStrings("", try run(ctx, a, &.{ "jj", "-R", wt7.path, "diff", "--summary" }));
     try std.testing.expect(!std.mem.eql(u8, seven.id, try workingChange(ctx, a, wt7.path)));
     try std.testing.expectEqualStrings("seven\n", read(ctx, wdir7, a, "e.txt"));
@@ -699,4 +748,95 @@ test "a change per ticket: switch, merge back, conflicts" {
     try std.testing.expect(std.mem.indexOf(u8, diff, "test-plan") == null);
     const excl = read(ctx, tmp.dir, a, ".git/info/exclude");
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, excl, "/.claude/test-plan.md"));
+}
+
+test "jj: a ticket targeting a feature branch starts on it and merges into it, not trunk" {
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp" };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    _ = run(ctx, a, &.{ "jj", "--version" }) catch return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = try tmp.dir.realPathFileAlloc(ctx.io, ".", a);
+    const repo = try std.fmt.allocPrint(a, "{s}/repo", .{base});
+    _ = run(ctx, a, &.{ "git", "init", "-q", "-b", "master", repo }) catch return error.SkipZigTest;
+    const git = [_][]const u8{ "git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t" };
+    try tmp.dir.writeFile(ctx.io, .{ .sub_path = "repo/a.txt", .data = "a\n" });
+    _ = try run(ctx, a, &(git ++ [_][]const u8{ "add", "a.txt" }));
+    _ = try run(ctx, a, &(git ++ [_][]const u8{ "commit", "-q", "-m", "init" }));
+    // The feature branch has work master doesn't.
+    _ = try run(ctx, a, &(git ++ [_][]const u8{ "checkout", "-q", "-b", "feature/venues" }));
+    try tmp.dir.writeFile(ctx.io, .{ .sub_path = "repo/b.txt", .data = "b\n" });
+    _ = try run(ctx, a, &(git ++ [_][]const u8{ "add", "b.txt" }));
+    _ = try run(ctx, a, &(git ++ [_][]const u8{ "commit", "-q", "-m", "venues" }));
+    _ = try run(ctx, a, &(git ++ [_][]const u8{ "checkout", "-q", "master" }));
+    try std.testing.expect(ensureJj(ctx, a, repo));
+    const master_at = try run(ctx, a, &.{ "git", "-C", repo, "rev-parse", "master" });
+
+    try std.testing.expectEqualStrings("feature/venues", target(ctx, a, repo, "feature/venues").?);
+    try std.testing.expectEqualStrings("master", target(ctx, a, repo, "").?);
+    try std.testing.expect(isTrunk(ctx, a, repo, "") and isTrunk(ctx, a, repo, "master"));
+    try std.testing.expect(!isTrunk(ctx, a, repo, "feature/venues"));
+    try std.testing.expect(branchExists(ctx, a, repo, "feature/venues"));
+    try std.testing.expect(!branchExists(ctx, a, repo, "feature/nope"));
+
+    // It starts on the feature branch: its change has the branch's files.
+    const t = target(ctx, a, repo, "feature/venues").?;
+    const c = try newChange(ctx, a, repo, t, "DI-24: venues", "di-24-venues");
+    try std.Io.Dir.cwd().access(ctx.io, try std.fmt.allocPrint(a, "{s}/b.txt", .{repo}), .{});
+    try tmp.dir.writeFile(ctx.io, .{ .sub_path = "repo/c.txt", .data = "c\n" });
+    try std.testing.expectEqual(ChangeState.open, changeState(ctx, a, repo, c.id, t));
+
+    // Merged, the feature branch moves to it and master stays put.
+    try std.testing.expect((try mergeChange(ctx, a, repo, "", c.id, c.bookmark, t)).merged);
+    try std.testing.expectEqualStrings(master_at, try run(ctx, a, &.{ "git", "-C", repo, "rev-parse", "master" }));
+    try std.testing.expectEqualStrings("c\n", try run(ctx, a, &.{ "git", "-C", repo, "show", "feature/venues:c.txt" }));
+    // On its target, nothing is left out, though master lacks it.
+    try std.testing.expect(unmergedWork(ctx, a, repo, c.id, "", t) == null);
+    try std.testing.expectEqualStrings("1 change on di-24-venues isn't in master", unmergedWork(ctx, a, repo, c.id, "di-24-venues", "master").?);
+
+    // The checkout, left on the merged change, gets a new one on top; idle
+    // on master, it stays there rather than following the feature branch.
+    try std.testing.expect(catchUp(ctx, a, repo, t, false));
+    _ = try run(ctx, a, &.{ "jj", "-R", repo, "new", "master" });
+    try std.testing.expect(!catchUp(ctx, a, repo, t, false));
+    try std.testing.expect((try changes(ctx, a, repo, "@- & master")).len == 1);
+}
+
+test "git: a ticket's worktree branch starts from its target branch" {
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp" };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = try tmp.dir.realPathFileAlloc(ctx.io, ".", a);
+    const repo = try std.fmt.allocPrint(a, "{s}/repo", .{base});
+    _ = run(ctx, a, &.{ "git", "init", "-q", "-b", "master", repo }) catch return error.SkipZigTest;
+    const git = [_][]const u8{ "git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t" };
+    _ = try run(ctx, a, &(git ++ [_][]const u8{ "commit", "-q", "--allow-empty", "-m", "init" }));
+    _ = try run(ctx, a, &(git ++ [_][]const u8{ "branch", "feature" }));
+    _ = try run(ctx, a, &(git ++ [_][]const u8{ "checkout", "-q", "feature" }));
+    _ = try run(ctx, a, &(git ++ [_][]const u8{ "commit", "-q", "--allow-empty", "-m", "feature work" }));
+    _ = try run(ctx, a, &(git ++ [_][]const u8{ "checkout", "-q", "master" }));
+    try std.testing.expect(target(ctx, a, repo, "feature") == null);
+    try std.testing.expectEqualStrings("feature", mergeBranch(ctx, a, repo, "feature"));
+    try std.testing.expectEqualStrings("master", mergeBranch(ctx, a, repo, ""));
+    try std.testing.expect(branchExists(ctx, a, repo, "feature") and !branchExists(ctx, a, repo, "nope"));
+    try std.testing.expectEqualStrings(
+        std.mem.trim(u8, try run(ctx, a, &.{ "git", "-C", repo, "rev-parse", "feature" }), "\n"),
+        baseRev(ctx, a, repo, "feature"),
+    );
+
+    var cfg: config.Config = .{ .profiles = &.{}, .default = "", .operator = "" };
+    cfg.board.worktrees = try std.fmt.allocPrint(a, "{s}/wt", .{base});
+    const wt = try create(ctx, a, cfg, repo, "demo", "DE-1", "Venues", "feature", "");
+    try std.testing.expectEqualStrings(
+        try run(ctx, a, &.{ "git", "-C", repo, "rev-parse", "feature" }),
+        try run(ctx, a, &.{ "git", "-C", wt.path, "rev-parse", "HEAD" }),
+    );
+    // Nothing on it yet that the feature branch lacks; master lacks the feature's commit.
+    try std.testing.expect(unmergedWork(ctx, a, repo, "", wt.branch, "feature") == null);
+    try std.testing.expectEqualStrings("1 commit on de-1-venues isn't in master", unmergedWork(ctx, a, repo, "", wt.branch, "master").?);
 }

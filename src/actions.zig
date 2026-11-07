@@ -124,8 +124,10 @@ pub fn move(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, ke
 }
 
 /// A ticket that went to Done without cl merging it (closed, or finished by
-/// Claude): when its branch or jj change still holds work trunk lacks, it is
-/// flagged `unmerged`, so it isn't left behind unseen. Not for a custom close
+/// Claude): when its branch or jj change still holds work its target (trunk,
+/// or the branch it targets: `Ticket.onto`) lacks, it is flagged `unmerged`,
+/// so it isn't left behind unseen. Work on its target that trunk lacks is
+/// where it belongs, not left behind. Not for a custom close
 /// (Claude said what to do with it instead, and you chose that). `how` says
 /// how it got there.
 pub fn checkLanded(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, how: []const u8) !void {
@@ -133,12 +135,12 @@ pub fn checkLanded(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8
     if (t.stage != .done or t.custom_close.len > 0) return;
     if (t.change.len == 0 and t.branch.len == 0) return;
     const dir = (try board.getProject(db, a, t.project)).dir;
-    const main = if (t.change.len > 0) worktree.trunkBookmark(ctx, a, dir) orelse return else worktree.mainBranch(ctx, a, dir);
+    const main = if (t.change.len > 0) worktree.target(ctx, a, dir, t.onto) orelse return else worktree.mergeBranch(ctx, a, dir, t.onto);
     const left = worktree.unmergedWork(ctx, a, dir, t.change, t.branch, main) orelse return;
     const fix: []const u8 = if (t.change.len > 0)
-        try std.fmt.allocPrint(a, "Merge it now (the board's Not merged tab, or `cl ticket move {s} done --merge`)", .{t.key})
+        try std.fmt.allocPrint(a, "Merge it into {s} now (the board's Not merged tab, or `cl ticket move {s} done --merge`)", .{ main, t.key })
     else
-        "Move it back to Review and finish it with Merge";
+        try std.fmt.allocPrint(a, "Move it back to Review and finish it with Merge (into {s})", .{main});
     try board.setFlagId(ctx, db, t.id, board.flag_unmerged, "auto", try std.fmt.allocPrint(a, "{s}\n{s}. {s}, or dismiss this if it wasn't meant to land.", .{ left, how, fix }));
 }
 
@@ -192,15 +194,15 @@ fn startFinish(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, fi
     }
     if (t.branch.len == 0) return false;
     const s = liveSession(ctx, t) orelse return error.NoSession;
-    const main = worktree.mainBranch(ctx, a, dir);
-    const restart = try afterMergeHint(db, a, t.project, "Once it is merged:");
+    const main = worktree.mergeBranch(ctx, a, dir, t.onto);
+    const restart = if (worktree.isTrunk(ctx, a, dir, t.onto)) try afterMergeHint(db, a, t.project, "Once it is merged:") else try std.fmt.allocPrint(a, "{s} isn't trunk: don't merge it into trunk too, and don't rebuild or restart anything for it. Once it is merged, run", .{main});
     const text = switch (finish) {
         .close, .tell => unreachable,
         .merge => try std.fmt.allocPrint(a, "This ticket is approved. Finish it by merging its branch {s} into {s}: commit anything left here first, then merge it in the project's checkout at {s} (it may have uncommitted work of its own; leave that alone). If it conflicts in a way you can't settle with confidence, or anything is unclear, ask me. {s} `cl ticket done {s} --close`.", .{ t.branch, main, dir, restart, t.key }),
         .pr => if (t.change.len > 0)
-            try std.fmt.allocPrint(a, "This ticket is approved. Finish it with a pull request: push its jj bookmark {s} (`jj git push -b {s}`) and open a PR against {s} (gh pr create --head {s}) with a title and description of the change. If anything is unclear, ask me. Then run `cl ticket done {s} --close --pr-url <the PR's URL>`.", .{ t.branch, t.branch, main, t.branch, t.key })
+            try std.fmt.allocPrint(a, "This ticket is approved. Finish it with a pull request: push its jj bookmark {s} (`jj git push -b {s}`) and open a PR against {s} (gh pr create --head {s} --base {s}) with a title and description of the change. If anything is unclear, ask me. Then run `cl ticket done {s} --close --pr-url <the PR's URL>`.", .{ t.branch, t.branch, main, t.branch, main, t.key })
         else
-            try std.fmt.allocPrint(a, "This ticket is approved. Finish it with a pull request: commit anything left, push its branch {s} and open a PR against {s} (gh pr create) with a title and description of the change. If anything is unclear, ask me. Then run `cl ticket done {s} --close --pr-url <the PR's URL>`.", .{ t.branch, main, t.key }),
+            try std.fmt.allocPrint(a, "This ticket is approved. Finish it with a pull request: commit anything left, push its branch {s} and open a PR against {s} (gh pr create --base {s}) with a title and description of the change. If anything is unclear, ask me. Then run `cl ticket done {s} --close --pr-url <the PR's URL>`.", .{ t.branch, main, main, t.key }),
     };
     // Finishing first, so the sent comment doesn't send it back to Running.
     try board.setFinishing(ctx, db, t.id, @tagName(finish));
@@ -214,7 +216,7 @@ fn startFinish(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, fi
 /// becomes its change, so approving it merges the work instead of closing
 /// the ticket and leaving it behind. null when the checkout holds none.
 fn adoptStray(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, dir: []const u8) !?board.Ticket {
-    const trunk = worktree.trunkBookmark(ctx, a, dir) orelse return null;
+    const trunk = worktree.target(ctx, a, dir, t.onto) orelse return null;
     _ = worktree.strayWork(ctx, a, dir, trunk) orelse return null;
     const desc = try std.fmt.allocPrint(a, "{s}: {s}", .{ t.key, t.title });
     const c = worktree.adoptChange(ctx, a, dir, desc, try worktree.slug(a, t.key, t.title)) catch {
@@ -230,11 +232,12 @@ fn adoptStray(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, dir
     return owned;
 }
 
-/// Merge the ticket's jj change back into trunk (see `worktree.mergeChange`).
+/// Merge the ticket's jj change back into its target, trunk unless it has
+/// one of its own (see `worktree.mergeChange`).
 /// True when the ticket stays put, finishing, while Claude settles
 /// conflicts or does the after-merge steps; false when it can go to Done now.
 fn mergeBack(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, dir: []const u8) !bool {
-    const trunk = worktree.trunkBookmark(ctx, a, dir) orelse {
+    const trunk = worktree.target(ctx, a, dir, t.onto) orelse {
         try board.logEvent(ctx, db, t.id, "merge failed", "no trunk bookmark");
         try board.setFlagId(ctx, db, t.id, board.flag_merge_failed, "auto", try std.fmt.allocPrint(a, "cl couldn't tell which bookmark is trunk in {s}, so nothing was merged", .{dir}));
         return error.MergeFailed;
@@ -246,7 +249,7 @@ fn mergeBack(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, dir:
             const s = liveSession(ctx, t) orelse return error.Conflicts;
             const list = conflictFlag(try board.getTicket(db, a, t.key)) orelse "";
             const p = try board.getProject(db, a, t.project);
-            const after: []const u8 = if (p.after_merge.len > 0) " (and runs the project's after-merge command; don't rebuild or restart anything yourself)" else if (claudeSteps(p) != null) " (and tells you what to do after the merge)" else "";
+            const after: []const u8 = if (!worktree.isTrunk(ctx, a, dir, t.onto)) "" else if (p.after_merge.len > 0) " (and runs the project's after-merge command; don't rebuild or restart anything yourself)" else if (claudeSteps(p) != null) " (and tells you what to do after the merge)" else "";
             return try tell(ctx, db, a, t, s, "merge", try std.fmt.allocPrint(a, "This ticket is approved, but its change conflicts with {s}: cl rebased it onto {s}, and jj recorded the conflicts in the change, in:\n{s}\nResolve them there: edit the conflict markers out, keeping what both sides meant (`jj resolve --list` shows what's left). If one can't be settled with confidence, ask me. Then run `cl ticket done {s} --close`; cl merges it then{s}.", .{ trunk, trunk, list, t.key, after }));
         },
     }
@@ -263,10 +266,11 @@ pub fn claudeSteps(p: board.Project) ?[]const u8 {
 
 /// Claude does the after-merge steps when the project has no command: the
 /// ticket's Claude while its session is there (the ticket stays finishing
-/// until it runs done --close: true), else the operator (false).
+/// until it runs done --close: true), else the operator (false). None after
+/// a merge into a branch that isn't trunk: nothing runs from there.
 fn claudeAfterMerge(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, trunk: []const u8) !bool {
     const p = try board.getProject(db, a, t.project);
-    if (p.after_merge.len > 0) return false;
+    if (p.after_merge.len > 0 or !worktree.isTrunk(ctx, a, p.dir, t.onto)) return false;
     const steps = claudeSteps(p) orelse return false;
     if (liveSession(ctx, t)) |s| return try tell(ctx, db, a, t, s, "after-merge", try std.fmt.allocPrint(a, "This ticket is approved and cl merged it into {s}. Before it is done: {s} The project's checkout is at {s}. If anything fails or is unclear, ask me. Then run `cl ticket done {s} --close`.", .{ trunk, steps, p.dir, t.key }));
     try askOperator(ctx, db, a, t, try std.fmt.allocPrint(a, "cl merged ticket {s} ({s}) into {s} of project {s}, whose checkout is at {s}. Its session is gone, so please do the after-merge steps for it: {s} If something fails that needs the human, flag the ticket for them: `cl ticket flag {s} after-merge \"<what went wrong>\"`.", .{ t.key, t.title, trunk, p.name, p.dir, steps, t.key }));
@@ -291,7 +295,7 @@ pub fn askOperator(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket
 /// null when it can go to Done.
 pub fn stepsAfterSettled(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket) !?[]const u8 {
     const p = try board.getProject(db, a, t.project);
-    if (p.after_merge.len > 0) return null;
+    if (p.after_merge.len > 0 or !worktree.isTrunk(ctx, a, p.dir, t.onto)) return null;
     const steps = claudeSteps(p) orelse return null;
     try board.setFinishing(ctx, db, t.id, "after-merge");
     const text = try std.fmt.allocPrint(a, "cl merged it. Before it is done: {s} The project's checkout is at {s}. If anything fails or is unclear, ask me. Then run `cl ticket done {s} --close` again.", .{ steps, p.dir, t.key });
@@ -328,10 +332,12 @@ fn tell(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, s: []cons
 
 const Merged = enum { merged, empty, conflicts };
 
-/// One try at merging the change. Conflicts set the ticket's conflict flag
-/// (the files); a clean merge clears it, forgets the bookmark, moves working
-/// copies left on trunk up (see `catchUp`) and starts the project's
-/// after-merge command. `empty`: it had no edits, so it was dropped.
+/// One try at merging the change into `trunk` (its target). Conflicts set
+/// the ticket's conflict flag (the files); a clean merge clears it, forgets
+/// the bookmark, moves working copies left on it up (see `catchUp`) and, for
+/// a merge into trunk itself, starts the project's after-merge command (a
+/// feature branch's merges run nothing: what runs is built from trunk).
+/// `empty`: it had no edits, so it was dropped.
 fn merge(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, dir: []const u8, trunk: []const u8) !Merged {
     const m = worktree.mergeChange(ctx, a, dir, t.worktree, t.change, t.branch, trunk) catch {
         try board.logEvent(ctx, db, t.id, "merge failed", worktree.lastError());
@@ -348,10 +354,13 @@ fn merge(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, dir: []c
     try board.clearFlagId(ctx, db, t.id, board.flag_merge_failed);
     try board.clearFlagId(ctx, db, t.id, board.flag_unmerged);
     try board.setChange(db, t.id, t.change, "");
-    _ = worktree.catchUp(ctx, a, dir, trunk);
-    if (t.worktree.len > 0) _ = worktree.catchUp(ctx, a, t.worktree, trunk);
+    const is_trunk = worktree.isTrunk(ctx, a, dir, t.onto);
+    // The project's checkout stays where it is after a feature branch's
+    // merge, unless it was on the change itself.
+    _ = worktree.catchUp(ctx, a, dir, trunk, is_trunk);
+    if (t.worktree.len > 0) _ = worktree.catchUp(ctx, a, t.worktree, trunk, true);
     try board.logEvent(ctx, db, t.id, if (m.empty) "nothing to merge" else "merged", trunk);
-    if (!m.empty) _ = try after_merge.start(ctx, db, a, t.project, t.id, t.key);
+    if (!m.empty and is_trunk) _ = try after_merge.start(ctx, db, a, t.project, t.id, t.key);
     _ = try board.addComment(ctx, db, a, t.key, "claude", if (m.empty) try std.fmt.allocPrint(a, "Nothing to merge: its change had no edits, so it was dropped.", .{}) else try std.fmt.allocPrint(a, "Merged into {s}.", .{trunk}), false);
     return if (m.empty) .empty else .merged;
 }
@@ -362,7 +371,7 @@ fn merge(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, dir: []c
 pub fn mergeSettled(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket) !bool {
     if (!std.mem.eql(u8, t.finishing, "merge") or t.change.len == 0 or conflictFlag(t) == null) return false;
     const dir = (try board.getProject(db, a, t.project)).dir;
-    const trunk = worktree.trunkBookmark(ctx, a, dir) orelse return error.MergeFailed;
+    const trunk = worktree.target(ctx, a, dir, t.onto) orelse return error.MergeFailed;
     return switch (try merge(ctx, db, a, t, dir, trunk)) {
         .conflicts => error.Conflicts,
         .merged => true,
@@ -378,7 +387,9 @@ pub fn finished(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, s
     if (t.finishing.len == 0) return error.NotFinishing;
     _ = try mergeSettled(ctx, db, a, t);
     // A git branch Claude merged into the main branch: it is there now.
-    if (std.mem.eql(u8, t.finishing, "merge") and t.change.len == 0 and t.branch.len > 0)
+    // Into another branch (its target): nothing runs from that.
+    if (std.mem.eql(u8, t.finishing, "merge") and t.change.len == 0 and t.branch.len > 0 and
+        worktree.isTrunk(ctx, a, (try board.getProject(db, a, t.project)).dir, t.onto))
         _ = try after_merge.start(ctx, db, a, t.project, t.id, t.key);
     if (summary.len > 0) _ = try board.addComment(ctx, db, a, key, "claude", summary, false);
     if (pr.len > 0) _ = try board.addComment(ctx, db, a, key, "claude", try std.fmt.allocPrint(a, "Pull request: {s}", .{pr}), false);
@@ -1013,6 +1024,115 @@ test "work that doesn't land is flagged in Needs You until it does: conflicts, c
     try board.setChange(db, (try board.getTicket(db, a, three)).id, (try board.getTicket(db, a, one)).change, "");
     try move(ctx, cfg, db, a, three, .done, false, .close);
     try std.testing.expect(!try inNeeds(db, a, three));
+}
+
+test "a ticket with a target branch merges into it, runs no after-merge, and isn't flagged for missing trunk" {
+    // tmux blocked: no session is live, and nothing reaches a real server.
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp", .tmux_blocked = true };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const sh = struct {
+        fn run(c: Ctx, al: std.mem.Allocator, argv: []const []const u8) ![]const u8 {
+            const r = try std.process.run(al, c.io, .{ .argv = argv });
+            if (r.term != .exited or r.term.exited != 0) return error.CommandFailed;
+            return r.stdout;
+        }
+    }.run;
+    _ = sh(ctx, a, &.{ "jj", "--version" }) catch return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const repo = try tmp.dir.realPathFileAlloc(ctx.io, ".", a);
+    _ = sh(ctx, a, &.{ "git", "init", "-q", "-b", "master", repo }) catch return error.SkipZigTest;
+    const git = [_][]const u8{ "git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t" };
+    try tmp.dir.writeFile(ctx.io, .{ .sub_path = "a.txt", .data = "base\n" });
+    _ = try sh(ctx, a, &(git ++ [_][]const u8{ "add", "a.txt" }));
+    _ = try sh(ctx, a, &(git ++ [_][]const u8{ "commit", "-q", "-m", "init" }));
+    _ = try sh(ctx, a, &(git ++ [_][]const u8{ "branch", "feature/venues" }));
+    try std.testing.expect(worktree.ensureJj(ctx, a, repo));
+    const master_at = try sh(ctx, a, &.{ "git", "-C", repo, "rev-parse", "master" });
+
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    // Claude's after-merge steps are on (the default): a merge into trunk
+    // would ask for them; one into the feature branch doesn't.
+    try board.addProject(db, .{ .name = "qa", .dir = repo, .onto = "feature/venues" });
+    const cfg: config.Config = .{ .profiles = &.{}, .default = "", .operator = "" };
+    const k = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Venues", .stage = .testing });
+    const t = try board.getTicket(db, a, k);
+    try std.testing.expectEqualStrings("feature/venues", t.onto);
+    try std.testing.expectEqualStrings("", t.onto_own);
+    const ch = try worktree.newChange(ctx, a, repo, worktree.target(ctx, a, repo, t.onto).?, "QA-1: Venues", try worktree.slug(a, k, "Venues"));
+    try tmp.dir.writeFile(ctx.io, .{ .sub_path = "a.txt", .data = "venues\n" });
+    try board.setChange(db, t.id, ch.id, ch.bookmark);
+
+    try move(ctx, cfg, db, a, k, .done, false, .merge);
+    const done = try board.getTicket(db, a, k);
+    try std.testing.expectEqual(board.Stage.done, done.stage);
+    try std.testing.expectEqualStrings("venues\n", try sh(ctx, a, &.{ "git", "-C", repo, "show", "feature/venues:a.txt" }));
+    try std.testing.expectEqualStrings(master_at, try sh(ctx, a, &.{ "git", "-C", repo, "rev-parse", "master" }));
+    try std.testing.expectEqual(@as(usize, 0), done.flags.len);
+    for (try board.events(db, a, done.id)) |e| try std.testing.expect(!std.mem.startsWith(u8, e.kind, "after-merge"));
+    // Its Done check measures against the feature branch: on it, not on
+    // master, raises nothing (DI-24's false alarm).
+    try checkLanded(ctx, db, a, k, "test");
+    try std.testing.expect(flagOf(try board.getTicket(db, a, k), board.flag_unmerged) == null);
+
+    // A ticket closed with work on neither is flagged, naming the feature branch.
+    const k2 = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Left", .stage = .testing });
+    const ch2 = try worktree.newChange(ctx, a, repo, "feature/venues", "QA-2: Left", "qa-2-left");
+    try tmp.dir.writeFile(ctx.io, .{ .sub_path = "b.txt", .data = "left\n" });
+    try board.setChange(db, (try board.getTicket(db, a, k2)).id, ch2.id, ch2.bookmark);
+    try move(ctx, cfg, db, a, k2, .done, false, .close);
+    const un = flagOf(try board.getTicket(db, a, k2), board.flag_unmerged).?;
+    try std.testing.expect(std.mem.indexOf(u8, un.detail, "isn't in feature/venues") != null);
+    try std.testing.expect(std.mem.indexOf(u8, un.detail, "Merge it into feature/venues now") != null);
+}
+
+test "git: a ticket closed with its branch merged into its target isn't flagged; one that isn't names the target" {
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp", .tmux_blocked = true };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const repo = try tmp.dir.realPathFileAlloc(ctx.io, ".", a);
+    const sh = struct {
+        fn run(c: Ctx, al: std.mem.Allocator, argv: []const []const u8) !void {
+            const r = try std.process.run(al, c.io, .{ .argv = argv });
+            if (r.term != .exited or r.term.exited != 0) return error.CommandFailed;
+        }
+    }.run;
+    sh(ctx, a, &.{ "git", "init", "-q", "-b", "master", repo }) catch return error.SkipZigTest;
+    const git = [_][]const u8{ "git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t" };
+    try sh(ctx, a, &(git ++ [_][]const u8{ "commit", "-q", "--allow-empty", "-m", "init" }));
+    try sh(ctx, a, &(git ++ [_][]const u8{ "branch", "feature" }));
+    // Two ticket branches off the feature branch; one is merged into it.
+    for ([_][]const u8{ "qa-1-in", "qa-2-out" }) |b| {
+        try sh(ctx, a, &(git ++ [_][]const u8{ "checkout", "-q", "-b", b, "feature" }));
+        try sh(ctx, a, &(git ++ [_][]const u8{ "commit", "-q", "--allow-empty", "-m", b }));
+    }
+    try sh(ctx, a, &(git ++ [_][]const u8{ "checkout", "-q", "feature" }));
+    try sh(ctx, a, &(git ++ [_][]const u8{ "merge", "-q", "--ff-only", "qa-1-in" }));
+    try sh(ctx, a, &(git ++ [_][]const u8{ "checkout", "-q", "master" }));
+
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "qa", .dir = repo, .mode = .worktree });
+    const cfg: config.Config = .{ .profiles = &.{}, .default = "", .operator = "" };
+    // The ticket's own target (the project has none).
+    const k1 = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "In", .stage = .testing, .onto = "feature" });
+    const k2 = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Out", .stage = .testing, .onto = "feature" });
+    try board.setSession(ctx, db, (try board.getTicket(db, a, k1)).id, "", "", "", "qa-1-in");
+    try board.setSession(ctx, db, (try board.getTicket(db, a, k2)).id, "", "", "", "qa-2-out");
+    try move(ctx, cfg, db, a, k1, .done, false, .close);
+    try std.testing.expect(flagOf(try board.getTicket(db, a, k1), board.flag_unmerged) == null);
+    try move(ctx, cfg, db, a, k2, .done, false, .close);
+    const un = flagOf(try board.getTicket(db, a, k2), board.flag_unmerged).?;
+    try std.testing.expect(std.mem.startsWith(u8, un.detail, "1 commit on qa-2-out isn't in feature\n"));
+    try std.testing.expect(std.mem.indexOf(u8, un.detail, "finish it with Merge (into feature)") != null);
 }
 
 test "going to Done closes the ticket's session, even when a test server of its own (or its own session) is what moved it" {

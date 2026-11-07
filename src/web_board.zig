@@ -124,6 +124,7 @@ pub fn handle(ctx: Ctx, cfg: config.Config, req: *std.http.Server.Request, path:
             error.NoSuchDir => .{ .bad_request, "no such directory" },
             error.NoSession => .{ .conflict, "the ticket has no live session" },
             error.CustomClose => .{ .conflict, "Claude asked to close it its own way; tell Claude, or just close it" },
+            error.NoSuchBranch => .{ .bad_request, "the project's repo has no branch or bookmark by that name (create it first)" },
             error.WaitingFlag => .{ .bad_request, "that flag is waiting on you (a question, a prompt, a review, a test or a conflict); answer it or act on the ticket instead" },
             error.NothingAsked => .{ .conflict, "nothing is waiting for an answer" },
             error.BadAnswer => .{ .bad_request, "one answer per question: an option number or your own words (several numbers for a multi-select one)" },
@@ -196,6 +197,8 @@ const Body = struct {
     slots: ?i64 = null,
     after_merge: ?[]const u8 = null,
     after_merge_claude: ?[]const u8 = null,
+    /// Ticket or project: the branch it targets ("" for trunk / the project's).
+    onto: ?[]const u8 = null,
     /// finish "tell": what Claude should do first.
     tell: ?[]const u8 = null,
     planners: ?i64 = null,
@@ -264,6 +267,10 @@ fn route(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: 
     if (std.mem.eql(u8, what, "ticket")) {
         if (name.len == 0) {
             const adopt_ctx: AdoptCtx = .{ .ctx = ctx, .cfg = cfg };
+            if (nonEmpty(b.onto)) |o| {
+                const pname = if (nonEmpty(b.project)) |pn| pn else (try board.getTicket(db, a, nonEmpty(b.parent) orelse return error.BadInput)).project;
+                try checkOnto(ctx, a, (try board.getProject(db, a, pname)).dir, o);
+            }
             const key = try board.createTicket(ctx, db, a, .{
                 .project = b.project orelse "",
                 .title = b.title,
@@ -276,6 +283,7 @@ fn route(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: 
                 .target = b.target,
                 .profile = b.profile,
                 .parent = nonEmpty(b.parent),
+                .onto = nonEmpty(b.onto),
                 .body_for_key = .{ .ctx = &adopt_ctx, .call = adoptImages },
             });
             return ok(req, a, .{ .key = key });
@@ -325,6 +333,7 @@ fn route(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: 
     if (std.mem.eql(u8, what, "project")) {
         if (name.len == 0) {
             const dir = try realDir(ctx, a, b.dir orelse return error.BadInput);
+            if (nonEmpty(b.onto)) |o| try checkOnto(ctx, a, dir, o);
             board.addProject(db, .{
                 .name = b.name orelse "",
                 .dir = dir,
@@ -335,11 +344,16 @@ fn route(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: 
                 .profile = b.profile,
                 .after_merge = b.after_merge,
                 .after_merge_claude = b.after_merge_claude,
+                .onto = b.onto,
             }) catch |e| return projectFail(req, e);
             _ = worktree.ensureJj(ctx, a, dir);
             return ok(req, a, .{ .ok = true });
         }
         if (std.mem.eql(u8, action, "set")) {
+            if (nonEmpty(b.onto)) |o| {
+                const cur = try board.getProject(db, a, name);
+                if (!std.mem.eql(u8, o, cur.onto)) try checkOnto(ctx, a, if (b.dir) |d| try realDir(ctx, a, d) else cur.dir, o);
+            }
             board.updateProject(db, name, .{
                 .name = b.name orelse "",
                 .dir = if (b.dir) |d| try realDir(ctx, a, d) else "",
@@ -350,6 +364,7 @@ fn route(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: 
                 .profile = b.profile,
                 .after_merge = b.after_merge,
                 .after_merge_claude = b.after_merge_claude,
+                .onto = b.onto,
             }) catch |e| return projectFail(req, e);
         } else if (std.mem.eql(u8, action, "after-merge")) {
             if ((try board.getProject(db, a, name)).after_merge.len == 0) return error.BadInput;
@@ -440,10 +455,20 @@ fn realDir(ctx: Ctx, a: std.mem.Allocator, path: []const u8) ![]const u8 {
     return std.Io.Dir.cwd().realPathFileAlloc(ctx.io, expanded, a) catch error.NoSuchDir;
 }
 
+/// A target branch (`--onto`) must be there in the project's repo at `dir`.
+fn checkOnto(ctx: Ctx, a: std.mem.Allocator, dir: []const u8, onto: []const u8) !void {
+    if (!worktree.branchExists(ctx, a, dir, onto)) return error.NoSuchBranch;
+}
+
 fn ticketAction(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: *std.http.Server.Request, key: []const u8, action: []const u8, b: Body) !void {
     const eql = std.mem.eql;
     if (eql(u8, action, "edit")) {
         const mode = if (b.mode) |m| board.Mode.parse(m) orelse return error.BadInput else null;
+        if (nonEmpty(b.onto)) |o| {
+            const cur = try board.getTicket(db, a, key);
+            // Unchanged: no need to look again.
+            if (!std.mem.eql(u8, o, cur.onto_own)) try checkOnto(ctx, a, (try board.getProject(db, a, nonEmpty(b.project) orelse cur.project)).dir, o);
+        }
         try board.updateTicket(ctx, db, a, key, .{
             .project = b.project orelse "",
             .title = b.title,
@@ -453,6 +478,7 @@ fn ticketAction(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator
             .skill = b.skill,
             .target = b.target,
             .profile = b.profile,
+            .onto = b.onto,
         });
         // A new mode moves the ticket (with its work, once started).
         if (mode) |m| {
@@ -733,6 +759,6 @@ fn getTicket(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, r
         .gutter_port = gutter_port,
         // gutter is installed: the board offers it for review.
         .gutter = review.findGutter(ctx, a, cfg) != null,
-        .main_branch = if (t.branch.len > 0 or t.change.len > 0) worktree.mainBranch(ctx, a, (try board.getProject(db, a, t.project)).dir) else "",
+        .main_branch = if (t.branch.len > 0 or t.change.len > 0) worktree.mergeBranch(ctx, a, (try board.getProject(db, a, t.project)).dir, t.onto) else "",
     });
 }
