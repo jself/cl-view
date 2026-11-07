@@ -88,6 +88,56 @@
   term.loadAddon(new WebLinksAddon.WebLinksAddon((e, uri) => openLink(uri)));
   term.open(document.getElementById("term"));
 
+  // A phone's keyboard (Gboard) types into xterm.js's hidden textarea as
+  // compositions, and changes words already there: autocorrect swaps "itene"
+  // for "Irene", a suggestion replaces the word being typed. xterm.js's own
+  // handling sends text it already sent again then (the whole textarea, when
+  // the length stays the same), and never deletes the word being replaced.
+  // On a touch screen this takes over: the session is kept in step with the
+  // textarea, so a change sends a backspace (DEL) for each character from the
+  // first one that differs to the end, then the new text from there. Keys
+  // xterm.js handles itself (Enter, Backspace in an empty field, a hardware
+  // keyboard's letters, the key bar) and pastes pass through as before.
+  const phoneKeys = matchMedia("(pointer: coarse)").matches ? (() => {
+    const ta = term.textarea;
+    // The textarea's text the session already has.
+    let sent = ta.value;
+    // After a key, a paste or the key bar, what is in the textarea counts as
+    // sent: the session's cursor has moved on from it. Not cleared, so the
+    // keyboard doesn't type its word in again.
+    const settle = () => setTimeout(() => { sent = ta.value; }, 0);
+    const sync = () => {
+      const now = ta.value;
+      let i = 0;
+      while (i < sent.length && i < now.length && sent[i] === now[i]) i++;
+      // Not between the two halves of a surrogate pair (an emoji).
+      if (i > 0 && /[\ud800-\udbff]/.test(now[i - 1])) i--;
+      const gone = Array.from(sent.slice(i)).length;
+      const add = now.slice(i).replace(/\r?\n/g, "\r");
+      sent = now;
+      if (gone || add) term.input("\x7f".repeat(gone) + add);
+    };
+    // Captured on the way down, so xterm.js's own listeners on the textarea
+    // (its composition helper, its input handler) never see these.
+    const own = (e) => { if (e.target === ta) { e.stopPropagation(); return true; } return false; };
+    for (const type of ["compositionstart", "compositionupdate", "compositionend"]) term.element.addEventListener(type, own, true);
+    term.element.addEventListener("input", (e) => { if (own(e)) sync(); }, true);
+    term.element.addEventListener("paste", settle, true);
+    ta.addEventListener("blur", () => { sent = ""; }); // xterm.js empties it
+    return {
+      settle,
+      // From xterm.js's custom key handler: false keeps a key from xterm.js.
+      // A keyboard's keys mid-composition (keyCode 229) are its input
+      // events', which sync() sends.
+      keydown(e) {
+        if (e.type !== "keydown") return true;
+        if (e.keyCode === 229) return false;
+        settle();
+        return true;
+      },
+    };
+  })() : null;
+
   // Copies made in the session reach the system clipboard: tmux (copy mode,
   // a mouse selection) and programs inside it (Claude Code) send them as OSC
   // 52, which xterm.js drops on its own. Requests to read the clipboard
@@ -108,6 +158,7 @@
   // mouse mode leaves to the page), as in desktop terminals. Ctrl+Shift+V
   // pastes already: xterm.js leaves it to the browser's paste.
   term.attachCustomKeyEventHandler((e) => {
+    if (phoneKeys && !phoneKeys.keydown(e)) return false;
     if (e.type !== "keydown" || !e.ctrlKey || !e.shiftKey || e.altKey || e.metaKey || e.code !== "KeyC" || !term.hasSelection()) return true;
     e.preventDefault();
     copyText(term.getSelection());
@@ -277,6 +328,7 @@
       // Ctrl-L that follows fits the session's window to the new size.
       if ("fit" in b.dataset) sendSize();
       send("0", seq);
+      phoneKeys?.settle();
       b.classList.add("down");
       setTimeout(() => b.classList.remove("down"), 120);
     };
