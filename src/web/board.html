@@ -263,13 +263,24 @@
   .dlg { padding: calc(18 * var(--u)) calc(20 * var(--u)) calc(20 * var(--u)); display: flex; flex-direction: column; gap: calc(12 * var(--u)); }
   .dlg .head { display: flex; flex-wrap: wrap; align-items: center; gap: calc(10 * var(--u)); }
   .dlg h1 { margin: 0; font-size: calc(21 * var(--u)); font-weight: 600; overflow-wrap: anywhere; }
+  /* Stage, ⋯ and the close X stay together at the right, wrapping as one. */
+  .dlg .head > .hctl { margin-left: auto; display: flex; align-items: center; gap: calc(10 * var(--u)); }
+  /* The pills take what's left of the head's line, not a line of their own: a long park reason is cut (the park box below has it whole). */
+  /* The group is never under 140px, so the Parked pill (as wide as the group at most) always shows its start; other pills wrap below it. */
+  .dlg .head > .pills { flex: 1 1 0; min-width: calc(140 * var(--u)); }
+  .dlg .head > .pills > .f-parked { min-width: 0; }
   .dlg .facts { display: flex; flex-wrap: wrap; gap: calc(6 * var(--u)) calc(16 * var(--u)); font-size: calc(13 * var(--u)); color: var(--dim); }
   .dlg .actions { display: flex; flex-wrap: wrap; gap: calc(8 * var(--u)); }
   /* The ticket's status line: the shell icon on the left of the status, a size up from a card's. */
   .dlg .facts .stat { display: inline-flex; align-items: center; gap: calc(6 * var(--u)); }
   .dlg .facts .shell-ic { width: calc(28 * var(--u)); height: calc(24 * var(--u)); border: 1px solid #1d4d48; border-radius: calc(7 * var(--u)); }
   .dlg .facts .shell-ic svg { width: calc(17 * var(--u)); height: calc(17 * var(--u)); }
-  /* The ⋯ menu next to Close: the ticket's less common actions (Park, Move to…, Kill). */
+  /* The ticket dialog's close X, at the far right of its head after the ⋯ menu. */
+  .xclose { display: inline-grid; place-items: center; width: calc(36 * var(--u)); height: calc(36 * var(--u)); padding: 0; border: 0; border-radius: calc(8 * var(--u));
+            background: none; color: var(--muted); cursor: pointer; }
+  .xclose:hover, .xclose:focus-visible { background: #2a2c31; color: #fff; outline: none; }
+  .xclose svg { width: calc(20 * var(--u)); height: calc(20 * var(--u)); fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+  /* The ⋯ menu left of the close X: the ticket's less common actions (Park, Move to…, Kill). */
   .more { position: relative; display: inline-flex; }
   .more > .btn { min-width: calc(36 * var(--u)); padding: 0 calc(8 * var(--u)); font-size: calc(16 * var(--u)); letter-spacing: .05em; }
   .more .menu { position: absolute; z-index: 5; top: calc(100% + calc(6 * var(--u))); right: 0; width: min(calc(320 * var(--u)), calc(100vw - calc(28 * var(--u)))); padding: calc(6 * var(--u));
@@ -1217,10 +1228,10 @@ function renderDetailInner() {
   const ws = t.stage === "done" && !t.worktree && !t.branch ? "" : `<span class="mono">${esc(where(t))}</span>`;
   const parent = t.parent ? `<button type="button" class="btn" data-open="${esc(t.parent)}">Parent ${esc(t.parent)}</button>` : "";
   document.getElementById("ticketBody").innerHTML = `
-    <div class="head"><span class="mono muted">${esc(t.key)} · ${esc(t.project)}</span>${pills(t)}<span style="flex:1"></span>
-      <label class="muted" style="display:flex;gap:calc(6 * var(--u));align-items:center;font-size:calc(13 * var(--u))">Stage
+    <div class="head"><span class="mono muted">${esc(t.key)} · ${esc(t.project)}</span>${pills(t)}
+      <span class="hctl"><label class="muted" style="display:flex;gap:calc(6 * var(--u));align-items:center;font-size:calc(13 * var(--u))">Stage
         <select id="stageSel">${STAGES.map((s) => `<option value="${s}" ${s === t.stage ? "selected" : ""}>${STAGE_NAME[s]}</option>`).join("")}</select></label>
-      <button type="button" class="btn" id="closeDlg">Close</button>${moreMenu}</div>
+      ${moreMenu}<button type="button" class="xclose" id="closeDlg" title="Close" aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button></span></div>
     <h1>${esc(t.title)}</h1>
     <div class="facts"><span class="stat">${shell}${status}</span>${ws}${t.onto ? `<span class="mono" title="It starts from this branch and merges into it, not trunk${t.onto_own ? "" : " (the project's target)"}">onto ${esc(t.onto)}</span>` : ""}${t.tmux ? `<span class="mono">${esc(t.tmux)}</span>` : ""}
       ${t.round > 1 ? `<span>round ${t.round}</span>` : ""}${t.plan ? `<span>plan first${t.skill ? " · " + esc(t.skill) : ""}</span>` : ""}${parent}</div>
