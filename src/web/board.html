@@ -297,6 +297,13 @@
   .comment .who { font-size: calc(12 * var(--u)); color: var(--muted); }
   .comment .body { white-space: pre-wrap; overflow-wrap: anywhere; }
   .comment.claude { background: #1b1f27; }
+  .plan { overflow-wrap: anywhere; line-height: 1.5; }
+  .plan h2, .plan h3, .plan h4 { margin: calc(14 * var(--u)) 0 calc(6 * var(--u)); font-size: calc(15 * var(--u)); }
+  .plan h2 { font-size: calc(17 * var(--u)); } .plan > :first-child { margin-top: 0; }
+  .plan p, .plan ul, .plan ol { margin: 0 0 calc(8 * var(--u)); } .plan ul, .plan ol { padding-left: calc(22 * var(--u)); }
+  .plan code { font-family: var(--mono, monospace); font-size: .92em; background: var(--line2); padding: 0 calc(3 * var(--u)); border-radius: calc(3 * var(--u)); }
+  .plan pre { white-space: pre-wrap; background: var(--line2); padding: calc(8 * var(--u)); border-radius: calc(6 * var(--u)); margin: 0 0 calc(8 * var(--u)); }
+  .plan pre code { background: none; padding: 0; }
   .desc { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 30vh; overflow-y: auto; padding-bottom: calc(12 * var(--u)); margin-bottom: calc(12 * var(--u)); border-bottom: 1px solid var(--line2); }
   .form { display: grid; gap: calc(12 * var(--u)); }
   /* Images pasted into a description: thumbnails that open full size. */
@@ -827,7 +834,7 @@ function renderNeeds() {
       quick = (d.questions[0].options || []).slice(0, 3).map((o, i) => `<button type="button" class="btn" data-answer="${esc(t.key)}" data-n="${i + 1}">${esc(o.label)}</button>`).join("");
     if (f.kind === "input" && d?.options?.length)
       quick = d.options.slice(0, 2).map((o) => `<button type="button" class="btn" data-answer="${esc(t.key)}" data-n="${o.n}">${esc(o.label)}</button>`).join("");
-    const main = f.kind === "review" && f.detail === "plan" ? `<button type="button" class="btn primary" data-approve="${esc(t.key)}">Approve plan</button>`
+    const main = f.kind === "review" && f.detail === "plan" ? `<button type="button" class="btn primary" data-open="${esc(t.key)}" data-tab="plan">Read the plan</button>`
       : f.kind === "review" ? `<button type="button" class="btn primary" data-open="${esc(t.key)}" data-tab="review">Review</button>`
       : f.kind === "testing" ? `<button type="button" class="btn primary" data-open="${esc(t.key)}" data-tab="test">Test it</button>`
       : f.kind === "after-merge" ? `<button type="button" class="btn primary" data-open="${esc(t.key)}" data-tab="after-merge">See the log</button>`
@@ -1110,9 +1117,13 @@ function drawTail() {
   term.reset();
   term.write(text, () => { tail.writing = false; if (state.tailPinned) term.scrollToBottom(); });
 }
+// Claude handed in a plan (cl ticket done --plan) that can be approved. Sending
+// feedback keeps it so: Claude may only answer, not hand in a new one.
+const planReady = (t) => t.stage === "planning" && ((t.plan_md || "").trim() || t.flags.some((f) => f.kind === "review"));
 function tabsFor(d) {
   const t = d.ticket; const tabs = [];
   if (t.flags.some((f) => f.kind === "question" || f.kind === "input")) tabs.push(["needs", "Needs you"]);
+  if ((t.plan_md || "").trim() || planReady(t)) tabs.push(["plan", "Plan"]);
   if (t.flags.some((f) => f.kind === "after-merge")) tabs.push(["after-merge", "After merge"]);
   if (t.flags.some((f) => f.kind === "merge-failed" || f.kind === "unmerged")) tabs.push(["landing", "Not merged"]);
   if (t.stage === "review" || d.guide || d.review) tabs.push(["review", "Review"]);
@@ -1153,8 +1164,7 @@ function renderDetailInner() {
   const d = state.detail; const t = d.ticket; const tabs = tabsFor(d);
   if (!state.tab || !tabs.some(([k]) => k === state.tab)) state.tab = tabs[0][0];
   const liveSession = t.tmux && d.status && d.status !== "gone";
-  const planReady = t.stage === "planning" && t.flags.some((f) => f.kind === "review");
-  const approve = planReady ? "Approve plan" : t.stage === "review" ? "Approve, to testing" : t.stage === "testing" && !t.finishing ? "Tested, done" : "";
+  const approve = planReady(t) ? "Approve plan" : t.stage === "review" ? "Approve, to testing" : t.stage === "testing" && !t.finishing ? "Tested, done" : "";
   const acts = [];
   if (liveSession) acts.push(`<a class="btn primary" href="${shellHref(t)}">Open shell</a>`);
   // Ran before (killed, or its session ended): a fresh session, resuming its conversation where Claude still has it.
@@ -1221,6 +1231,7 @@ function tabHtml(d) {
   const t = d.ticket;
   switch (state.tab) {
     case "needs": return needsTab(d);
+    case "plan": return planTab(d);
     case "review": return reviewTab(d);
     case "test": return testTab(d);
     case "comments": return commentsTab(d);
@@ -1292,6 +1303,46 @@ function reviewTab(d) {
     <label class="muted" style="display:flex;flex-direction:column;gap:calc(5 * var(--u));font-size:calc(12.5 * var(--u))">Or say what to change (sends it back for another round)
       <textarea id="backText" rows="3"></textarea></label>
     <div class="actions"><button type="button" class="btn" id="sendBack">Send back to Claude</button></div></div>`;
+}
+// The plan Claude handed in, to read before approving it or sending it back.
+function planTab(d) {
+  const t = d.ticket; const ready = planReady(t);
+  const md = (t.plan_md || "").trim();
+  return `<div style="display:flex;flex-direction:column;gap:calc(10 * var(--u))">
+    ${md ? `<div class="plan">${mdHtml(md)}</div>` : `<p class="muted" style="margin:0">Claude hasn't handed in the plan's text; its summary is under Comments.</p>`}
+    ${ready ? `<p class="muted" style="margin:0">Approving moves it to Queued: a new session builds it from this plan.</p>
+    <div class="actions"><button type="button" class="btn primary" data-act="approve">Approve plan</button></div>
+    <label class="muted" style="display:flex;flex-direction:column;gap:calc(5 * var(--u));font-size:calc(12.5 * var(--u))">Or ask about it or say what to change (when Claude hands in a revised plan, it shows here)
+      <textarea id="backText" rows="3"></textarea></label>
+    <div class="actions"><button type="button" class="btn" id="sendBack">Send to Claude</button></div>`
+    : t.stage === "planning" ? `<p class="muted" style="margin:0">Claude hasn't handed in a plan yet.</p>` : ""}</div>`;
+}
+// Enough markdown for a plan: headings, lists, code blocks, inline code,
+// bold and links. Everything is escaped first.
+function mdHtml(md) {
+  const inline = (s) => esc(s).replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  const out = []; let list = null, para = [], code = null;
+  const flushPara = () => { if (para.length) out.push(`<p>${para.map(inline).join("<br>")}</p>`); para = []; };
+  const flushList = () => { if (list) out.push(`<${list.tag}>${list.items.map((i) => `<li>${inline(i)}</li>`).join("")}</${list.tag}>`); list = null; };
+  for (const line of md.split("\n")) {
+    if (code) { if (/^\s*```/.test(line)) { out.push(`<pre><code>${esc(code.join("\n"))}</code></pre>`); code = null; } else code.push(line); continue; }
+    if (/^\s*```/.test(line)) { flushPara(); flushList(); code = []; continue; }
+    let m;
+    if ((m = line.match(/^(#{1,6})\s+(.*)$/))) { flushPara(); flushList(); const n = Math.min(m[1].length + 1, 4); out.push(`<h${n}>${inline(m[2])}</h${n}>`); continue; }
+    if ((m = line.match(/^\s*([-*+]|\d+[.)])\s+(.*)$/))) {
+      flushPara(); const tag = /\d/.test(m[1]) ? "ol" : "ul";
+      if (list && list.tag !== tag) flushList();
+      (list ||= { tag, items: [] }).items.push(m[2]); continue;
+    }
+    if (!line.trim()) { flushPara(); flushList(); continue; }
+    // A line indented under a list item goes on with it.
+    if (list && /^\s+\S/.test(line)) { list.items[list.items.length - 1] += " " + line.trim(); continue; }
+    flushList(); para.push(line);
+  }
+  if (code) out.push(`<pre><code>${esc(code.join("\n"))}</code></pre>`);
+  flushPara(); flushList();
+  return out.join("");
 }
 // The test plan as a walk-through, one step at a time (like the wizard
 // skill), then a page that sums up the checks and sends them. Nothing runs or
@@ -1824,11 +1875,6 @@ async function onClick(e) {
   if (ds.dismissAll) return dismissAll(ds.dismissAll, ds.keys.split(" "));
   if (ds.dismissYes !== undefined) { document.getElementById("dismissDlg").close(ds.dismissYes); return; }
   if (ds.answer) { e.stopPropagation(); return sendAnswer(ds.answer, [ds.n], el); }
-  if (ds.approve) {
-    const extra = state.data.tickets.find((r) => r.ticket.key === ds.approve)?.ticket.stage === "testing" ? await doneExtras(ds.approve) : {};
-    if (!extra) return;
-    return act(ds.approve, "approve", extra, finishMsg(ds.approve, extra) || "Approved");
-  }
   if (ds.open) return openTicket(ds.open, ds.tab);
   if (ds.unblock && state.open) {
     try { await act(state.open, "unblock", { blocker: ds.unblock }, `${state.open} no longer waits on ${ds.unblock}`); } catch {}
@@ -1896,7 +1942,7 @@ async function onClick(e) {
     const box = document.getElementById(el.id === "sendMsg" ? "msg" : el.id === "sendBack" ? "backText" : "commentText");
     const text = box.value.trim(); if (!text) return;
     const r = await act(key, "comment", { text, send: el.id !== "saveNote" });
-    box.value = ""; toast(r.sent_back ? `Back to Claude: round ${r.round}` : r.sent ? "Sent" : r.unsent ? "Saved (no session yet)" : "Saved");
+    box.value = ""; toast(r.sent_back ? `Back to Claude: round ${r.round}` : r.sent && el.id === "sendBack" ? "Sent to Claude" : r.sent ? "Sent" : r.unsent ? "Saved (no session yet)" : "Saved");
     return;
   }
   if (el.id === "sendResults" || el.id === "sendResults2") {

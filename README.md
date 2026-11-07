@@ -519,9 +519,11 @@ cl t done QA-1 --summary "Fixed the race"
   `cl t done --summary ...`, `cl t comment "..."` (as claude).
 - `--plan` starts a ticket in planning: Claude runs in plan mode, interviews
   you (`--skill grilling` or `--skill wayfinder` names a skill for it), posts
-  the plan and runs `done`, which means "plan ready" there. `cl t approve`
-  moves it to running and tells Claude to build it; on a ticket in review or
-  testing, approve moves it on a stage.
+  the plan and runs `done`, which means "plan ready" there. On the web board,
+  its Needs you card's Read the plan opens the ticket's Plan tab, with Approve
+  plan and a box to send feedback. The plan stays approvable while Claude
+  answers; a revised plan it hands in replaces it. `cl t approve` moves it to Queued, and a new session builds it; on
+  a ticket in review or testing, approve moves it on a stage.
 
 ### Running tickets
 

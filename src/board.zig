@@ -474,6 +474,28 @@ test "an approved plan queues, and the plan is kept" {
     try std.testing.expectEqual(@as(usize, 0), after.flags.len);
 }
 
+test "feedback on a ready plan keeps it ready to approve" {
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp" };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try Db.open(":memory:");
+    defer db.close();
+    try migrate(db);
+    try addProject(db, .{ .name = "qa", .dir = "/x/qa" });
+    const k = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Plan me", .plan = true });
+    try done(ctx, db, a, k, "Plan ready");
+    // Claude may only answer it, without handing in a new plan: the one it
+    // handed in can still be approved.
+    const r = try addComment(ctx, db, a, k, "you", "why step 2?", true);
+    try std.testing.expect(!r.sent_back);
+    const t = try getTicket(db, a, k);
+    try std.testing.expectEqual(Stage.planning, t.stage);
+    try std.testing.expectEqual(@as(usize, 1), t.flags.len);
+    try std.testing.expectEqual(Stage.planning, try approve(ctx, db, a, k));
+    try std.testing.expectEqual(Stage.queued, (try getTicket(db, a, k)).stage);
+}
+
 test "migrate: a board from before planning sessions gets the plan and planners columns" {
     const db = try Db.open(":memory:");
     defer db.close();
