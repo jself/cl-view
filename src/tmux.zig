@@ -382,11 +382,105 @@ pub fn newSession(ctx: Ctx, opts: NewOptions) ![]const u8 {
         "set-option", "-t", tmux_name, "set-titles-string", "[cl] #{@cl_name}", ";",
         "set-option", "-t", tmux_name, "window-size", "latest", ";",
         "set-option", "-t", tmux_name, "-w", "aggressive-resize", "on", ";",
-        "set-option", "-sq", "extended-keys", "on", ";",
-        "set-option", "-asq", "terminal-features", ",*:hyperlinks:extkeys",
+        "set-option", "-sq", "extended-keys", "on",
     });
+    try ensureTerminalFeatures(ctx);
     try ensureDetachBinding(ctx);
     return tmux_name;
+}
+
+/// The terminal-features entry cl adds to the server: hyperlinks and
+/// extended keys for every terminal. It lives at a fixed index cl owns, so
+/// setting it (no -a) is idempotent even when launches race.
+const cl_terminal_features = "*:hyperlinks:extkeys";
+const cl_terminal_features_key = "terminal-features[90]";
+
+/// Make the server's terminal-features array hold `cl_terminal_features`
+/// exactly once, at `cl_terminal_features_key`: set it there when it's
+/// missing, and unset copies at other indexes (cl used to append it on every
+/// launch). Other entries are left alone.
+fn ensureTerminalFeatures(ctx: Ctx) !void {
+    const shown = try run(ctx, &.{ "show-options", "-sq", "terminal-features" });
+    defer ctx.gpa.free(shown);
+    var plan = try terminalFeaturesPlan(ctx.gpa, shown);
+    defer plan.drop.deinit(ctx.gpa);
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(ctx.gpa);
+    for (plan.drop.items) |key| {
+        if (argv.items.len > 0) try argv.append(ctx.gpa, ";");
+        try argv.appendSlice(ctx.gpa, &.{ "set-option", "-su", key });
+    }
+    if (plan.set) {
+        if (argv.items.len > 0) try argv.append(ctx.gpa, ";");
+        try argv.appendSlice(ctx.gpa, &.{ "set-option", "-sq", cl_terminal_features_key, cl_terminal_features });
+    }
+    if (argv.items.len > 0) try runQuiet(ctx, argv.items);
+}
+
+const TerminalFeaturesPlan = struct {
+    /// Set `cl_terminal_features_key` (it doesn't hold the entry yet).
+    set: bool,
+    /// Array keys ("terminal-features[N]", slices of the input) holding
+    /// the entry at other indexes, to unset.
+    drop: std.ArrayList([]const u8),
+};
+
+/// What `ensureTerminalFeatures` does, given `show-options -s
+/// terminal-features` output: one "terminal-features[N] value" line per
+/// entry, the value quoted when it has special characters.
+fn terminalFeaturesPlan(a: std.mem.Allocator, shown: []const u8) !TerminalFeaturesPlan {
+    var plan: TerminalFeaturesPlan = .{ .set = true, .drop = .empty };
+    errdefer plan.drop.deinit(a);
+    var lines = std.mem.splitScalar(u8, shown, '\n');
+    while (lines.next()) |line| {
+        const sp = std.mem.indexOfScalar(u8, line, ' ') orelse continue;
+        const key = line[0..sp];
+        var value = std.mem.trim(u8, line[sp + 1 ..], " \r");
+        if (value.len >= 2 and (value[0] == '"' or value[0] == '\'') and value[value.len - 1] == value[0])
+            value = value[1 .. value.len - 1];
+        if (!std.mem.eql(u8, value, cl_terminal_features)) continue;
+        if (std.mem.eql(u8, key, cl_terminal_features_key)) plan.set = false else try plan.drop.append(a, key);
+    }
+    return plan;
+}
+
+test terminalFeaturesPlan {
+    const a = std.testing.allocator;
+    const defaults =
+        \\terminal-features[0] xterm*:clipboard:ccolour:cstyle:focus:title
+        \\terminal-features[1] screen*:title
+        \\terminal-features[2] rxvt*:ignorefkeys
+    ;
+    {
+        var p = try terminalFeaturesPlan(a, defaults);
+        defer p.drop.deinit(a);
+        try std.testing.expect(p.set);
+        try std.testing.expectEqual(0, p.drop.items.len);
+    }
+    {
+        var p = try terminalFeaturesPlan(a, "");
+        defer p.drop.deinit(a);
+        try std.testing.expect(p.set);
+    }
+    {
+        var p = try terminalFeaturesPlan(a, defaults ++ "\nterminal-features[90] *:hyperlinks:extkeys");
+        defer p.drop.deinit(a);
+        try std.testing.expect(!p.set);
+        try std.testing.expectEqual(0, p.drop.items.len);
+    }
+    {
+        // Old appended copies, one quoted; something else at cl's index.
+        var p = try terminalFeaturesPlan(a, defaults ++
+            "\nterminal-features[3] \"*:hyperlinks:extkeys\"" ++
+            "\nterminal-features[4] *:hyperlinks:extkeys" ++
+            "\nterminal-features[5] alacritty*:RGB" ++
+            "\nterminal-features[90] foot*:RGB");
+        defer p.drop.deinit(a);
+        try std.testing.expect(p.set);
+        try std.testing.expectEqual(2, p.drop.items.len);
+        try std.testing.expectEqualStrings("terminal-features[3]", p.drop.items[0]);
+        try std.testing.expectEqualStrings("terminal-features[4]", p.drop.items[1]);
+    }
 }
 
 /// Ctrl-Q detaches any client attached to a cl_* session. Ctrl-L there also
