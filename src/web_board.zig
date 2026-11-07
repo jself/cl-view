@@ -711,6 +711,8 @@ const TicketRow = struct {
     status: []const u8,
     /// Claude is working on it now: it stays out of Needs You until it stops.
     working: bool = false,
+    /// Where its automated review stands (`autoreview.standing`).
+    autoreview: autoreview.Standing = .none,
 };
 
 fn sessionStatuses(ctx: Ctx, cfg: config.Config, a: std.mem.Allocator) !struct { rows: []SessionRow, map: std.StringHashMapUnmanaged([]const u8), busy: []const []const u8 } {
@@ -732,7 +734,7 @@ fn getBoard(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, re
     const ss = try sessionStatuses(ctx, cfg, a);
     const tickets = try board.listTickets(db, a, .{});
     var rows: std.ArrayList(TicketRow) = .empty;
-    for (tickets) |t| try rows.append(a, .{ .ticket = t, .status = ss.map.get(t.tmux) orelse "", .working = try board.isWorking(db, t, ss.busy) });
+    for (tickets) |t| try rows.append(a, .{ .ticket = t, .status = ss.map.get(t.tmux) orelse "", .working = try board.isWorking(db, t, ss.busy), .autoreview = autoreview.standing(autoreview.load(a, t), t) });
     var profiles: std.ArrayList([]const u8) = .empty;
     for (cfg.profiles) |p| try profiles.append(a, p.name);
     try ok(req, a, .{
@@ -1060,6 +1062,8 @@ fn getTicket(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, r
         // The last automated review (checked: one whose reviewer died or ran
         // too long reads as failed), and whether it is of an earlier round.
         .autoreview = ar,
+        // Where it stands: unread, sent, handled, outdated... (`autoreview.standing`).
+        .autoreview_standing = autoreview.standing(ar, t),
         // What "Send findings to Claude" sends (your edit, if you made one): Edit starts from it.
         .autoreview_message = if (ar) |r| (if (std.mem.eql(u8, r.status, "done")) try autoreview.message(a, r) else "") else "",
         .autoreview_session = try autoreview.sessionName(a, t.key),

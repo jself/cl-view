@@ -356,6 +356,14 @@
   .ar li .at { font: calc(12 * var(--u)) var(--mono); color: var(--muted); overflow-wrap: anywhere; }
   .ar li .plan { margin-top: calc(4 * var(--u)); color: var(--dim); } .ar li .plan > :last-child { margin-bottom: 0; }
   .sev { display: inline-block; padding: 0 calc(6 * var(--u)); border-radius: calc(4 * var(--u)); font-size: calc(11 * var(--u)); font-weight: 600; text-transform: uppercase; margin-right: calc(4 * var(--u)); }
+  /* Where the automated review stands (autoreview.standing): to read, with Claude, handled, outdated. */
+  .ar-unread { background: var(--input-bg); color: var(--input); } .ar-sent { background: var(--st-running-bg); color: var(--st-running); }
+  .ar-handled { background: var(--st-done-bg); color: var(--st-done); } .ar-outdated { background: transparent; color: var(--muted); border: 1px dashed var(--line); }
+  .ar .state { display: flex; flex-wrap: wrap; align-items: center; gap: calc(8 * var(--u)); }
+  .ar.settled ol { opacity: .62; } /* sent or handled: there for reference, not to read again */
+  .ar .reply { border-left: 3px solid var(--st-done); padding: calc(2 * var(--u)) 0 calc(2 * var(--u)) calc(10 * var(--u)); }
+  .ans { display: inline-block; padding: 0 calc(6 * var(--u)); border-radius: calc(4 * var(--u)); font-size: calc(11 * var(--u)); font-weight: 600; margin-left: calc(6 * var(--u)); }
+  .ans.fixed { background: var(--st-done-bg); color: var(--st-done); } .ans.partly { background: var(--drift-bg); color: var(--drift); } .ans.declined { background: var(--line); color: var(--dim); }
   .sev.high { background: #7f1d1d; color: #fecaca; } .sev.medium { background: #713f12; color: #fde68a; } .sev.low { background: var(--line); color: var(--dim); }
   .plan h2, .plan h3, .plan h4 { margin: calc(14 * var(--u)) 0 calc(6 * var(--u)); font-size: calc(15 * var(--u)); }
   .plan h2 { font-size: calc(17 * var(--u)); } .plan > :first-child { margin-top: 0; }
@@ -732,17 +740,32 @@ const parkTitle = (p) => p.until ? `Checks every ${dur(p.every)}${p.checked ? `;
 const parkPill = (t) => t.park ? `<span class="pill f-parked" title="${esc(parkTitle(t.park))}"><span>Parked: ${esc(t.park.reason)}</span></span>` : "";
 // The idle flag isn't repeated on the card: its status already says Idle.
 const cardFlags = (t) => t.flags.filter((f) => f.kind !== "idle");
-// Its finished automated review, when there are findings you haven't sent: a pill on its Needs you card.
-const reviewNote = (t) => { if (!t.autoreview || reviewing(t)) return "";
-  try { const r = JSON.parse(t.autoreview); if (r.status !== "done" || r.sent || r.round < t.round) return "";
-    return `<span class="pill" title="An automated review is on the Review tab">${r.findings.length ? `Auto review: ${r.findings.length} finding${r.findings.length > 1 ? "s" : ""}` : "Auto review: no findings"}</span>`; } catch { return ""; } };
+// Where its automated review stands (the server's autoreview.standing, t.ar): one pill, so findings
+// to read, findings with Claude and findings Claude has handled never look alike.
+const arReview = (t) => { try { return JSON.parse(t.autoreview || "null"); } catch { return null; } };
+const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
+const arPill = (t, all) => { const r = arReview(t); if (!r) return "";
+  const n = r.findings?.length || 0;
+  switch (t.ar) {
+    case "unread": return `<span class="pill ar-unread" title="The automated review's findings are on the Review tab; nothing has gone to Claude yet">Auto review: ${r.edited && !n ? "your edit to send" : plural(n, "finding") + " to read"}</span>`;
+    case "sent": return `<span class="pill ar-sent" title="Sent to Claude ${ago(r.sent)} ago; it hasn't finished that round yet">Findings with Claude</span>`;
+    case "handled": return `<span class="pill ar-handled" title="Claude finished the round they started${r.handled ? ` ${ago(r.handled)} ago` : ""}${r.answers?.length ? ": " + arAnswers(r.answers) : ""}. Nothing in them to read again">Findings handled${all && r.answers?.length && r.answers.some((x) => x !== "fixed") ? " · " + arAnswers(r.answers) : ""}</span>`;
+    case "clean": return all ? `<span class="pill ar-handled" title="The automated review found nothing">Auto review: no findings</span>` : "";
+    case "outdated": return all ? `<span class="pill ar-outdated" title="From before Claude's last changes; Run again on the Review tab reviews what's there now">Auto review outdated</span>` : "";
+  } return ""; };
+// "2 fixed, 1 declined": what Claude said it did with each finding, counted.
+const arAnswers = (a) => ["fixed", "partly", "declined"].map((k) => [k, a.filter((x) => x === k).length]).filter(([, c]) => c).map(([k, c]) => `${c} ${k}`).join(", ");
+// On its Needs you card: everything, a clean or outdated review included.
+const reviewNote = (t) => reviewing(t) ? "" : arPill(t, true);
 // An automated review running on it (autoreview.zig); the detail checks it's alive.
 const reviewing = (t) => (t.autoreview || "").includes('"status":"running"');
 const reviewPill = (t) => reviewing(t) ? `<span class="pill" title="A separate Claude is reviewing its changes">reviewing</span>` : "";
 // Its change would conflict with its target if rebased now (drift.zig): an early warning, not a flag.
 const driftFiles = (d) => d.files.split("\n").filter(Boolean);
 const driftPill = (t) => t.drift && t.stage !== "done" ? `<span class="pill f-drift" title="${esc(`Rebasing it onto ${t.drift.onto} now would conflict in: ${driftFiles(t.drift).join(", ")}`)}">Will conflict</span>` : "";
-const pills = (t) => cardFlags(t).length || t.finishing || t.custom_close || t.park || t.drift || reviewing(t) ? `<span class="pills">${reviewPill(t)}${parkPill(t)}${driftPill(t)}${customPill(t)}${finishPill(t)}${cardFlags(t).map((f) => `<span class="pill ${flagClass(f.kind)}">${esc(flagLabel(f))}</span>`).join("")}</span>` : "";
+// On its board card: only what says something (to read, with Claude, handled) while it's still in play.
+const cardArPill = (t) => ["running", "review", "testing"].includes(t.stage) && ["unread", "sent", "handled"].includes(t.ar) && !(t.ar === "unread" && t.stage === "running") ? arPill(t, false) : "";
+const pills = (t) => cardFlags(t).length || t.finishing || t.custom_close || t.park || t.drift || reviewing(t) || cardArPill(t) ? `<span class="pills">${reviewPill(t)}${cardArPill(t)}${parkPill(t)}${driftPill(t)}${customPill(t)}${finishPill(t)}${cardFlags(t).map((f) => `<span class="pill ${flagClass(f.kind)}">${esc(flagLabel(f))}</span>`).join("")}</span>` : "";
 // "(starting)" is the dispatcher's claim while it opens the session.
 // A Backlog or Queued ticket whose session is gone hasn't ended: it's waiting to start.
 // A killed one waits for you to restart it.
@@ -813,6 +836,7 @@ function setHtml(el, html) {
 }
 async function refresh() {
   try { state.data = await api("board"); } catch (e) { if (e.message !== "log in") toast(e.message, true); return; }
+  for (const row of state.data.tickets) row.ticket.ar = row.autoreview;
   checkBuild(state.data.build);
   document.getElementById("micBtn").hidden = !state.data.voice?.on;
   if (hint.on) return; // S's labels point at what is drawn now
@@ -1161,6 +1185,8 @@ async function loadDetail(key, quiet) {
   catch (e) { if (!quiet) toast(e.message, true); return; }
   // Another ticket was opened while this one loaded: never show this one there.
   if (state.open !== key) return;
+  d.ticket.ar = d.autoreview_standing;
+  if (state.detail?.ticket.key !== key || state.detail?.autoreview_standing !== d.autoreview_standing) state.arShow = state.arPrevShow = false;
   state.detail = d;
   // Opening it: testing picks up where it was left (saved on the ticket).
   if (!quiet) { try { state.checks = JSON.parse(d.ticket.test_progress || "{}"); } catch { state.checks = {}; } }
@@ -1521,11 +1547,17 @@ function autoreviewHtml(d) {
   const runBtn = (label, primary) => !can ? "" : `<button type="button" class="btn${primary ? " primary" : ""}" data-act="autoreview" title="A separate Claude (profile ${esc(t.profile || "default")} or the project's) reads the changes and reports problems; nothing is sent until you choose">${label}</button>`;
   const head = (what) => `<div class="hd"><strong>Automated review</strong><span class="muted">${what}</span></div>`;
   if (!r) return `<div class="ar">${head("a second Claude goes over the changes before you do")}<div class="actions">${runBtn("Run automated review", false)}</div></div>`;
-  const meta = [r.auto ? "started by itself" : "", r.profile ? `profile ${esc(r.profile)}` : "", r.skill ? `skill ${esc(r.skill)}` : "", r.round && r.round < t.round ? `of round ${r.round}, before Claude's last changes` : ""].filter(Boolean).join(" · ");
+  // Where it stands (autoreview.standing); a finished one's state line says which round it's from.
+  const st = d.autoreview_standing; const settled = ["sent", "handled", "outdated"].includes(st);
+  const meta = [r.auto ? "started by itself" : "", r.profile ? `profile ${esc(r.profile)}` : "", r.skill ? `skill ${esc(r.skill)}` : "", r.round && r.round < t.round && r.status !== "done" ? `of round ${r.round}, before Claude's last changes` : ""].filter(Boolean).join(" · ");
+  // The review before this one, whose findings Claude handled (autoreview.Previous): kept so a new review doesn't hide it.
+  const pv = r.previous; const pvAns = (i) => pv?.answers?.[i] ? `<span class="ans ${esc(pv.answers[i])}">${esc(pv.answers[i])}</span>` : "";
+  const prevHtml = !pv ? "" : `<div class="state"><span class="pill ar-handled">Last review: handled by Claude${pv.handled ? " " + (ago(pv.handled) === "now" ? "just now" : ago(pv.handled) + " ago") : ""}</span><span class="muted">round ${pv.round}${pv.answers?.length ? " · " + arAnswers(pv.answers) : ""}</span>${pv.reply || pv.titles?.length ? `<button type="button" class="btn" data-ar-prev aria-expanded="${!!state.arPrevShow}">${state.arPrevShow ? "Hide" : "Show what Claude did"}</button>` : ""}</div>
+    ${state.arPrevShow ? `${pv.reply ? `<div class="plan reply">${mdHtml(pv.reply)}</div>` : ""}${pv.titles?.length ? `<ol style="opacity:.62">${pv.titles.map((x, i) => `<li><strong>${esc(x)}</strong>${pvAns(i)}</li>`).join("")}</ol>` : ""}` : ""}`;
   if (r.status === "running") return `<div class="ar">${head(`Reviewing… (started ${ago(r.started)}${ago(r.started) === "now" ? "" : " ago"}${meta ? " · " + meta : ""})`)}
     <p class="muted" style="margin:0">The findings show here when it's done. To watch it: <code>tmux attach -t ${esc(d.autoreview_session)}</code></p>
-    <div class="actions"><button type="button" class="btn" data-act="autoreview-stop">Stop</button></div></div>`;
-  if (r.status === "failed") return `<div class="ar">${head(`failed ${ago(r.finished)}${meta ? " · " + meta : ""}`)}<p style="margin:0">${esc(r.error)}</p><div class="actions">${runBtn("Run again", false)}</div></div>`;
+    <div class="actions"><button type="button" class="btn" data-act="autoreview-stop">Stop</button></div>${prevHtml}</div>`;
+  if (r.status === "failed") return `<div class="ar">${head(`failed ${ago(r.finished)}${meta ? " · " + meta : ""}`)}<p style="margin:0">${esc(r.error)}</p><div class="actions">${runBtn("Run again", false)}</div>${prevHtml}</div>`;
   const live = sessionLive(d); const n = r.findings.length;
   // From before Claude's last changes: their lines may point elsewhere now, so only Run again.
   const old = r.round && r.round < t.round;
@@ -1535,17 +1567,33 @@ function autoreviewHtml(d) {
     <textarea id="reviewEdit" class="mdedit" rows="14" aria-label="What's sent to Claude">${esc(editDraft("review", d.autoreview_message || ""))}</textarea>
     <p class="muted" style="margin:0">Send findings to Claude pastes this into its session (and Open in gutter puts it in the overall note).${r.edited ? " Emptied, it goes back to the findings as they came." : ""}</p>
     <div class="actions">${editButtons("review")}${r.edited ? `<button type="button" class="btn" data-edit-revert="review" title="Drop your edit: the findings are sent as the review wrote them">Back to the findings</button>` : ""}</div></div>`;
-  const editBtn = old ? "" : `<button type="button" class="btn" data-edit="review" title="Change what's sent to Claude: drop findings, reword them, add your own">${r.edited ? "Edit again" : "Edit"}</button>`;
-  const items = r.findings.map((f) => { const at = f.path ? f.path + (f.line ? ":" + f.line + (f.end_line > f.line ? "-" + f.end_line : "") : "") : "";
-    return `<li><div><span class="sev ${esc(f.severity)}">${esc(f.severity)}</span><strong>${esc(f.title)}</strong>${at ? ` <span class="at">${esc(at)}</span>` : ""}</div>${f.body ? `<div class="plan">${mdHtml(f.body)}</div>` : ""}</li>`; }).join("");
+  const editBtn = old || settled ? "" : `<button type="button" class="btn" data-edit="review" title="Change what's sent to Claude: drop findings, reword them, add your own">${r.edited ? "Edit again" : "Edit"}</button>`;
+  // What Claude said it did with each one, when its reply said so for all of them (autoreview.parseAnswers).
+  const ans = (i) => r.answers?.[i] ? `<span class="ans ${esc(r.answers[i])}">${esc(r.answers[i])}</span>` : "";
+  const items = r.findings.map((f, i) => { const at = f.path ? f.path + (f.line ? ":" + f.line + (f.end_line > f.line ? "-" + f.end_line : "") : "") : "";
+    return `<li><div><span class="sev ${esc(f.severity)}">${esc(f.severity)}</span><strong>${esc(f.title)}</strong>${at ? ` <span class="at">${esc(at)}</span>` : ""}${ans(i)}</div>${f.body ? `<div class="plan">${mdHtml(f.body)}</div>` : ""}</li>`; }).join("");
   const sendTitle = live ? "Paste them into its session (like Send back): Claude checks each one, fixes what's real and says which it disagrees with" : "Its session isn't running: start it again to send them";
   const gutterBtn = d.gutter && live && !d.gutter_port ? `<button type="button" class="btn" data-act="autoreview-gutter" title="Open gutter with the findings as your draft review: delete or edit them, add your own, then Submit">Open in gutter with findings</button>` : "";
-  return `<div class="ar">${head(`${n ? `${n} finding${n > 1 ? "s" : ""}` : "no findings"} · ${ago(r.finished)}${meta ? " · " + meta : ""}${r.sent ? " · sent to Claude" : ""}`)}
-    ${r.edited ? `<div class="muted">What's sent, as you edited it:</div><div class="comment"><div class="body">${esc(r.edited)}</div></div>`
+  const since = (x) => ago(x) === "now" ? "just now" : ago(x) + " ago";
+  const standingHtml = {
+    unread: `<span class="pill ar-unread">New findings</span><span>${r.edited && !n ? "Your edit is ready to send" : plural(n, "finding") + " to read"}; nothing has gone to Claude yet.</span>`,
+    clean: `<span class="pill ar-handled">No findings</span><span>Nothing to send to Claude.</span>`,
+    sent: `<span class="pill ar-sent">Sent to Claude ${since(r.sent)}</span><span>${t.stage === "running" ? "Claude is working on them. " : r.sent_round && r.sent_round <= r.round ? "They went to a round already under way, which Claude has finished since; cl can't tell whether it read them first, so see its reply in Comments. " : ""}${t.stage === "running" ? "Nothing to read here until it finishes that round." : ""}</span>`,
+    handled: `<span class="pill ar-handled">Handled by Claude${r.handled ? " " + since(r.handled) : ""}</span><span>${!r.handled ? "The round they started is over (the ticket left Running), but cl has no reply from Claude for it. " : r.answers?.length ? arAnswers(r.answers) + ". It finished the round they started; there's nothing in them to read again." : "It finished the round they started; there's nothing in them to read again."}</span>`,
+    outdated: `<span class="pill ar-outdated">Outdated</span><span>From round ${r.round}, before Claude's last changes, and never sent: its lines may point elsewhere now. Run again to review what's there now.</span>`,
+  }[st] || "";
+  // Claude's summary as it finished the round the findings started.
+  const reply = st === "handled" && r.reply ? `<div class="muted">Claude's reply:</div><div class="plan reply">${mdHtml(r.reply)}</div>` : "";
+  const findingsHtml = `${r.edited ? `<div class="muted">What's sent, as you edited it:</div><div class="comment"><div class="body">${esc(r.edited)}</div></div>`
       : `${r.summary ? `<div class="plan">${mdHtml(r.summary)}</div>` : ""}
-    ${n ? `<ol>${items}</ol>` : ""}`}
-    ${old && n ? `<p class="muted" style="margin:0">Claude has changed the code since: run it again to review what's there now.</p>` : ""}
-    <div class="actions">${(n || r.edited) && !old ? `<button type="button" class="btn${r.sent ? "" : " primary"}" data-act="autoreview-send" ${live ? "" : "disabled"} title="${esc(sendTitle)}">${r.sent ? "Send findings again" : "Send findings to Claude"}</button>${gutterBtn}` : ""}${editBtn}${runBtn("Run again", old)}</div></div>`;
+    ${n ? `<ol>${items}</ol>` : ""}`}`;
+  // Sent, handled or outdated: the findings fold away (Show brings them back), dimmed.
+  const body = !settled || !(n || r.edited || r.summary) ? findingsHtml
+    : `<div><button type="button" class="btn" data-ar-toggle aria-expanded="${!!state.arShow}">${state.arShow ? "Hide the findings" : r.edited ? "Show what was sent" : n ? `Show the ${plural(n, "finding")}` : "Show the review"}</button></div>${state.arShow ? findingsHtml : ""}`;
+  return `<div class="ar${settled ? " settled" : ""}" data-ar-state="${esc(st)}">${head(`${n ? `${n} finding${n > 1 ? "s" : ""}` : "no findings"} · ${ago(r.finished)}${meta ? " · " + meta : ""}`)}
+    <div class="state">${standingHtml}</div>${reply}
+    ${body}
+    <div class="actions">${(n || r.edited) && !old ? `<button type="button" class="btn${r.sent ? "" : " primary"}" data-act="autoreview-send" ${live ? "" : "disabled"} title="${esc(sendTitle)}">${r.sent ? "Send findings again" : "Send findings to Claude"}</button>${gutterBtn}` : ""}${editBtn}${runBtn("Run again", st === "outdated")}</div>${prevHtml}</div>`;
 }
 // The plan Claude handed in, to read before approving it or sending it back.
 // Edit turns it into its markdown to change: what you save is what the session that builds it is told.
@@ -2229,6 +2277,8 @@ async function onClick(e) {
     try { const r = await act(key, "autoreview"); toast(`Reviewing with profile ${r.profile}; the findings show on the Review tab`); } catch {}
     return;
   }
+  if (ds.arToggle !== undefined) { state.arShow = !state.arShow; renderDetail(); return; }
+  if (ds.arPrev !== undefined) { state.arPrevShow = !state.arPrevShow; renderDetail(); return; }
   if (ds.act === "autoreview-stop") return act(key, "autoreview-stop", {}, "Stopped the review").catch(() => {});
   if (ds.act === "autoreview-send") {
     try { const r = await act(key, "autoreview-send"); toast(r.sent_back ? `Sent; back in Running (round ${r.round})` : "Sent the findings to Claude"); } catch {}

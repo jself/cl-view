@@ -1102,7 +1102,24 @@ what Send findings sends, and Open in gutter puts it whole in the overall
 note (without the opening line addressed to Claude); Back to the findings
 drops it, and a new review starts without it. If the review runs again while
 you edit, Save is refused, so your edit isn't put on findings you haven't seen.
-After a new round, the old findings say which round they were from. Done,
+The Review tab, the ticket's Needs You card and its board card say where the
+findings stand, each in its own color: New findings (N to read, nothing sent
+yet), Sent to Claude (it hasn't finished the round they started), Handled by
+Claude (it ran `cl ticket done` after them, and its summary shows as its
+reply; findings sent before cl kept this read as handled once the ticket is
+out of Running),
+or Outdated (never sent, and Claude has changed the code since: Run again).
+Sent, handled or outdated findings fold away behind Show the findings, dimmed,
+and nothing about them puts the ticket in Needs You. The message sent asks
+Claude to end its summary with one line per finding (`Finding 2: fixed`,
+`partly` or `declined`); when its reply has one for every finding, each
+finding shows what Claude did with it and the state says "2 fixed, 1
+declined". Otherwise the board doesn't guess, and only the reply is there.
+Findings sent into a round already under way (the ticket in Running) stay
+Sent to Claude after its next done, which may have come before Claude read
+them. A review run again after Claude handled the last one's findings keeps
+that outcome under it as "Last review: handled by Claude".
+Done,
 deleting the ticket, or moving it back to Queued stops a review that's
 running.
 

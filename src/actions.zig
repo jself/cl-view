@@ -910,12 +910,13 @@ pub fn autoreviewSend(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const
     const s = liveSession(ctx, t) orelse return error.NoSession;
     const msg = try autoreview.message(a, r);
     try tmux.pasteText(ctx, s, msg);
-    r.sent = ctx.nowSeconds();
+    const br = try board.addComment(ctx, db, a, key, "you", msg, true);
+    const round = (try board.getTicket(db, a, key)).round;
+    autoreview.markSent(&r, ctx.nowSeconds(), round);
     // Marked sent only if it is still the review that was sent (not a new
     // one started meanwhile).
     _ = try board.setAutoreviewIf(db, t.id, try std.fmt.allocPrint(a, "{f}", .{std.json.fmt(r, .{})}), t.autoreview);
-    const br = try board.addComment(ctx, db, a, key, "you", msg, true);
-    return .{ .sent = true, .sent_back = br.sent_back, .round = (try board.getTicket(db, a, key)).round };
+    return .{ .sent = true, .sent_back = br.sent_back, .round = round };
 }
 
 /// An automated review just finished (its reviewer's Stop hook, or

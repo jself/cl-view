@@ -812,6 +812,8 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
             error.BadPlan => fail("the plan on stdin is empty", .{}),
             else => boardFail(db, e, "ticket"),
         };
+        // Findings sent to it are handled now (before a new review replaces them).
+        if (t0.stage != .planning) autoreview.answered(ctx, db, a, key, args.get("--summary") orelse "") catch {};
         // The project reviews what reaches Review by itself (--auto-review).
         const auto: []const u8 = if (t0.stage == .planning) "" else switch (autoreview.startOnReview(ctx, cfg, db, a, key)) {
             .off, .skipped => "",
@@ -1490,6 +1492,7 @@ fn writeAutoreview(w: *std.Io.Writer, a: std.mem.Allocator, t: board.Ticket, r: 
     if (r.findings.len == 0) try w.writeAll("  no findings\n");
     for (r.findings, 1..) |f, i| {
         try w.print("  {d}. [{s}] {s}", .{ i, f.severity, f.title });
+        if (i <= r.answers.len) try w.print(" — {s}", .{r.answers[i - 1]});
         if (f.path.len > 0) try w.print(" ({s}{s})", .{ f.path, if (f.line > 0) try std.fmt.allocPrint(a, ":{d}", .{f.line}) else "" });
         try w.writeAll("\n");
         var lines = std.mem.splitScalar(u8, f.body, '\n');
@@ -1502,6 +1505,11 @@ fn writeAutoreview(w: *std.Io.Writer, a: std.mem.Allocator, t: board.Ticket, r: 
         while (lines.next()) |l| try w.print("     {s}\n", .{l});
     }
     if (r.sent > 0) try w.print("  sent to the session {s}\n", .{try stamp(a, r.sent)}) else if (autoreview.usable(r)) try w.print("  not sent to the session (cl ticket autoreview {s} --send)\n", .{t.key});
+    if (r.handled > 0) {
+        try w.print("  handled by Claude {s}{s}{s}\n", .{ try stamp(a, r.handled), if (r.answers.len > 0) ": " else "", if (r.answers.len > 0) try autoreview.answersLine(a, r.answers) else "" });
+        var lines = std.mem.splitScalar(u8, r.reply, '\n');
+        if (r.reply.len > 0) while (lines.next()) |l| try w.print("     {s}\n", .{l});
+    }
 }
 
 /// What `t` waits on and what waits on it, a line each.

@@ -86,7 +86,112 @@ pub const Review = struct {
     /// the project's --auto-review: "on" or "send" (its findings go to
     /// Claude when it finishes, `sendsItself`). "" for one you started.
     auto: []const u8 = "",
+    /// The ticket's round once they were sent: past `round` when the send
+    /// started a new one (sent back from Review or Testing); `round` itself
+    /// when it went to a round already under way (Running, or finishing),
+    /// whose next done may come before Claude has read them. 0: sent before
+    /// cl kept it.
+    sent_round: i64 = 0,
+    /// When Claude finished the round the sent findings started (its `cl
+    /// ticket done`, `answered`), 0 while it hasn't.
+    handled: i64 = 0,
+    /// What Claude said as it finished that round (its done summary).
+    reply: []const u8 = "",
+    /// What Claude says it did with each finding, in their order (fixed,
+    /// partly or declined, `parseAnswers`): empty unless its reply says so
+    /// for every one of them.
+    answers: []const []const u8 = &.{},
+    /// The review before this one, when Claude had handled its findings: a
+    /// new review (one cl starts as the ticket reaches Review again, say)
+    /// would otherwise hide what Claude did with them.
+    previous: ?Previous = null,
 };
+
+/// What `Review.previous` keeps of a handled review.
+pub const Previous = struct {
+    round: i64 = 0,
+    handled: i64 = 0,
+    reply: []const u8 = "",
+    answers: []const []const u8 = &.{},
+    /// Its findings' titles, in order (the answers go with them).
+    titles: []const []const u8 = &.{},
+};
+
+/// `r` as a new review's `previous`, when its findings were handled.
+fn previousOf(a: std.mem.Allocator, r: Review, t: board.Ticket) !?Previous {
+    if (standing(r, t) != .handled) return null;
+    const titles = try a.alloc([]const u8, r.findings.len);
+    for (r.findings, titles) |f, *x| x.* = f.title;
+    return .{ .round = r.round, .handled = r.handled, .reply = r.reply, .answers = r.answers, .titles = titles };
+}
+
+/// Where a ticket's automated review stands, for the board: what (if
+/// anything) the human has to do about it.
+pub const Standing = enum {
+    /// No review.
+    none,
+    running,
+    failed,
+    /// Findings (or your edit of them) nobody has sent to Claude yet: yours to read.
+    unread,
+    /// It found nothing.
+    clean,
+    /// Sent to Claude, which hasn't finished the round they started yet.
+    sent,
+    /// Sent, and Claude has finished that round (`answered`; or, with no
+    /// `handled` time, the ticket has left Running on a later round: sent
+    /// before cl kept it, or moved on by hand): nothing left to read in them.
+    handled,
+    /// Not sent, and from an earlier round: Claude has changed the code since.
+    outdated,
+};
+
+/// Where `r` stands on ticket `t` (null: it has none).
+/// Whether `r`'s findings went to a round already under way (`sent_round`).
+pub fn midRound(r: Review) bool {
+    return r.sent_round > 0 and r.sent_round <= r.round;
+}
+
+pub fn standing(r: ?Review, t: board.Ticket) Standing {
+    const x = r orelse return .none;
+    if (std.mem.eql(u8, x.status, "running")) return .running;
+    if (!std.mem.eql(u8, x.status, "done")) return .failed;
+    // Sent findings stay Claude's, whatever round it has reached since.
+    if (x.handled > 0) return .handled;
+    // No `handled` time: sent before cl kept it, or the round was ended by
+    // hand. Out of Running on a later round, that round is over.
+    if (x.sent > 0) return if (t.stage != .running and t.round > x.round and !midRound(x)) .handled else .sent;
+    if (!current(x, t)) return .outdated;
+    return if (usable(x)) .unread else .clean;
+}
+
+test standing {
+    var t: board.Ticket = .{ .id = 1, .key = "QA-1", .project = "qa", .title = "", .body = "", .stage = .review, .mode = .queue, .plan = false, .skill = "", .target = "", .worktree = "", .branch = "", .profile = "", .tmux = "", .session_id = "", .summary = "", .round = 1, .created = 0, .updated = 0, .parent = "", .children = 0 };
+    const fs = [_]Finding{.{ .title = "x" }};
+    try std.testing.expectEqual(Standing.none, standing(null, t));
+    try std.testing.expectEqual(Standing.running, standing(.{ .status = "running", .round = 1 }, t));
+    try std.testing.expectEqual(Standing.failed, standing(.{ .status = "failed", .round = 1 }, t));
+    try std.testing.expectEqual(Standing.clean, standing(.{ .status = "done", .round = 1 }, t));
+    try std.testing.expectEqual(Standing.unread, standing(.{ .status = "done", .round = 1, .findings = &fs }, t));
+    // Your edit, even with every finding dropped from it: still to send.
+    try std.testing.expectEqual(Standing.unread, standing(.{ .status = "done", .round = 1, .edited = "Fix the crash." }, t));
+    // Sent: the comment started round 2, which Claude is on.
+    t.round = 2;
+    t.stage = .running;
+    try std.testing.expectEqual(Standing.sent, standing(.{ .status = "done", .round = 1, .findings = &fs, .sent = 10 }, t));
+    // Claude finished that round.
+    t.stage = .review;
+    try std.testing.expectEqual(Standing.handled, standing(.{ .status = "done", .round = 1, .findings = &fs, .sent = 10, .handled = 20 }, t));
+    // Sent before cl kept `handled` (or moved on by hand): out of Running on a later round.
+    try std.testing.expectEqual(Standing.handled, standing(.{ .status = "done", .round = 1, .findings = &fs, .sent = 10 }, t));
+    // Sent while it was finishing (no new round): still Claude's.
+    t.round = 1;
+    try std.testing.expectEqual(Standing.sent, standing(.{ .status = "done", .round = 1, .findings = &fs, .sent = 10 }, t));
+    t.round = 2;
+    // Never sent, and Claude has changed the code since (your own Send back).
+    try std.testing.expectEqual(Standing.outdated, standing(.{ .status = "done", .round = 1, .findings = &fs }, t));
+    try std.testing.expectEqual(Standing.outdated, standing(.{ .status = "done", .round = 1 }, t));
+}
 
 pub const Error = error{
     /// Only a ticket in Review or Testing is reviewed.
@@ -364,7 +469,8 @@ fn startAs(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: 
     // so a helper says yes, detached so this doesn't wait for Claude to start.
     if (cfg.board.trust_projects) spawnTrust(ctx, a, exe, t.key) catch {};
 
-    const r: Review = .{ .status = "running", .started = ctx.nowSeconds(), .round = t.round, .rev = rev, .profile = prof.name, .skill = p.review_skill, .auto = auto };
+    const prev = if (load(a, t)) |old| (try previousOf(a, old, t)) orelse old.previous else null;
+    const r: Review = .{ .status = "running", .started = ctx.nowSeconds(), .round = t.round, .rev = rev, .profile = prof.name, .skill = p.review_skill, .auto = auto, .previous = prev };
     try save(db, a, t.id, r);
     try board.logEvent(ctx, db, t.id, if (auto.len > 0) started_by_itself else "autoreview started", prof.name);
     return r;
@@ -1023,7 +1129,7 @@ fn where(a: std.mem.Allocator, f: Finding) ![]const u8 {
 pub const message_lead = "An automated review (a separate Claude that read your changes)";
 
 /// `message`'s first line: what Claude is to do with the findings.
-pub const message_intro = message_lead ++ " found the problems below. Check each one against the code: fix what's real, say which you disagree with and why, then finish the same way as before.";
+pub const message_intro = message_lead ++ " found the problems below. Check each one against the code: fix what's real, say which you disagree with and why, then finish the same way as before. In the summary you finish with, put one line per finding, by its number: `Finding 1: fixed`, `Finding 2: partly (what's left)` or `Finding 3: declined (why)`.";
 
 /// What the ticket's session is sent ("Send findings to Claude"): your
 /// edit of it when you made one (`edit`).
@@ -1056,6 +1162,187 @@ test message {
     try std.testing.expect(std.mem.indexOf(u8, text, "1. [high] Crash (src/a.zig:3-5)\n   It crashes.\n   Fix: check null.\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "2. [low] No tests\n   Add one.\n") != null);
     try std.testing.expectEqualStrings("Only fix the crash.", try message(a, .{ .status = "done", .findings = &fs, .edited = "Only fix the crash." }));
+}
+
+/// What Claude did with each of `n` findings, read from its reply's
+/// `Finding <i>: fixed|partly|declined` lines (`message_intro` asks for
+/// them): fixed, partly or declined per finding, or empty unless every
+/// finding has one (no guessing which it skipped).
+pub fn parseAnswers(a: std.mem.Allocator, reply: []const u8, n: usize) ![]const []const u8 {
+    if (n == 0) return &.{};
+    const out = try a.alloc([]const u8, n);
+    @memset(out, "");
+    var lines = std.mem.splitScalar(u8, reply, '\n');
+    while (lines.next()) |raw| {
+        // Markdown around it (a list, bold, code) doesn't count.
+        var buf: std.ArrayList(u8) = .empty;
+        for (raw) |c| if (c != '*' and c != '`' and c != '_') try buf.append(a, std.ascii.toLower(c));
+        var l = std.mem.trim(u8, buf.items, " \t\r-•");
+        if (!std.mem.startsWith(u8, l, "finding")) continue;
+        l = std.mem.trimStart(u8, l["finding".len..], " #");
+        var d: usize = 0;
+        while (d < l.len and std.ascii.isDigit(l[d])) d += 1;
+        const i = std.fmt.parseInt(usize, l[0..d], 10) catch continue;
+        if (i == 0 or i > n) continue;
+        const word = std.mem.trimStart(u8, l[d..], " :.)-–—");
+        const kinds = [_]struct { []const u8, []const []const u8 }{
+            .{ "partly", &.{ "partly", "partially", "partial" } },
+            .{ "declined", &.{ "declined", "disagree", "not fixed", "won't fix", "wont fix", "rejected", "skipped", "left" } },
+            .{ "fixed", &.{ "fixed", "done", "addressed", "resolved" } },
+        };
+        for (kinds) |k| for (k[1]) |w| if (std.mem.startsWith(u8, word, w)) {
+            out[i - 1] = k[0];
+            break;
+        };
+    }
+    for (out) |x| if (x.len == 0) return &.{};
+    return out;
+}
+
+test parseAnswers {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const all = try parseAnswers(a,
+        \\Fixed the crash and added a test.
+        \\
+        \\- Finding 1: fixed
+        \\- **Finding 2**: partly (the retry still has no backoff)
+        \\- Finding #3 - declined: the old behavior is what the ticket asks for
+    , 3);
+    try std.testing.expectEqual(@as(usize, 3), all.len);
+    try std.testing.expectEqualStrings("fixed", all[0]);
+    try std.testing.expectEqualStrings("partly", all[1]);
+    try std.testing.expectEqualStrings("declined", all[2]);
+    // One left out: no answers at all, rather than a guess.
+    try std.testing.expectEqual(@as(usize, 0), (try parseAnswers(a, "Finding 1: fixed\nFinding 3: fixed", 3)).len);
+    try std.testing.expectEqual(@as(usize, 0), (try parseAnswers(a, "Fixed everything the review found.", 2)).len);
+    // A number past the findings is ignored.
+    try std.testing.expectEqual(@as(usize, 0), (try parseAnswers(a, "Finding 2: fixed", 1)).len);
+}
+
+/// Record `r` sent at `now`, the ticket being in `round` after the send.
+/// Sent again, Claude's answer to the last send no longer stands.
+pub fn markSent(r: *Review, now: i64, round: i64) void {
+    r.sent = now;
+    r.sent_round = round;
+    r.handled = 0;
+    r.reply = "";
+    r.answers = &.{};
+}
+
+/// Claude finished a round (its `cl ticket done`, before a new review may
+/// start): findings sent to it are handled now, with its summary as its
+/// reply. Nothing when none were sent, they were handled already, or they
+/// went to a round already under way (`midRound`): that round's done may
+/// have come before Claude read them, so the board doesn't guess.
+pub fn answered(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, summary: []const u8) !void {
+    const t = try board.getTicket(db, a, key);
+    var r = load(a, t) orelse return;
+    if (!std.mem.eql(u8, r.status, "done") or r.sent == 0 or r.handled > 0 or midRound(r)) return;
+    r.handled = ctx.nowSeconds();
+    r.reply = std.mem.trim(u8, summary, " \t\r\n");
+    // Your edit has its own numbering (or none): no per-finding answers from it.
+    r.answers = if (r.edited.len == 0) try parseAnswers(a, r.reply, r.findings.len) else &.{};
+    if (!try board.setAutoreviewIf(db, t.id, try std.fmt.allocPrint(a, "{f}", .{std.json.fmt(r, .{})}), t.autoreview)) return;
+    try board.logEvent(ctx, db, t.id, "autoreview handled", if (r.answers.len > 0) try answersLine(a, r.answers) else "");
+}
+
+/// "2 fixed, 1 declined": `answers` counted.
+pub fn answersLine(a: std.mem.Allocator, answers: []const []const u8) ![]const u8 {
+    var aw: std.Io.Writer.Allocating = .init(a);
+    for ([_][]const u8{ "fixed", "partly", "declined" }) |k| {
+        var c: usize = 0;
+        for (answers) |x| c += @intFromBool(std.mem.eql(u8, x, k));
+        if (c == 0) continue;
+        if (aw.written().len > 0) try aw.writer.writeAll(", ");
+        try aw.writer.print("{d} {s}", .{ c, k });
+    }
+    return aw.written();
+}
+
+test "answered: sent findings are handled when Claude finishes the round, once" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = a, .env = undefined, .home = "/tmp" };
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "qa", .dir = "/x" });
+    const k = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "T", .stage = .review });
+    const id = (try board.getTicket(db, a, k)).id;
+    const fs = [_]Finding{ .{ .title = "Crash" }, .{ .title = "No tests" } };
+    // Not sent: Claude finishing a round of its own doesn't handle them.
+    try save(db, a, id, .{ .status = "done", .round = 1, .findings = &fs });
+    try answered(ctx, db, a, k, "Did other things.");
+    try std.testing.expectEqual(Standing.unread, standing(load(a, try board.getTicket(db, a, k)), try board.getTicket(db, a, k)));
+    // Sent (the comment starts round 2), then Claude is done.
+    try save(db, a, id, .{ .status = "done", .round = 1, .findings = &fs, .sent = 5 });
+    try db.exec("UPDATE tickets SET round = 2, stage = 'running' WHERE id = ?1", .{id});
+    try std.testing.expectEqual(Standing.sent, standing(load(a, try board.getTicket(db, a, k)), try board.getTicket(db, a, k)));
+    try answered(ctx, db, a, k, "Fixed the crash.\nFinding 1: fixed\nFinding 2: declined (covered by the existing test)\n");
+    const t = try board.getTicket(db, a, k);
+    const r = load(a, t).?;
+    try std.testing.expectEqual(Standing.handled, standing(r, t));
+    try std.testing.expect(r.handled > 0);
+    try std.testing.expectEqualStrings("declined", r.answers[1]);
+    try std.testing.expect(std.mem.startsWith(u8, r.reply, "Fixed the crash."));
+    try std.testing.expectEqualStrings("1 fixed, 1 declined", try answersLine(a, r.answers));
+    // A later round's done leaves the first reply.
+    try answered(ctx, db, a, k, "Something else.");
+    try std.testing.expect(std.mem.startsWith(u8, load(a, try board.getTicket(db, a, k)).?.reply, "Fixed the crash."));
+    // Sent again (it was mid-Running, so Send stayed): Claude is on them
+    // again, and its next done is the new answer.
+    var again = load(a, try board.getTicket(db, a, k)).?;
+    markSent(&again, 30, 3);
+    try db.exec("UPDATE tickets SET round = 3, stage = 'running' WHERE id = ?1", .{id});
+    try save(db, a, id, again);
+    try std.testing.expectEqual(Standing.sent, standing(load(a, try board.getTicket(db, a, k)), try board.getTicket(db, a, k)));
+    try answered(ctx, db, a, k, "Finding 1: fixed\nFinding 2: fixed");
+    const second = load(a, try board.getTicket(db, a, k)).?;
+    try std.testing.expectEqualStrings("Finding 1: fixed\nFinding 2: fixed", second.reply);
+    try std.testing.expectEqualStrings("fixed", second.answers[1]);
+    // Sent into a round already under way (no new round): that round's done
+    // may predate Claude reading them, so they stay sent.
+    var mid = second;
+    markSent(&mid, 40, 1);
+    mid.round = 1;
+    try db.exec("UPDATE tickets SET round = 1, stage = 'running' WHERE id = ?1", .{id});
+    try save(db, a, id, mid);
+    try answered(ctx, db, a, k, "Unrelated work done.");
+    try db.exec("UPDATE tickets SET stage = 'review' WHERE id = ?1", .{id});
+    const m = load(a, try board.getTicket(db, a, k)).?;
+    try std.testing.expectEqual(@as(i64, 0), m.handled);
+    try std.testing.expectEqual(Standing.sent, standing(m, try board.getTicket(db, a, k)));
+    try db.exec("UPDATE tickets SET round = 2 WHERE id = ?1", .{id});
+    // Your edit was sent: Claude's reply is kept, but no per-finding answers.
+    try save(db, a, id, .{ .status = "done", .round = 1, .findings = &fs, .sent = 5, .edited = "Only fix the crash." });
+    try answered(ctx, db, a, k, "Finding 1: fixed\nFinding 2: fixed");
+    const e = load(a, try board.getTicket(db, a, k)).?;
+    try std.testing.expect(e.handled > 0);
+    try std.testing.expectEqual(@as(usize, 0), e.answers.len);
+}
+
+test "a new review keeps what Claude did with the last one's findings" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var t: board.Ticket = .{ .id = 1, .key = "QA-1", .project = "qa", .title = "", .body = "", .stage = .review, .mode = .queue, .plan = false, .skill = "", .target = "", .worktree = "", .branch = "", .profile = "", .tmux = "", .session_id = "", .summary = "", .round = 2, .created = 0, .updated = 0, .parent = "", .children = 0 };
+    const fs = [_]Finding{ .{ .title = "Crash" }, .{ .title = "No tests" } };
+    const ans = [_][]const u8{ "fixed", "declined" };
+    const handled: Review = .{ .status = "done", .round = 1, .findings = &fs, .sent = 5, .sent_round = 2, .handled = 9, .reply = "Fixed it.", .answers = &ans };
+    const p = (try previousOf(a, handled, t)).?;
+    try std.testing.expectEqualStrings("Fixed it.", p.reply);
+    try std.testing.expectEqualStrings("No tests", p.titles[1]);
+    try std.testing.expectEqualStrings("declined", p.answers[1]);
+    // Kept through JSON, as the new review is stored.
+    const back = std.json.parseFromSliceLeaky(Review, a, try std.fmt.allocPrint(a, "{f}", .{std.json.fmt(Review{ .status = "running", .round = 2, .previous = p }, .{})}), .{ .ignore_unknown_fields = true }) catch unreachable;
+    try std.testing.expectEqual(@as(i64, 9), back.previous.?.handled);
+    // Not handled (unread, or still with Claude): nothing to keep.
+    try std.testing.expect(try previousOf(a, .{ .status = "done", .round = 2, .findings = &fs }, t) == null);
+    t.stage = .running;
+    try std.testing.expect(try previousOf(a, .{ .status = "done", .round = 1, .findings = &fs, .sent = 5, .sent_round = 2 }, t) == null);
 }
 
 /// Whether `r` has something to send or open: findings, or your edit.
