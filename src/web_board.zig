@@ -465,7 +465,7 @@ fn route(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: 
             }) catch |e| return projectFail(req, e);
         } else if (std.mem.eql(u8, action, "after-merge")) {
             if (!after_merge.runs(try board.getProject(db, a, name))) return error.BadInput;
-            try after_merge.startByHand(ctx, db, a, name, nonEmpty(b.key) orelse "-");
+            try after_merge.startByHand(ctx, db, name, nonEmpty(b.key) orelse "-");
         } else if (std.mem.eql(u8, action, "push")) {
             ci.pushFromBoard(ctx, db, a, name) catch |e| return if (e == error.NoPush) error.BadInput else e;
         } else if (std.mem.eql(u8, action, "hide") or std.mem.eql(u8, action, "unhide")) {

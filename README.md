@@ -651,6 +651,7 @@ It's `cl dictate`, which you can also run yourself or bind elsewhere:
 
 - It records this machine's mic with `pw-record` (PipeWire), into a WAV
   under `$XDG_RUNTIME_DIR`, and runs `voice.stt` on it, so it needs both.
+  That makes it Linux only; on macOS, dictate in the web terminal page.
 - There's one recording at a time: the second press types into the session
   the first one started in, wherever you pressed it. A recording left
   running stops itself after 4 minutes; the next press still types it in.

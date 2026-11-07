@@ -49,7 +49,7 @@ pub fn start(ctx: Ctx, db: board.Db, a: std.mem.Allocator, project: []const u8, 
     if (!runs(p)) return false;
     try board.queueAfterMerge(db, project, key);
     try board.logEvent(ctx, db, ticket_id, "after-merge queued", "");
-    spawnRunner(ctx, a, project) catch |e| {
+    spawnRunner(ctx, project) catch |e| {
         try board.logEvent(ctx, db, ticket_id, "after-merge failed", @errorName(e));
         try board.setFlagId(ctx, db, ticket_id, board.flag_after_merge, "auto", "cl couldn't start the after-merge run");
     };
@@ -61,23 +61,17 @@ pub fn runs(p: board.Project) bool {
     return p.after_merge.len > 0 or p.push_after_merge.len > 0;
 }
 
-/// Run `cl project after-merge <project> --run` in a session of its own
-/// (setsid), so killing the server or the tmux session it came from leaves
-/// it running.
-fn spawnRunner(ctx: Ctx, a: std.mem.Allocator, project: []const u8) !void {
-    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const exe = try ctx.exePath(&exe_buf);
-    const r = try std.process.run(a, ctx.io, .{ .argv = &.{
-        "sh", "-c", "exec setsid -f \"$@\" </dev/null >/dev/null 2>&1", "sh", exe, "project", "after-merge", project, "--run",
-    } });
-    if (r.term != .exited or r.term.exited != 0) return error.SpawnFailed;
+/// Run `cl project after-merge <project> --run` detached (`Ctx.detach`), so
+/// killing the server or the tmux session it came from leaves it running.
+fn spawnRunner(ctx: Ctx, project: []const u8) !void {
+    try ctx.detach(&.{ "project", "after-merge", project, "--run" });
 }
 
 /// Queue a run by hand (`cl project after-merge <name>`, the board's Run it
 /// again), on trunk as it is; `key` is the ticket it is for, "-" for none.
-pub fn startByHand(ctx: Ctx, db: board.Db, a: std.mem.Allocator, project: []const u8, key: []const u8) !void {
+pub fn startByHand(ctx: Ctx, db: board.Db, project: []const u8, key: []const u8) !void {
     try board.queueAfterMerge(db, project, key);
-    try spawnRunner(ctx, a, project);
+    try spawnRunner(ctx, project);
 }
 
 fn alive(pid: i64) bool {

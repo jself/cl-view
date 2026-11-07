@@ -467,7 +467,7 @@ fn startAs(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: 
     // it first, and nobody would answer. Its ticket's own session usually did
     // already; else the board's projects are trusted (board.trust_projects),
     // so a helper says yes, detached so this doesn't wait for Claude to start.
-    if (cfg.board.trust_projects) spawnTrust(ctx, a, exe, t.key) catch {};
+    if (cfg.board.trust_projects) spawnTrust(ctx, t.key) catch {};
 
     const prev = if (load(a, t)) |old| (try previousOf(a, old, t)) orelse old.previous else null;
     const r: Review = .{ .status = "running", .started = ctx.nowSeconds(), .round = t.round, .rev = rev, .profile = prof.name, .skill = p.review_skill, .auto = auto, .previous = prev };
@@ -649,11 +649,8 @@ test sendsItself {
     try std.testing.expect(!sendsItself(r, moved));
 }
 
-fn spawnTrust(ctx: Ctx, a: std.mem.Allocator, exe: []const u8, key: []const u8) !void {
-    const r = try std.process.run(a, ctx.io, .{ .argv = &.{
-        "sh", "-c", "exec setsid -f \"$@\" </dev/null >/dev/null 2>&1", "sh", exe, "ticket", "autoreview", key, "--accept-trust",
-    } });
-    if (r.term != .exited or r.term.exited != 0) return error.SpawnFailed;
+fn spawnTrust(ctx: Ctx, key: []const u8) !void {
+    try ctx.detach(&.{ "ticket", "autoreview", key, "--accept-trust" });
 }
 
 /// The helper `start` runs: say yes to the folder-trust dialog if it shows

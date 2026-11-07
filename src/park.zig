@@ -365,15 +365,10 @@ fn expire(ctx: Ctx, db: board.Db, a: std.mem.Allocator, d: board.DuePark) !void 
     try board.setFlagId(ctx, db, d.id, board.flag_park_expired, "auto", detail);
 }
 
-/// `cl ticket park-check <key> --at <when>` in a session of its own (setsid),
-/// so a restart of `cl web` leaves it running.
+/// `cl ticket park-check <key> --at <when>` detached (`Ctx.detach`), so a
+/// restart of `cl web` leaves it running.
 fn spawnCheck(ctx: Ctx, a: std.mem.Allocator, key: []const u8, at: i64) !void {
-    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const exe = try ctx.exePath(&exe_buf);
-    const r = try std.process.run(a, ctx.io, .{ .argv = &.{
-        "sh", "-c", "exec setsid -f \"$@\" </dev/null >/dev/null 2>&1", "sh", exe, "ticket", "park-check", key, "--at", try std.fmt.allocPrint(a, "{d}", .{at}),
-    } });
-    if (r.term != .exited or r.term.exited != 0) return error.SpawnFailed;
+    try ctx.detach(&.{ "ticket", "park-check", key, "--at", try std.fmt.allocPrint(a, "{d}", .{at}) });
 }
 
 /// Run the check of the park made at `at` once, and wake the ticket when it
@@ -406,29 +401,78 @@ fn checkIn(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, p: boa
     try env.put("CL_TICKET", t.key);
     try env.put("CL_PARK_UNTIL", p.until);
     const limit = @min(@max(p.every, 1), max_check);
-    const res = try std.process.run(a, ctx.io, .{
-        .argv = &.{ "timeout", "-k", "10", try std.fmt.allocPrint(a, "{d}", .{limit}), "sh", "-c", "exec </dev/null 2>&1; exec sh -c \"$CL_PARK_UNTIL\"" },
-        .cwd = .{ .path = dir },
-        .environ_map = &env,
-        .stdout_limit = .limited(256 * 1024),
-        .stderr_limit = .limited(64 * 1024),
-    });
+    // Not `exec sh -c`: this shell keeps the output open until the check
+    // ends, so a check that closes its own (`exec >/dev/null`) is still
+    // timed out (`runLimited` times the output). `exit` keeps it from
+    // being exec'd away as the last command.
+    const res = try runLimited(ctx, a, &.{ "sh", "-c", "exec </dev/null 2>&1; sh -c \"$CL_PARK_UNTIL\"; exit $?" }, dir, &env, limit);
     const code: ?u8 = switch (res.term) {
         .exited => |c| c,
         else => null,
     };
-    const what = if (code == null)
-        "killed"
-    else if (code.? == 124 or code.? == 137)
+    const what = if (res.timed_out)
         try std.fmt.allocPrint(a, "timed out after {s}", .{try formatDuration(a, limit)})
+    else if (code == null)
+        "killed"
     else
         try std.fmt.allocPrint(a, "exit {d}", .{code.?});
-    const last = lastLine(res.stdout);
+    const last = lastLine(res.out);
     return .{
-        .ok = code == 0,
-        .closed = p.pr.len > 0 and code == pr_closed_exit,
+        .ok = code == 0 and !res.timed_out,
+        .closed = p.pr.len > 0 and code == pr_closed_exit and !res.timed_out,
         .text = if (last.len > 0) try std.fmt.allocPrint(a, "{s}: {s}", .{ what, last }) else what,
     };
+}
+
+const Limited = struct { term: std.process.Child.Term, out: []const u8, timed_out: bool };
+
+/// Run `argv` in `dir` with its stdout, in a process group of its own, and
+/// stop the whole group once it has run `limit` seconds: TERM, then KILL 10
+/// s on. What GNU `timeout` did, done here because macOS has no `timeout`.
+/// The limit holds until its stdout closes, so `argv` must keep it open
+/// while it runs (checkIn's shell does).
+fn runLimited(ctx: Ctx, a: std.mem.Allocator, argv: []const []const u8, dir: []const u8, env: *const std.process.Environ.Map, limit: i64) !Limited {
+    var child = try std.process.spawn(ctx.io, .{
+        .argv = argv,
+        .cwd = .{ .path = dir },
+        .environ_map = env,
+        .stdin = .ignore,
+        .stdout = .pipe,
+        .stderr = .ignore,
+        .pgid = 0,
+    });
+    defer child.kill(ctx.io);
+    const group = -child.id.?;
+    var buf: std.Io.File.MultiReader.Buffer(1) = undefined;
+    var mr: std.Io.File.MultiReader = undefined;
+    mr.init(a, ctx.io, buf.toStreams(), &.{child.stdout.?});
+    defer mr.deinit();
+    var timed_out = false;
+    var deadline: std.Io.Timeout = .{ .deadline = .fromNow(ctx.io, .{ .raw = .fromSeconds(limit), .clock = .awake }) };
+    while (true) {
+        mr.fill(64, deadline) catch |err| switch (err) {
+            error.EndOfStream => break,
+            error.Timeout => {
+                if (!timed_out) {
+                    timed_out = true;
+                    std.posix.kill(group, .TERM) catch {};
+                    deadline = .{ .deadline = .fromNow(ctx.io, .{ .raw = .fromSeconds(10), .clock = .awake }) };
+                } else {
+                    std.posix.kill(group, .KILL) catch {};
+                    deadline = .none;
+                }
+                continue;
+            },
+            else => |e| return e,
+        };
+        if (mr.reader(0).buffered().len > 256 * 1024) {
+            std.posix.kill(group, .KILL) catch {};
+            return error.StreamTooLong;
+        }
+    }
+    try mr.checkAnyError();
+    const term = try child.wait(ctx.io);
+    return .{ .term = term, .out = try mr.toOwnedSlice(0), .timed_out = timed_out };
 }
 
 /// The last line of output with something on it, cut to a sensible length.
@@ -439,6 +483,48 @@ fn lastLine(out: []const u8) []const u8 {
         if (s.len > 0) return s[0..@min(s.len, 200)];
     }
     return "";
+}
+
+test runLimited {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var env: std.process.Environ.Map = .init(a);
+    const ctx: Ctx = .{ .io = testing.io, .gpa = testing.allocator, .perm = a, .env = &env, .home = "/tmp" };
+    const done = try runLimited(ctx, a, &.{ "sh", "-c", "echo one; echo two; exit 4" }, "/", &env, 5);
+    try testing.expect(!done.timed_out);
+    try testing.expectEqual(@as(u8, 4), done.term.exited);
+    try testing.expectEqualStrings("one\ntwo\n", done.out);
+    // Over its time: the whole group goes, the background sleep (which holds
+    // the output open) too, so it's over in about a second, not thirty.
+    const start = ctx.nowSeconds();
+    const slow = try runLimited(ctx, a, &.{ "sh", "-c", "echo started; sleep 30 & sleep 30" }, "/", &env, 1);
+    try testing.expect(slow.timed_out);
+    try testing.expectEqualStrings("started\n", slow.out);
+    try testing.expect(ctx.nowSeconds() - start < 10);
+}
+
+test "a park check that closes its output is still timed out" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var env: std.process.Environ.Map = .init(a);
+    const ctx: Ctx = .{ .io = testing.io, .gpa = testing.allocator, .perm = a, .env = &env, .home = "/tmp" };
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try board.addProject(db, .{ .name = "qa", .dir = try tmp.dir.realPathFileAlloc(testing.io, ".", a) });
+    const k = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Waits", .stage = .review });
+    _ = try park(ctx, db, a, k, .{ .reason = "x", .until = "echo going quiet; exec >/dev/null 2>&1; sleep 30", .every = 1 });
+    const t = try board.getTicket(db, a, k);
+    const start = ctx.nowSeconds();
+    const r = check(ctx, db, a, t, t.park.?);
+    try testing.expect(!r.ok);
+    try testing.expect(std.mem.startsWith(u8, r.text, "timed out after "));
+    try testing.expect(std.mem.endsWith(u8, r.text, ": going quiet"));
+    try testing.expect(ctx.nowSeconds() - start < 10);
 }
 
 test lastLine {
@@ -721,6 +807,10 @@ test "a parked ticket woken while its queue is busy waits in Queued for the disp
     defer env.deinit();
     // A socket of the test's own with no server behind it: never the real tmux.
     const ctx: Ctx = .{ .io = testing.io, .gpa = gpa, .perm = a, .env = &env, .home = "/tmp", .tmux_socket = "/tmp/cl-test-park-busy-none" };
+    // Skip without tmux on PATH (the macOS CI runner has none): starting a
+    // ticket lists the sessions first, and tmux that can't run at all fails
+    // that, before the busy parent is seen.
+    _ = std.process.run(a, testing.io, .{ .argv = &.{ "tmux", "-V" } }) catch return error.SkipZigTest;
     const db = try board.Db.open(":memory:");
     defer db.close();
     try board.migrate(db);

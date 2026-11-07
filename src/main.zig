@@ -66,7 +66,14 @@ pub fn main(init: std.process.Init) !void {
     _ = args_it.next(); // argv[0]
     var args: std.ArrayList([]const u8) = .empty;
     while (args_it.next()) |a| try args.append(ctx.perm, a);
-    const argv = args.items;
+    var argv = args.items;
+    // Started by `Ctx.detach`: a session of its own, without the terminal of
+    // whatever started it. Not a group leader there (the shell that started
+    // it is), so setsid can't fail.
+    if (argv.len > 0 and std.mem.eql(u8, argv[0], Ctx.detached_arg)) {
+        _ = std.c.setsid();
+        argv = argv[1..];
+    }
 
     const cfg = try config.load(ctx);
     try tmux.configure(&ctx, cfg);

@@ -22,6 +22,7 @@
 //! known by its PID and its start time (/proc/<pid>/stat), so a PID reused
 //! by some other process after the recorder ended is never signaled.
 const std = @import("std");
+const builtin = @import("builtin");
 const Ctx = @import("ctx.zig");
 const config = @import("config.zig");
 const tmux = @import("tmux.zig");
@@ -121,6 +122,8 @@ pub fn main(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void {
 
 fn start(ctx: Ctx, cfg: config.Config, a: std.mem.Allocator, name: ?[]const u8) !void {
     const session = try target(ctx, a, name);
+    if (builtin.os.tag != .linux)
+        return fail(ctx, session, "Dictating from a terminal works on Linux only (it records with PipeWire's pw-record); the web terminal page records in the browser.", .{});
     if (cfg.voice.stt.len == 0)
         return fail(ctx, session, "Dictation needs voice.stt in ~/.config/cl/config (README, Voice).", .{});
     const dir = ctx.env.get("XDG_RUNTIME_DIR") orelse "/tmp";
@@ -365,6 +368,11 @@ test parseStartTime {
     try std.testing.expectEqual(@as(?u64, 98765432), parseStartTime(stat));
     try std.testing.expectEqual(@as(?u64, null), parseStartTime("12 (pw-record) Z 1 12 12 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 555 0 0"));
     try std.testing.expectEqual(@as(?u64, null), parseStartTime("garbage"));
+}
+
+test startTime {
+    // /proc is Linux's, as is pw-record: dictating from a terminal is Linux only.
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
     // The real thing: this test's own process.
     try std.testing.expect(startTime(.{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/" }, @intCast(std.os.linux.getpid())) != null);
 }

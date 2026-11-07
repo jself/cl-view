@@ -152,7 +152,7 @@ fn writeAtomic(ctx: Ctx, a: std.mem.Allocator, path: []const u8, data: []const u
 /// doesn't push; otherwise `cl project push` starts, detached.
 pub fn pushFromBoard(ctx: Ctx, db: board.Db, a: std.mem.Allocator, project: []const u8) !void {
     if ((try board.getProject(db, a, project)).push_after_merge.len == 0) return error.NoPush;
-    try spawnPush(ctx, a, project);
+    try spawnPush(ctx, project);
 }
 
 /// `cl project push <name>` (the board's Push again): push trunk as it is
@@ -163,10 +163,10 @@ pub fn pushByHand(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocat
     pushAndWatch(ctx, cfg, db, a, p, &.{"-"});
 }
 
-/// Start `cl project push <project>` detached (setsid), for the board: the
-/// push may take a while.
-pub fn spawnPush(ctx: Ctx, a: std.mem.Allocator, project: []const u8) !void {
-    return spawn(ctx, a, &.{ "project", "push", project });
+/// Start `cl project push <project>` detached (`Ctx.detach`), for the
+/// board: the push may take a while.
+pub fn spawnPush(ctx: Ctx, project: []const u8) !void {
+    return spawn(ctx, &.{ "project", "push", project });
 }
 
 /// Who a push's result goes on: `keys` but "-", and the project's tickets
@@ -239,26 +239,20 @@ fn isAncestor(ctx: Ctx, a: std.mem.Allocator, gd: []const u8, older: []const u8,
     return true;
 }
 
-/// Run `cl project ci-watch <project> <commit> <keys>...` in a session of
-/// its own (setsid), like the after-merge runner.
+/// Run `cl project ci-watch <project> <commit> <keys>...` detached
+/// (`Ctx.detach`), like the after-merge runner.
 fn spawnWatcher(ctx: Ctx, a: std.mem.Allocator, project: []const u8, commit: []const u8, keys: []const []const u8) !void {
     var args: std.ArrayList([]const u8) = .empty;
     try args.appendSlice(a, &.{ "project", "ci-watch", project, commit });
     try args.appendSlice(a, keys);
-    return spawn(ctx, a, args.items);
+    return spawn(ctx, args.items);
 }
 
 /// Run this cl with `args`, detached. Not from tests: that would be the
 /// test binary.
-fn spawn(ctx: Ctx, a: std.mem.Allocator, args: []const []const u8) !void {
+fn spawn(ctx: Ctx, args: []const []const u8) !void {
     if (builtin.is_test) return;
-    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const exe = try ctx.exePath(&exe_buf);
-    var argv: std.ArrayList([]const u8) = .empty;
-    try argv.appendSlice(a, &.{ "sh", "-c", "exec setsid -f \"$@\" </dev/null >/dev/null 2>&1", "sh", exe });
-    try argv.appendSlice(a, args);
-    const r = try std.process.run(a, ctx.io, .{ .argv = argv.items });
-    if (r.term != .exited or r.term.exited != 0) return error.SpawnFailed;
+    try ctx.detach(args);
 }
 
 /// How the watcher polls: the first wait, doubling up to `max_ms`; no run

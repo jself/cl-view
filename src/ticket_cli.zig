@@ -496,7 +496,7 @@ pub fn projectMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void
         if (args.has("--run")) return after_merge.runLoop(ctx, cfg, db, name);
         const p = board.getProject(db, a, name) catch |e| boardFail(db, e, "project");
         if (!after_merge.runs(p)) fail("{s} has no after-merge command and doesn't push (cl project set {s} --after-merge <command>, or --push-after-merge <remote>)", .{ name, name });
-        after_merge.startByHand(ctx, db, a, name, "-") catch |e| boardFail(db, e, "project");
+        after_merge.startByHand(ctx, db, name, "-") catch |e| boardFail(db, e, "project");
         return out(try std.fmt.allocPrint(a, "{s}: after-merge run started; log: {s}\n", .{ name, try ctx.shortenHomeIn(a, try after_merge.logPath(ctx, a, cfg, name)) }));
     }
     if (std.mem.eql(u8, cmd, "push")) {
