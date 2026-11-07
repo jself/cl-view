@@ -87,6 +87,9 @@ pub const Project = struct {
     /// merge into, when it isn't trunk; "" for trunk. A ticket's own
     /// `Ticket.onto` wins.
     onto: []const u8 = "",
+    /// The skill the automated review uses (`cl project set --review-skill`),
+    /// "" for cl's own review instructions (see autoreview.zig).
+    review_skill: []const u8 = "",
 };
 
 pub const Flag = struct {
@@ -189,6 +192,9 @@ pub const Ticket = struct {
     /// The review guide for gutter its session last wrote, taken from
     /// .claude/review-guide.md at `done`; "" for none.
     review_guide: []const u8 = "",
+    /// The last automated review (autoreview.zig), as JSON: its status,
+    /// summary and findings; "" for none.
+    autoreview: []const u8 = "",
     /// The plan its planning session gave with `done` (markdown), "" for
     /// none: what the session that builds it is told.
     plan_md: []const u8 = "",
@@ -278,6 +284,7 @@ const schema =
     \\  hidden INTEGER NOT NULL DEFAULT 0,
     \\  paused INTEGER NOT NULL DEFAULT 0,
     \\  onto TEXT NOT NULL DEFAULT '',
+    \\  review_skill TEXT NOT NULL DEFAULT '',
     \\  planners INTEGER NOT NULL DEFAULT
 ++ std.fmt.comptimePrint(" {d}\n", .{default_planners}) ++
     \\);
@@ -310,6 +317,7 @@ const schema =
     \\  custom_close TEXT NOT NULL DEFAULT '',
     \\  plan_md TEXT NOT NULL DEFAULT '',
     \\  review_guide TEXT NOT NULL DEFAULT '',
+    \\  autoreview TEXT NOT NULL DEFAULT '',
     \\  asking TEXT NOT NULL DEFAULT '',
     \\  parallel INTEGER NOT NULL DEFAULT 0,
     \\  umbrella INTEGER NOT NULL DEFAULT 0,
@@ -456,6 +464,9 @@ pub fn migrate(db: Db) !void {
         // Target branches other than trunk.
         _ = try addColumn(db, "projects", "onto", "TEXT NOT NULL DEFAULT ''");
         _ = try addColumn(db, "tickets", "onto", "TEXT NOT NULL DEFAULT ''");
+        // Automated reviews.
+        _ = try addColumn(db, "tickets", "autoreview", "TEXT NOT NULL DEFAULT ''");
+        _ = try addColumn(db, "projects", "review_skill", "TEXT NOT NULL DEFAULT ''");
     }
     if (have >= version) return;
     // Version 1 had no sub-tickets, version 2 no planning skill.
@@ -569,6 +580,16 @@ test "migrate: a board from before target branches gets the onto columns" {
     try std.testing.expect((try db.int("SELECT 1 FROM pragma_table_info('projects') WHERE name = 'onto'", .{})) != null);
 }
 
+test "migrate: a board from before automated reviews gets their columns" {
+    const db = try Db.open(":memory:");
+    defer db.close();
+    try migrate(db);
+    try db.execMulti("ALTER TABLE tickets DROP COLUMN autoreview; ALTER TABLE projects DROP COLUMN review_skill");
+    try migrate(db);
+    try std.testing.expect((try db.int("SELECT 1 FROM pragma_table_info('tickets') WHERE name = 'autoreview'", .{})) != null);
+    try std.testing.expect((try db.int("SELECT 1 FROM pragma_table_info('projects') WHERE name = 'review_skill'", .{})) != null);
+}
+
 test "migrate: a board from before planning sessions gets the plan and planners columns" {
     const db = try Db.open(":memory:");
     defer db.close();
@@ -608,6 +629,7 @@ pub const ProjectInput = struct {
     after_merge_claude: ?[]const u8 = null,
     planners: ?i64 = null,
     onto: ?[]const u8 = null,
+    review_skill: ?[]const u8 = null,
 };
 
 /// A key prefix from a project name: a short first word as is (`qa-tool` →
@@ -690,6 +712,7 @@ pub fn updateProject(db: Db, name: []const u8, in: ProjectInput) Error!void {
     if (in.after_merge) |c| try db.exec("UPDATE projects SET after_merge = ?2 WHERE name = ?1", .{ name, c });
     if (in.after_merge_claude) |c| try db.exec("UPDATE projects SET after_merge_claude = ?2 WHERE name = ?1", .{ name, c });
     if (in.onto) |o| try db.exec("UPDATE projects SET onto = ?2 WHERE name = ?1", .{ name, o });
+    if (in.review_skill) |k| try db.exec("UPDATE projects SET review_skill = ?2 WHERE name = ?1", .{ name, k });
     // Renaming last, so the lookups above still match.
     if (in.name.len > 0 and !std.mem.eql(u8, in.name, name)) {
         if (try db.int("SELECT 1 FROM projects WHERE name = ?1", .{in.name}) != null) return error.Exists;
@@ -726,7 +749,7 @@ pub fn removeProject(db: Db, name: []const u8) Error!void {
     try db.exec("DELETE FROM projects WHERE name = ?1", .{name});
 }
 
-const project_cols = "name, dir, prefix, slots, mode, profile, after_merge, after_merge_claude, hidden, planners, paused, onto";
+const project_cols = "name, dir, prefix, slots, mode, profile, after_merge, after_merge_claude, hidden, planners, paused, onto, review_skill";
 
 fn readProject(st: sqlite.Stmt, a: std.mem.Allocator) !Project {
     return .{
@@ -742,6 +765,7 @@ fn readProject(st: sqlite.Stmt, a: std.mem.Allocator) !Project {
         .planners = st.int(9),
         .paused = st.int(10) != 0,
         .onto = try st.dupe(a, 11),
+        .review_skill = try st.dupe(a, 12),
     };
 }
 
@@ -909,7 +933,7 @@ const ticket_cols = "t.id, t.key, t.project, t.title, t.body, t.stage, t.mode, t
     "coalesce((SELECT p.key FROM tickets p WHERE p.id = t.parent), ''), (SELECT count(*) FROM tickets c WHERE c.parent = t.id), t.skill, t.base, t.finishing, t.change_id, t.rank, t.killed, t.test_plan, t.test_progress, t.custom_close, t.plan_md, t.review_guide, t.asking, t.parallel, " ++
     "EXISTS (SELECT 1 FROM events e WHERE e.ticket = t.id AND e.kind = 'started'), " ++
     "(SELECT count(*) FROM tickets c WHERE c.parent = t.id AND c.stage = 'done'), t.umbrella, " ++
-    "t.onto, coalesce((SELECT p.onto FROM projects p WHERE p.name = t.project), '')";
+    "t.onto, coalesce((SELECT p.onto FROM projects p WHERE p.name = t.project), ''), t.autoreview";
 
 fn readTicket(st: sqlite.Stmt, a: std.mem.Allocator) !Ticket {
     return .{
@@ -951,6 +975,7 @@ fn readTicket(st: sqlite.Stmt, a: std.mem.Allocator) !Ticket {
         .umbrella = st.int(35) != 0,
         .onto_own = try st.dupe(a, 36),
         .onto = if (st.text(36).len > 0) try st.dupe(a, 36) else try st.dupe(a, 37),
+        .autoreview = try st.dupe(a, 38),
     };
 }
 
@@ -1100,8 +1125,10 @@ pub fn sessionTicket(db: Db, tmux_name: []const u8) Error!?i64 {
 }
 
 /// Is Claude working on `t` right now: its session is one of the `busy` ones
-/// and is on it? Then it isn't waiting on the human, whatever its flags say.
+/// and is on it, or an automated review of it is running (`reviewing`)? Then
+/// it isn't waiting on the human, whatever its flags say.
 pub fn isWorking(db: Db, t: Ticket, busy: []const []const u8) Error!bool {
+    if (reviewing(t)) return true;
     if (t.tmux.len == 0) return false;
     for (busy) |b| if (std.mem.eql(u8, b, t.tmux)) return (try sessionTicket(db, t.tmux)) == t.id;
     return false;
@@ -1158,6 +1185,79 @@ pub fn setAsking(db: Db, id: i64, json: []const u8) Error!void {
 pub fn setReviewGuide(ctx: Ctx, db: Db, id: i64, md: []const u8) Error!void {
     try db.exec("UPDATE tickets SET review_guide = ?2 WHERE id = ?1", .{ id, md });
     try touch(ctx, db, id);
+}
+
+/// An automated review of `t` is running (autoreview.zig): it stays out of
+/// Needs You until the review is done (`raiseAfterReview`).
+pub fn reviewing(t: Ticket) bool {
+    return std.mem.indexOf(u8, t.autoreview, reviewing_json) != null;
+}
+
+/// How a running review reads in `Ticket.autoreview` (std.json's compact output).
+pub const reviewing_json = "\"status\":\"running\"";
+
+/// An automated review of the ticket finished: it is back in Needs You with
+/// its stage's flag (Ready for review, or Needs testing), raised again or
+/// brought back if it was dismissed or hidden while it ran.
+pub fn raiseAfterReview(ctx: Ctx, db: Db, id: i64, stage: Stage) Error!void {
+    const kind = switch (stage) {
+        .review => flag_review,
+        .testing => flag_testing,
+        else => return,
+    };
+    try db.exec("UPDATE flags SET hidden = 0 WHERE ticket = ?1 AND kind = ?2 AND cleared IS NULL", .{ id, kind });
+    if (db.changes() == 0 and (try db.int("SELECT 1 FROM flags WHERE ticket = ?1 AND kind = ?2 AND cleared IS NULL", .{ id, kind })) == null)
+        try setFlagId(ctx, db, id, kind, "auto", "");
+    try touch(ctx, db, id);
+}
+
+test "a ticket under automated review is out of Needs You until it is done, then back with its flag" {
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp" };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try Db.open(":memory:");
+    defer db.close();
+    try migrate(db);
+    try addProject(db, .{ .name = "qa", .dir = "/x/qa" });
+    const k = try createTicket(ctx, db, a, .{ .project = "qa", .title = "T", .stage = .review });
+    const id = (try getTicket(db, a, k)).id;
+    try setFlagId(ctx, db, id, flag_review, "auto", "");
+    try std.testing.expectEqual(@as(usize, 1), (try listTickets(db, a, .{ .needs = true })).len);
+    try setAutoreview(db, id, "{\"status\":\"running\",\"started\":1}");
+    try std.testing.expect(try isWorking(db, try getTicket(db, a, k), &.{}));
+    try std.testing.expectEqual(@as(usize, 0), (try listTickets(db, a, .{ .needs = true })).len);
+    // Cleared meanwhile; the review finishing raises it again.
+    try clearFlagId(ctx, db, id, flag_review);
+    try setAutoreview(db, id, "{\"status\":\"done\",\"started\":1}");
+    try raiseAfterReview(ctx, db, id, .review);
+    const back = try listTickets(db, a, .{ .needs = true });
+    try std.testing.expectEqual(@as(usize, 1), back.len);
+    try std.testing.expectEqualStrings(flag_review, back[0].flags[0].kind);
+    // Hidden, likewise.
+    _ = try hideNeeds(ctx, db, a, k, true);
+    try raiseAfterReview(ctx, db, id, .review);
+    try std.testing.expectEqual(@as(usize, 1), (try listTickets(db, a, .{ .needs = true })).len);
+}
+
+/// Keep the ticket's automated review (autoreview.zig's JSON). Left out of
+/// `updated`: the board's cards don't change with it.
+pub fn setAutoreview(db: Db, id: i64, json: []const u8) Error!void {
+    try db.exec("UPDATE tickets SET autoreview = ?2 WHERE id = ?1", .{ id, json });
+}
+
+/// `setAutoreview`, only if the stored review is still `old` (nothing
+/// changed it since the caller read it). False when it was changed.
+pub fn setAutoreviewIf(db: Db, id: i64, json: []const u8, old: []const u8) Error!bool {
+    try db.exec("UPDATE tickets SET autoreview = ?2 WHERE id = ?1 AND autoreview = ?3", .{ id, json, old });
+    return db.changes() > 0;
+}
+
+/// `setAutoreview`, only while the stored review is still running (it may
+/// have finished since the caller read it). False when it wasn't.
+pub fn setAutoreviewIfRunning(db: Db, id: i64, json: []const u8) Error!bool {
+    try db.exec("UPDATE tickets SET autoreview = ?2 WHERE id = ?1 AND instr(autoreview, ?3) > 0", .{ id, json, reviewing_json });
+    return db.changes() > 0;
 }
 
 /// When a session last took the ticket up (its last "started" event, in

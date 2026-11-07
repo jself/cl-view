@@ -209,7 +209,7 @@ fn expire(ctx: Ctx, db: board.Db, a: std.mem.Allocator, d: board.DuePark) !void 
 /// so a restart of `cl web` leaves it running.
 fn spawnCheck(ctx: Ctx, a: std.mem.Allocator, key: []const u8, at: i64) !void {
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const exe = exe_buf[0..try std.process.executablePath(ctx.io, &exe_buf)];
+    const exe = try ctx.exePath(&exe_buf);
     const r = try std.process.run(a, ctx.io, .{ .argv = &.{
         "sh", "-c", "exec setsid -f \"$@\" </dev/null >/dev/null 2>&1", "sh", exe, "ticket", "park-check", key, "--at", try std.fmt.allocPrint(a, "{d}", .{at}),
     } });

@@ -4,8 +4,9 @@
 //! ticket): setup steps, one Launch command run in a hidden tmux session, and
 //! checks.
 //!
-//! gutter and launches run in tmux sessions named clg_<key> and clrun_<key>,
-//! outside cl's `cl_` names so the chooser doesn't list them.
+//! gutter and launches run in tmux sessions named clg_<key> and clrun_<key>
+//! (and automated reviews in clrv_<key>, autoreview.zig), outside cl's `cl_`
+//! names so the chooser doesn't list them.
 const std = @import("std");
 const Ctx = @import("ctx.zig");
 const tmux = @import("tmux.zig");
@@ -30,6 +31,13 @@ pub fn guidePath(a: std.mem.Allocator, dir: []const u8) ![]const u8 {
 
 pub fn reviewPath(a: std.mem.Allocator, dir: []const u8) ![]const u8 {
     return std.fmt.allocPrint(a, "{s}/.claude/review.md", .{dir});
+}
+
+/// Where gutter keeps the review you haven't submitted yet (its output
+/// file's name plus .draft.json; cl runs it with -dir .claude), restored
+/// when it opens on the same -r. Out of the ticket's change, as .claude/ is.
+pub fn draftPath(a: std.mem.Allocator, dir: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(a, "{s}/.claude/review.md.draft.json", .{dir});
 }
 
 /// Move the review guide Claude wrote in `dir` into the ticket, so the next
@@ -185,7 +193,7 @@ pub fn startGutter(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Alloca
     std.Io.Dir.cwd().deleteFile(ctx.io, try reviewPath(a, dir)) catch {};
     const rev = try worktree.reviewRev(ctx, a, dir, t.base, t.change);
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const exe = exe_buf[0..try std.process.executablePath(ctx.io, &exe_buf)];
+    const exe = try ctx.exePath(&exe_buf);
     const script =
         \\cl=$1 key=$2 gutter=$3; shift 3
         \\if "$gutter" -sync -window "$@" > .claude/review.md; then exec "$cl" ticket gutter "$key" --submitted; fi
@@ -193,7 +201,8 @@ pub fn startGutter(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Alloca
     ;
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(a, &.{ "new-session", "-d", "-s", name, "-c", dir, "--", "sh", "-c", script, "sh", exe, t.key, gutter });
-    try argv.appendSlice(a, &.{ "-guide", guideFile(ctx, cfg, db, a, t, dir) catch "/dev/null" });
+    // -dir: its draft (`draftPath`) goes in .claude/, not the change.
+    try argv.appendSlice(a, &.{ "-dir", ".claude", "-guide", guideFile(ctx, cfg, db, a, t, dir) catch "/dev/null" });
     if (rev.len > 0) try argv.appendSlice(a, &.{ "-r", rev });
     tmux.runQuiet(ctx, argv.items) catch return error.GutterFailed;
     tmux.runQuiet(ctx, &.{ "set-option", "-t", name, "remain-on-exit", "on" }) catch {};
@@ -565,8 +574,9 @@ pub fn stopLaunchesBut(ctx: Ctx, a: std.mem.Allocator, key: []const u8, spare: ?
     }
 }
 
-/// The launch sessions (clrun_<key>_s<n>, or an old clrun_<key>) of
-/// tickets not in `live`: finished or deleted ones.
+/// The launch sessions (clrun_<key>_s<n>, or an old clrun_<key>) and
+/// automated reviews (clrv_<key>) of tickets not in `live`: finished or
+/// deleted ones.
 pub fn staleLaunches(ctx: Ctx, a: std.mem.Allocator, live: []const []const u8) ![]const []const u8 {
     const names = tmux.run(ctx, &.{ "list-sessions", "-F", "#{session_name}" }) catch return &.{};
     defer ctx.gpa.free(names);
@@ -583,8 +593,10 @@ pub fn staleLaunches(ctx: Ctx, a: std.mem.Allocator, live: []const []const u8) !
     return out.items;
 }
 
-/// The (lowercase) ticket key a launch session belongs to.
+/// The (lowercase) ticket key a launch session (or automated review)
+/// belongs to.
 fn launchKey(name: []const u8) ?[]const u8 {
+    if (std.mem.startsWith(u8, name, "clrv_")) return if (name.len > "clrv_".len) name["clrv_".len..] else null;
     if (!std.mem.startsWith(u8, name, "clrun_")) return null;
     const rest = name["clrun_".len..];
     if (std.mem.lastIndexOf(u8, rest, "_s")) |i| {
@@ -598,6 +610,7 @@ test "launchKey" {
     try std.testing.expectEqualStrings("cl-50", launchKey("clrun_cl-50_s12").?);
     try std.testing.expectEqualStrings("cl-50", launchKey("clrun_cl-50").?);
     try std.testing.expect(launchKey("cl_cl-50_ab12") == null);
+    try std.testing.expectEqualStrings("cl-50", launchKey("clrv_cl-50").?);
 }
 
 /// Stop one launch session by its full name.

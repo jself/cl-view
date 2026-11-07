@@ -11,7 +11,8 @@
 //!   POST /api/ticket/<key>/<action>     edit move rank comment flag unflag dismiss done approve
 //!                                       start answer key kill hide unhide rm cleanup gutter
 //!                                       gutter-stop launch launch-stop test-progress
-//!                                       test-results relocate park unpark
+//!                                       test-results relocate park unpark autoreview
+//!                                       autoreview-stop autoreview-send autoreview-gutter
 //!   POST /api/flags/dismiss             dismiss one kind of flag on several tickets
 //!   POST /api/alert/<tmux>/dismiss      clear a session's alert (cl alert)
 //!   POST /api/project                   add a project
@@ -25,6 +26,7 @@ const board = @import("board.zig");
 const actions = @import("actions.zig");
 const dispatch = @import("dispatch.zig");
 const review = @import("review.zig");
+const autoreview = @import("autoreview.zig");
 const worktree = @import("worktree.zig");
 const web = @import("web.zig");
 const operator = @import("operator.zig");
@@ -130,6 +132,13 @@ pub fn handle(ctx: Ctx, cfg: config.Config, req: *std.http.Server.Request, path:
             error.BadAnswer => .{ .bad_request, "one answer per question: an option number or your own words (several numbers for a multi-select one)" },
             error.GutterFailed => .{ .internal_server_error, "gutter didn't start" },
             error.GutterMissing => .{ .conflict, review.not_installed },
+            error.GutterOpen => .{ .conflict, "gutter is open already: close it first, then open it with the findings" },
+            error.NotInReview => .{ .conflict, "only a ticket in review or testing gets an automated review" },
+            error.NoChanges => .{ .conflict, "it has no changes to review" },
+            error.AlreadyRunning => .{ .conflict, "its automated review is running already" },
+            error.StartFailed => .{ .internal_server_error, std.fmt.allocPrint(a, "the reviewer didn't start: {s}", .{tmux.lastError()}) catch "the reviewer didn't start" },
+            error.NoFindings => .{ .conflict, "there are no findings to use" },
+            error.OldFindings => .{ .conflict, "these findings are from before Claude's last changes; run the review again" },
             error.NotDelivered => .{ .conflict, "Claude didn't take the answer; it's still waiting. Check the session" },
             error.AlreadyStarted => .{ .conflict, "it already has a session" },
             error.Umbrella => .{ .conflict, "it's an umbrella: its sub-tickets run, not it" },
@@ -197,6 +206,8 @@ const Body = struct {
     slots: ?i64 = null,
     after_merge: ?[]const u8 = null,
     after_merge_claude: ?[]const u8 = null,
+    /// Project: the automated review's skill ("" for cl's own instructions).
+    review_skill: ?[]const u8 = null,
     /// Ticket or project: the branch it targets ("" for trunk / the project's).
     onto: ?[]const u8 = null,
     /// finish "tell": what Claude should do first.
@@ -344,6 +355,7 @@ fn route(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: 
                 .profile = b.profile,
                 .after_merge = b.after_merge,
                 .after_merge_claude = b.after_merge_claude,
+                .review_skill = b.review_skill,
                 .onto = b.onto,
             }) catch |e| return projectFail(req, e);
             _ = worktree.ensureJj(ctx, a, dir);
@@ -364,6 +376,7 @@ fn route(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: 
                 .profile = b.profile,
                 .after_merge = b.after_merge,
                 .after_merge_claude = b.after_merge_claude,
+                .review_skill = b.review_skill,
                 .onto = b.onto,
             }) catch |e| return projectFail(req, e);
         } else if (std.mem.eql(u8, action, "after-merge")) {
@@ -555,6 +568,18 @@ fn ticketAction(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator
         return ok(req, a, .{ .port = port });
     } else if (eql(u8, action, "gutter-stop")) {
         try review.stopGutter(ctx, a, key);
+    } else if (eql(u8, action, "autoreview")) {
+        const r = try autoreview.start(ctx, cfg, db, a, try board.getTicket(db, a, key));
+        return ok(req, a, .{ .profile = r.profile });
+    } else if (eql(u8, action, "autoreview-stop")) {
+        try autoreview.stop(ctx, db, a, key);
+    } else if (eql(u8, action, "autoreview-send")) {
+        return ok(req, a, try actions.autoreviewSend(ctx, db, a, key));
+    } else if (eql(u8, action, "autoreview-gutter")) {
+        const t = try board.getTicket(db, a, key);
+        const r = try autoreview.openInGutter(ctx, cfg, db, a, t);
+        web.relayGutter(ctx, cfg, t.key, r.port);
+        return ok(req, a, .{ .port = r.port, .draft = @tagName(r.draft) });
     } else if (eql(u8, action, "launch")) {
         _ = try review.launch(ctx, db, a, try board.getTicket(db, a, key), b.step);
     } else if (eql(u8, action, "launch-stop")) {
@@ -757,6 +782,10 @@ fn getTicket(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, r
         .launches = if (plan) |p| try review.launchStates(ctx, a, t.key, p) else &.{},
         .ready = if (plan) |p| try review.waitStates(ctx, a, p) else &.{},
         .gutter_port = gutter_port,
+        // The last automated review (checked: one whose reviewer died or ran
+        // too long reads as failed), and whether it is of an earlier round.
+        .autoreview = try autoreview.check(ctx, db, a, t),
+        .autoreview_session = try autoreview.sessionName(a, t.key),
         // gutter is installed: the board offers it for review.
         .gutter = review.findGutter(ctx, a, cfg) != null,
         .main_branch = if (t.branch.len > 0 or t.change.len > 0) worktree.mergeBranch(ctx, a, (try board.getProject(db, a, t.project)).dir, t.onto) else "",

@@ -420,8 +420,8 @@ fn start(ctx: Ctx, cfg: config.Config, arena: std.mem.Allocator, dir: []const u8
 /// started by a branch's test server runs that branch's commands.
 fn withSelfPath(ctx: Ctx, a: std.mem.Allocator) ![]const u8 {
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const exe = std.process.executablePath(ctx.io, &exe_buf) catch return instructions;
-    return selfPathText(a, exe_buf[0..exe]);
+    const exe = ctx.exePath(&exe_buf) catch return instructions;
+    return selfPathText(a, exe);
 }
 
 fn selfPathText(a: std.mem.Allocator, exe: []const u8) ![]const u8 {

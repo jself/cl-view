@@ -18,6 +18,7 @@
 //!                                          ticket worktrees; board.trust_worktrees is the old name)
 //!
 //!   gutter.path = ~/bin/gutter           (gutter for reviews; "" looks it up on PATH)
+//!   review.model = sonnet                (the automated reviewer's model; default: the profile's)
 //!
 //!   tmux.socket = /run/user/1000/cl-try/tmux   (tmux -S for every tmux call; CL_TMUX_SOCKET overrides)
 //!
@@ -56,6 +57,9 @@ pub const Config = struct {
     /// `operator.model`: the operator's Claude model (`--model`, e.g. sonnet);
     /// "" leaves it to the profile's default.
     operator_model: []const u8 = "",
+    /// `review.model`: the automated reviewer's Claude model (autoreview.zig);
+    /// "" leaves it to the profile's default.
+    review_model: []const u8 = "",
     web: Web = .{},
     board: Board = .{},
     gutter: Gutter = .{},
@@ -170,6 +174,7 @@ fn loadFile(ctx: Ctx) !Config {
     var default: ?[]const u8 = null;
     var operator: ?[]const u8 = null;
     var operator_model: []const u8 = "";
+    var review_model: []const u8 = "";
     var web: Web = .{};
     var board: Board = .{};
     var gutter: Gutter = .{};
@@ -188,6 +193,8 @@ fn loadFile(ctx: Ctx) !Config {
             operator = val;
         } else if (std.mem.eql(u8, key, "operator.model")) {
             operator_model = val;
+        } else if (std.mem.eql(u8, key, "review.model")) {
+            review_model = val;
         } else if (std.mem.eql(u8, key, "web.autostart")) {
             web.autostart = std.mem.eql(u8, val, "true") or std.mem.eql(u8, val, "yes") or std.mem.eql(u8, val, "on");
         } else if (std.mem.eql(u8, key, "web.listen")) {
@@ -235,6 +242,7 @@ fn loadFile(ctx: Ctx) !Config {
         c.tmux = tmux;
         c.voice = voice;
         c.operator_model = operator_model;
+        c.review_model = review_model;
         return c;
     }
     const operator_profile = operator orelse default orelse profiles.items[0].name;
@@ -246,6 +254,7 @@ fn loadFile(ctx: Ctx) !Config {
         .default = default orelse profiles.items[0].name,
         .operator = operator_profile,
         .operator_model = operator_model,
+        .review_model = review_model,
         .web = web,
         .board = board,
         .gutter = gutter,

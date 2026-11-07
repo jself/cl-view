@@ -39,7 +39,7 @@ pub fn main(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void {
 
     const url = try std.fmt.allocPrint(arena, "http://{f}/board", .{ip});
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const exe = exe_buf[0..try std.process.executablePath(ctx.io, &exe_buf)];
+    const exe = try ctx.exePath(&exe_buf);
     const helper = try std.fs.path.join(arena, &.{ std.fs.path.dirname(exe).?, "cl-window" });
     const log = try statePath(ctx, arena, "window.log");
     try std.Io.Dir.cwd().createDirPath(ctx.io, std.fs.path.dirname(log).?);
@@ -114,7 +114,7 @@ fn install(ctx: Ctx) !void {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const exe = exe_buf[0..try std.process.executablePath(ctx.io, &exe_buf)];
+    const exe = try ctx.exePath(&exe_buf);
 
     const desktop = try dataPath(ctx, arena, "../applications/" ++ app_id ++ ".desktop");
     const icon = try dataPath(ctx, arena, "../icons/hicolor/scalable/apps/" ++ app_id ++ ".svg");

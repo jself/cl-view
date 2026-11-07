@@ -5,6 +5,7 @@ const Ctx = @import("ctx.zig");
 const tmux = @import("tmux.zig");
 const board = @import("board.zig");
 const review = @import("review.zig");
+const autoreview = @import("autoreview.zig");
 const worktree = @import("worktree.zig");
 const config = @import("config.zig");
 const signals = @import("signals.zig");
@@ -116,7 +117,11 @@ pub fn move(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, ke
         try readyForDone(ctx, db, a, key, spin_off);
         if (try startFinish(ctx, db, a, key, finish)) return;
     }
-    if (stage == .queued or stage == .backlog) if (try stopFor(ctx, cfg, db, a, key, stage)) return;
+    if (stage == .queued or stage == .backlog) {
+        // Not in progress any more: a review of it stops too, session or not.
+        autoreview.stop(ctx, db, a, key) catch {};
+        if (try stopFor(ctx, cfg, db, a, key, stage)) return;
+    }
     try board.move(ctx, db, a, key, stage);
     // Before the session closes: this may be running in it.
     if (stage == .done and finish == .close) try checkLanded(ctx, db, a, key, "It went to Done with Close, not Merge or PR");
@@ -156,6 +161,7 @@ fn stopFor(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, key
     const t = try board.getTicket(db, a, key);
     const s = try sessionToStop(db, t, if (liveSession(ctx, t)) |_| true else false) orelse return false;
     review.stopGutter(ctx, a, key) catch {};
+    autoreview.stop(ctx, db, a, key) catch {};
     review.stopLaunchesBut(ctx, a, key, tmux.ownSession(ctx, a)) catch {};
     _ = try endSession(ctx, cfg, db, a, t, s, stage);
     return true;
@@ -427,6 +433,7 @@ fn closeSession(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8) !
     const mine = if (s) |x| if (me) |m| std.mem.eql(u8, x, m) else false else false;
     if (s) |x| if (!mine) try killTicketSession(ctx, db, t, x);
     review.stopGutter(ctx, a, key) catch {};
+    autoreview.stop(ctx, db, a, key) catch {};
     review.stopLaunchesBut(ctx, a, key, me) catch {};
     if (mine) try killTicketSession(ctx, db, t, s.?);
 }
@@ -457,6 +464,7 @@ pub fn remove(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8) ![]
     const mine = if (s) |x| if (me) |m| std.mem.eql(u8, x, m) else false else false;
     if (s) |x| if (!mine) tmux.kill(ctx, x) catch {};
     review.stopGutter(ctx, a, t.key) catch {};
+    autoreview.killSession(ctx, a, t.key) catch {};
     review.stopLaunchesBut(ctx, a, t.key, me) catch {};
     if (mine) tmux.kill(ctx, s.?) catch {};
     return freed;
@@ -862,6 +870,45 @@ pub fn gutterSubmitted(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []cons
     r.sent_back = br.sent_back;
     r.round = (try board.getTicket(db, a, key)).round;
     return r;
+}
+
+/// Send the ticket's automated review findings to its session ("Send
+/// findings to Claude", `cl ticket autoreview <key> --send`): pasted in like
+/// a gutter review and kept as a comment, which starts another round.
+/// error.NoFindings unless a finished review has some.
+pub fn autoreviewSend(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8) !CommentResult {
+    const t = try board.getTicket(db, a, key);
+    var r = autoreview.load(a, t) orelse return error.NoFindings;
+    if (!std.mem.eql(u8, r.status, "done") or r.findings.len == 0) return error.NoFindings;
+    if (!autoreview.current(r, t)) return error.OldFindings;
+    const s = liveSession(ctx, t) orelse return error.NoSession;
+    const msg = try autoreview.message(a, r);
+    try tmux.pasteText(ctx, s, msg);
+    r.sent = ctx.nowSeconds();
+    // Marked sent only if it is still the review that was sent (not a new
+    // one started meanwhile).
+    _ = try board.setAutoreviewIf(db, t.id, try std.fmt.allocPrint(a, "{f}", .{std.json.fmt(r, .{})}), t.autoreview);
+    const br = try board.addComment(ctx, db, a, key, "you", msg, true);
+    return .{ .sent = true, .sent_back = br.sent_back, .round = (try board.getTicket(db, a, key)).round };
+}
+
+test "findings from an earlier round aren't sent" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env: std.process.Environ.Map = .init(a);
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = a, .env = &env, .home = "/tmp", .tmux_blocked = true };
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "qa", .dir = "/x" });
+    const k = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "T", .stage = .review });
+    const id = (try board.getTicket(db, a, k)).id;
+    try board.setAutoreview(db, id, "{\"status\":\"done\",\"round\":1,\"findings\":[{\"title\":\"x\",\"body\":\"y\"}]}");
+    // Round 1, current: on to the session (which it hasn't).
+    try std.testing.expectError(error.NoSession, autoreviewSend(ctx, db, a, k));
+    try db.exec("UPDATE tickets SET round = 2 WHERE id = ?1", .{id});
+    try std.testing.expectError(error.OldFindings, autoreviewSend(ctx, db, a, k));
 }
 
 pub const TestOutcome = struct {

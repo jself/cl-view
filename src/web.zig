@@ -9,6 +9,7 @@ const tmux = @import("tmux.zig");
 const pty = @import("pty.zig");
 const dispatch = @import("dispatch.zig");
 const review = @import("review.zig");
+const autoreview = @import("autoreview.zig");
 const actions = @import("actions.zig");
 const web_board = @import("web_board.zig");
 const board = @import("board.zig");
@@ -64,8 +65,7 @@ fn serve(ctx: Ctx, cfg: config.Config) !void {
     if (cfg.web.password.len == 0) fail("no web.password in ~/.config/cl/config; run `cl web password`", .{});
 
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const exe_len = try std.process.executablePath(ctx.io, &exe_buf);
-    var state: State = .{ .ctx = ctx, .cfg = cfg, .key = undefined, .exe = exe_buf[0..exe_len] };
+    var state: State = .{ .ctx = ctx, .cfg = cfg, .key = undefined, .exe = try ctx.exePath(&exe_buf) };
     std.crypto.hash.sha2.Sha256.hash(cfg.web.password, &state.key, .{});
     if (cfg.web.port) |p| replaceOld(ctx, cfg, p);
 
@@ -152,8 +152,10 @@ fn sweepTests(ctx: Ctx, cfg: config.Config) !void {
     for (live.items) |t| try keys.append(a, t.key);
     for (try review.staleLaunches(ctx, a, keys.items)) |name| {
         review.killLaunch(ctx, a, name) catch continue;
-        logf("sweep: stopped {s}, a test launch of a finished ticket", .{name});
+        logf("sweep: stopped {s}, {s} of a finished ticket", .{ name, if (std.mem.startsWith(u8, name, "clrv_")) "the automated review" else "a test launch" });
     }
+    // Automated reviews that ran too long, or whose session ended unreported.
+    for (try autoreview.checkAll(ctx, db, a)) |c| logf("sweep: {s}'s automated review failed: {s}", .{ c.key, c.review.@"error" });
 
     const root = try worktree.root(ctx, a, cfg);
     var wts: std.ArrayList([]const u8) = .empty;
@@ -1102,7 +1104,7 @@ pub fn start(ctx: Ctx, cfg: config.Config, force: bool) !void {
         return;
     }
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const exe = exe_buf[0..try std.process.executablePath(ctx.io, &exe_buf)];
+    const exe = try ctx.exePath(&exe_buf);
     const log = try logPath(ctx, arena, cfg);
     try std.Io.Dir.cwd().createDirPath(ctx.io, std.fs.path.dirname(log).?);
     // The tmux server's environment, not ours, reaches the command, so the

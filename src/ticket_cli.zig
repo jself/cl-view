@@ -13,6 +13,7 @@ const worktree = @import("worktree.zig");
 const actions = @import("actions.zig");
 const review = @import("review.zig");
 const after_merge = @import("after_merge.zig");
+const autoreview = @import("autoreview.zig");
 const park = @import("park.zig");
 const ticket_watch = @import("ticket_watch.zig");
 const alerts = @import("alerts.zig");
@@ -129,6 +130,16 @@ pub const ticket_usage =
     \\                              press a key in its session
     \\  gutter <key> [--stop]       review its changes in gutter's window (with Claude's review
     \\                              guide); the review you submit there goes to its session
+    \\  autoreview <key> [--stop | --send]
+    \\                              automated review: a separate Claude (clrv_<key>, the ticket's
+    \\                              profile, read-only) reviews its changes and reports findings,
+    \\                              kept on the ticket (show, the board's Review tab); nothing
+    \\                              goes to the ticket's session until you --send them (that
+    \\                              starts another round, as comment --send does). In review or
+    \\                              testing; one at a time. --stop: stop it
+    \\  autoreview <key> --findings -
+    \\                              by hand, for a running review: take these findings (JSON on
+    \\                              stdin, as the reviewer writes them) as its result
     \\  testplan <key> [--json]     the test plan Claude gave: its steps, in order
     \\  testplan --format           how to write one (for Claude)
     \\  launch <key> [--step <n>] [--stop]
@@ -174,9 +185,10 @@ pub const project_usage =
     \\
     \\  add <name> <dir> [--prefix <KEY>] [--slots <n>] [--planners <n>] [--mode queue|worktree]
     \\      [--profile <name>] [--after-merge <command>] [--after-merge-claude <steps> | none]
+    \\      [--review-skill <skill>]
     \\  set <name> [--name <new>] [--dir <dir>] [--prefix <KEY>] [--slots <n>] [--planners <n>]
     \\      [--mode queue|worktree] [--profile <name>] [--after-merge <command>]
-    \\      [--after-merge-claude <steps> | none] [--onto <branch>]
+    \\      [--after-merge-claude <steps> | none] [--onto <branch>] [--review-skill <skill>]
     \\  rm <name>                   (refused while it has tickets)
     \\  hide <name> / unhide <name> keep its tickets out of the board's views, Needs You,
     \\                              `cl ticket needs` and `cl ticket list`, or bring them back;
@@ -200,6 +212,9 @@ pub const project_usage =
     \\  gets CL_TICKET, CL_TICKETS, CL_PROJECT, CL_COMMIT, CL_PROJECT_DIR and
     \\  CL_CHECKOUT; output goes to ~/.local/state/cl/after-merge-<name>.log, and a
     \\  failure flags the ticket. "" removes it.
+    \\--review-skill: the skill the automated review (cl ticket autoreview) uses
+    \\  instead of cl's own instructions; it still reports findings in cl's format.
+    \\  "" (the default): cl's own.
     \\--after-merge-claude: what Claude is asked to do after a merge when there is no
     \\  command (the ticket's Claude, or the operator once its session is gone), and
     \\  what the operator is asked to sort out when the command fails. "" (the
@@ -349,7 +364,7 @@ pub fn projectMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void
     defer arena_state.deinit();
     const a = arena_state.allocator();
     const cmd = argv[0];
-    const args = try Args.parse(a, argv[1..], &.{ "--prefix", "--slots", "--planners", "--mode", "--profile", "--name", "--dir", "--after-merge", "--after-merge-claude", "--onto" }, project_usage);
+    const args = try Args.parse(a, argv[1..], &.{ "--prefix", "--slots", "--planners", "--mode", "--profile", "--name", "--dir", "--after-merge", "--after-merge-claude", "--onto", "--review-skill" }, project_usage);
     const db = openBoard(ctx, cfg);
     defer db.close();
 
@@ -358,7 +373,7 @@ pub fn projectMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void
         const ps = board.listProjects(db, a) catch |e| boardFail(db, e, "project");
         if (args.has("--json")) return out(try std.fmt.allocPrint(a, "{f}\n", .{std.json.fmt(ps, .{})}));
         var aw: std.Io.Writer.Allocating = .init(a);
-        for (ps) |p| try aw.writer.print("{s}\t{s}\t{s}\tslots {d}\tplanners {d}\t{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}\n", .{
+        for (ps) |p| try aw.writer.print("{s}\t{s}\t{s}\tslots {d}\tplanners {d}\t{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}\n", .{
             p.name, p.prefix, try ctx.shortenHomeIn(a, p.dir), p.slots, p.planners, @tagName(p.mode),
             if (p.onto.len > 0) "\tonto " else "", p.onto,
             if (p.hidden) "\thidden" else "",
@@ -366,11 +381,12 @@ pub fn projectMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void
             if (p.profile.len > 0) "\t" else "", p.profile,
             if (p.after_merge.len > 0) "\tafter merge: " else "", p.after_merge,
             if (p.after_merge_claude.len > 0) "\tclaude after merge: " else "", p.after_merge_claude,
+            if (p.review_skill.len > 0) "\treview skill: " else "", p.review_skill,
         });
         return out(aw.writer.buffered());
     }
     if (std.mem.eql(u8, cmd, "add")) {
-        args.only(&.{ "--prefix", "--slots", "--planners", "--mode", "--profile", "--after-merge", "--after-merge-claude", "--onto" }, project_usage);
+        args.only(&.{ "--prefix", "--slots", "--planners", "--mode", "--profile", "--after-merge", "--after-merge-claude", "--onto", "--review-skill" }, project_usage);
         if (args.pos.items.len != 2) fail("usage: cl project add <name> <dir> [options]", .{});
         const dir = try realDir(ctx, a, args.pos.items[1]);
         try checkProfile(cfg, args.get("--profile"));
@@ -386,13 +402,14 @@ pub fn projectMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void
             .after_merge = args.get("--after-merge"),
             .after_merge_claude = args.get("--after-merge-claude"),
             .onto = args.get("--onto"),
+            .review_skill = args.get("--review-skill"),
         }) catch |e| boardFail(db, e, "project (name or prefix)");
         const p = board.getProject(db, a, args.pos.items[0]) catch |e| boardFail(db, e, "project");
         const jj = worktree.ensureJj(ctx, a, dir);
         return out(try std.fmt.allocPrint(a, "{s}: tickets are {s}-1, {s}-2, ...{s}\n", .{ p.name, p.prefix, p.prefix, if (jj) "\n(set up jj alongside git: jj git init --colocate)" else "" }));
     }
     if (std.mem.eql(u8, cmd, "set")) {
-        args.only(&.{ "--prefix", "--slots", "--planners", "--mode", "--profile", "--name", "--dir", "--after-merge", "--after-merge-claude", "--onto" }, project_usage);
+        args.only(&.{ "--prefix", "--slots", "--planners", "--mode", "--profile", "--name", "--dir", "--after-merge", "--after-merge-claude", "--onto", "--review-skill" }, project_usage);
         if (args.pos.items.len != 1) fail("usage: cl project set <name> [options]", .{});
         try checkProfile(cfg, args.get("--profile"));
         if (args.get("--onto") != null) checkOnto(ctx, a, (board.getProject(db, a, args.pos.items[0]) catch |e| boardFail(db, e, "project")).dir, args.get("--onto"));
@@ -407,6 +424,7 @@ pub fn projectMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void
             .after_merge = args.get("--after-merge"),
             .after_merge_claude = args.get("--after-merge-claude"),
             .onto = args.get("--onto"),
+            .review_skill = args.get("--review-skill"),
         }) catch |e| boardFail(db, e, "project (name or prefix)");
         return;
     }
@@ -496,7 +514,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
     const cmd = argv[0];
     const args = try Args.parse(a, argv[1..], &.{
         "--body", "--target", "--stage", "--profile", "--project", "--flag", "--search", "--title", "--as", "--summary", "--test-plan", "--step", "--parent", "--skill", "--pr-url", "--before", "--after", "--tell",
-        "--reason", "--until", "--every", "--max", "--at", "--change", "--not-after", "--onto",
+        "--reason", "--until", "--every", "--max", "--at", "--change", "--not-after", "--onto", "--findings",
     }, ticket_usage);
     const env_key = ctx.env.get("CL_TICKET");
     const db = openBoard(ctx, cfg);
@@ -540,6 +558,9 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         args.only(&.{ "--stage", "--project", "--flag", "--needs", "--hidden", "--search", "--open", "--top", "--parent", "--parked", "--hidden-projects", "--json" }, ticket_usage);
         if (pos.len != 0) fail("{s} takes no arguments\n{s}", .{ cmd, ticket_usage });
         const needs = args.has("--needs") or args.has("--hidden") or std.mem.eql(u8, cmd, "needs");
+        // A review whose reviewer died mustn't keep its ticket out of the
+        // inbox when cl web (and its sweep) isn't running.
+        if (needs) _ = autoreview.checkAll(ctx, db, a) catch {};
         const ts = board.listTickets(db, a, .{
             .stage = if (args.get("--stage")) |s| parseStage(s) else null,
             .project = args.get("--project"),
@@ -590,7 +611,11 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
     if (std.mem.eql(u8, cmd, "show")) {
         args.only(&.{"--json"}, ticket_usage);
         const key = keyArg(pos, 0, env_key, "cl ticket show <key>");
-        const t = board.getTicket(db, a, key) catch |e| boardFail(db, e, "ticket");
+        var t = board.getTicket(db, a, key) catch |e| boardFail(db, e, "ticket");
+        // A review whose reviewer died or ran too long reads as failed.
+        if (t.autoreview.len > 0) if (autoreview.check(ctx, db, a, t) catch null) |_| {
+            t = board.getTicket(db, a, key) catch |e| boardFail(db, e, "ticket");
+        };
         const cs = board.comments(db, a, t.id) catch |e| boardFail(db, e, "ticket");
         const evs = board.events(db, a, t.id) catch |e| boardFail(db, e, "ticket");
         const subs = board.listTickets(db, a, .{ .parent = t.key }) catch |e| boardFail(db, e, "ticket");
@@ -891,6 +916,59 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
             else => fail("gutter didn't start", .{}),
         };
         return out(try std.fmt.allocPrint(a, "gutter's window is open (http://127.0.0.1:{d}); the review you submit goes to the session\n", .{port}));
+    }
+    if (std.mem.eql(u8, cmd, "autoreview")) {
+        args.only(&.{ "--stop", "--send", "--findings", "--accept-trust", "--stop-hook" }, ticket_usage);
+        // The reviewer has no CL_TICKET; it is told its key.
+        const key = keyArg(pos, 0, ctx.env.get("CL_AUTOREVIEW"), "cl ticket autoreview <key> [--stop | --send]");
+        const t = board.getTicket(db, a, key) catch |e| boardFail(db, e, "ticket");
+        if (args.has("--stop")) return autoreview.stop(ctx, db, a, t.key) catch |e| boardFail(db, e, "ticket");
+        // Internal: the helper autoreview.start runs, detached.
+        if (args.has("--accept-trust")) return autoreview.acceptTrust(ctx, a, t.key);
+        // Internal: the reviewer's Stop hook (Claude Code's hook JSON on stdin).
+        if (args.has("--stop-hook")) {
+            const In = struct { stop_hook_active: bool = false };
+            const in = std.json.parseFromSliceLeaky(In, a, readStdin(ctx, a, "the hook's input"), .{ .ignore_unknown_fields = true }) catch In{};
+            switch (autoreview.stopHook(ctx, cfg, db, a, t.key, in.stop_hook_active) catch |e| boardFail(db, e, "ticket")) {
+                .ignore => return,
+                // Claude goes on, told why.
+                .retry => |why| return out(try std.fmt.allocPrint(a, "{f}\n", .{std.json.fmt(.{ .decision = "block", .reason = why }, .{})})),
+                // Last: it is the session this runs in.
+                .done, .failed => return autoreview.killSession(ctx, a, t.key) catch {},
+            }
+        }
+        if (args.has("--send")) {
+            const r = actions.autoreviewSend(ctx, db, a, t.key) catch |e| switch (e) {
+                error.NoFindings => fail("{s} has no automated review findings to send", .{t.key}),
+                error.OldFindings => fail("{s}'s automated review findings are from before Claude's last changes; run it again (cl ticket autoreview {s})", .{ t.key, t.key }),
+                error.NoSession => fail("{s} has no live session to send them to; start it again first", .{t.key}),
+                else => boardFail(db, e, "ticket"),
+            };
+            return out(if (r.sent_back) try std.fmt.allocPrint(a, "Sent the findings; {s} is back in running (round {d})\n", .{ t.key, r.round }) else "Sent the findings to the session.\n");
+        }
+        if (args.has("--findings")) {
+            const cur = autoreview.load(a, t) orelse fail("{s} has no automated review running", .{t.key});
+            if (!std.mem.eql(u8, cur.status, "running")) fail("{s}'s automated review isn't running ({s})", .{ t.key, cur.status });
+            const r = autoreview.submit(ctx, db, a, t.key, if (std.mem.eql(u8, args.get("--findings").?, "-")) readStdin(ctx, a, "the findings") else args.get("--findings").?) catch |e| switch (e) {
+                error.BadFindings => fail("the findings weren't taken: {s}. Fix the JSON and run this again.", .{autoreview.lastError()}),
+                error.NotRunning => fail("{s}'s automated review stopped meanwhile; the findings weren't taken", .{t.key}),
+                else => boardFail(db, e, "ticket"),
+            };
+            try out(try std.fmt.allocPrint(a, "Took {d} finding{s} for {s}; its reviewer is closed.\n", .{ r.findings.len, if (r.findings.len == 1) "" else "s", t.key }));
+            // The review is over. Last: this may run in its session.
+            autoreview.killSession(ctx, a, t.key) catch {};
+            return;
+        }
+        tmux.requireServer(ctx);
+        const r = autoreview.start(ctx, cfg, db, a, t) catch |e| switch (e) {
+            error.NotInReview => fail("{s} is in {s}: only a ticket in review or testing gets an automated review", .{ t.key, @tagName(t.stage) }),
+            error.NoChanges => fail("{s} has no changes to review", .{t.key}),
+            error.AlreadyRunning => fail("{s}'s automated review is running already (--stop stops it)", .{t.key}),
+            error.StartFailed => fail("couldn't start the reviewer: {s}", .{tmux.lastError()}),
+            else => boardFail(db, e, "ticket"),
+        };
+        const name = try autoreview.sessionName(a, t.key);
+        return out(try std.fmt.allocPrint(a, "Reviewing {s} in tmux session {s} (profile {s}; tmux attach -t {s} to watch). The findings show on the board and in `cl ticket show {s}`.\n", .{ t.key, name, r.profile, name, t.key }));
     }
     if (std.mem.eql(u8, cmd, "testplan")) {
         args.only(&.{ "--json", "--format" }, ticket_usage);
@@ -1198,6 +1276,7 @@ fn showText(ctx: Ctx, a: std.mem.Allocator, t: board.Ticket, blocks: []const []c
         try w.writeAll(if (t.umbrella) "\nsub-tickets, in order (it has no work of its own: it runs as them):\n" else "\nsub-tickets, in order (they wait for it to be done):\n");
         for (subs) |c| try w.print("  {s}\t{s}\t{s}\t{s}{s}\n", .{ c.key, @tagName(c.stage), try flagList(a, c.flags), c.title, try waitNote(a, c) });
     }
+    if (autoreview.load(a, t)) |r| try writeAutoreview(w, a, t, r);
     if (cs.len > 0) {
         try w.writeAll("\ncomments:\n");
         for (cs) |c| try w.print("  {s} · {s}{s}\n    {s}\n", .{ c.author, try stamp(a, c.at), if (c.sent) " · sent" else "", c.body });
@@ -1207,6 +1286,25 @@ fn showText(ctx: Ctx, a: std.mem.Allocator, t: board.Ticket, blocks: []const []c
         for (evs) |e| try w.print("  {s}  {s}{s}{s}\n", .{ try stamp(a, e.at), e.kind, if (e.detail.len > 0) " " else "", e.detail });
     }
     return aw.writer.buffered();
+}
+
+/// The automated review, under `show`.
+fn writeAutoreview(w: *std.Io.Writer, a: std.mem.Allocator, t: board.Ticket, r: autoreview.Review) !void {
+    const old = if (r.round > 0 and r.round < t.round) try std.fmt.allocPrint(a, ", of round {d} (before Claude's last changes)", .{r.round}) else "";
+    try w.print("\nautomated review ({s}, {s}, profile {s}{s}):\n", .{ r.status, try stamp(a, r.started), r.profile, old });
+    if (std.mem.eql(u8, r.status, "running")) try w.print("  reviewing in tmux session {s}\n", .{try autoreview.sessionName(a, t.key)});
+    if (std.mem.eql(u8, r.status, "failed")) try w.print("  failed: {s}\n", .{r.@"error"});
+    if (!std.mem.eql(u8, r.status, "done")) return;
+    if (r.summary.len > 0) try w.print("  {s}\n", .{r.summary});
+    if (r.findings.len == 0) try w.writeAll("  no findings\n");
+    for (r.findings, 1..) |f, i| {
+        try w.print("  {d}. [{s}] {s}", .{ i, f.severity, f.title });
+        if (f.path.len > 0) try w.print(" ({s}{s})", .{ f.path, if (f.line > 0) try std.fmt.allocPrint(a, ":{d}", .{f.line}) else "" });
+        try w.writeAll("\n");
+        var lines = std.mem.splitScalar(u8, f.body, '\n');
+        while (lines.next()) |l| try w.print("     {s}\n", .{l});
+    }
+    if (r.sent > 0) try w.print("  sent to the session {s}\n", .{try stamp(a, r.sent)}) else if (r.findings.len > 0) try w.print("  not sent to the session (cl ticket autoreview {s} --send)\n", .{t.key});
 }
 
 /// What `t` waits on and what waits on it, a line each.

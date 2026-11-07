@@ -409,6 +409,8 @@ test {
     std.testing.refAllDecls(@import("signals.zig"));
     std.testing.refAllDecls(@import("actions.zig"));
     std.testing.refAllDecls(@import("review.zig"));
+    std.testing.refAllDecls(@import("autoreview.zig"));
+    std.testing.refAllDecls(Ctx);
     std.testing.refAllDecls(window);
     std.testing.refAllDecls(@import("web_board.zig"));
     std.testing.refAllDecls(operator);

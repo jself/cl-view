@@ -18,6 +18,7 @@ const worktree = @import("worktree.zig");
 const signals = @import("signals.zig");
 const history = @import("history.zig");
 const review = @import("review.zig");
+const autoreview = @import("autoreview.zig");
 const park = @import("park.zig");
 const actions = @import("actions.zig");
 const images = @import("images.zig");
@@ -211,7 +212,7 @@ fn resumePrompt(a: std.mem.Allocator, t: board.Ticket, notes: []const board.Comm
 /// Write the hooks settings file (in the board's directory) and return its path.
 fn hooksFile(ctx: Ctx, a: std.mem.Allocator, cfg: config.Config) ![]const u8 {
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const exe = exe_buf[0..try std.process.executablePath(ctx.io, &exe_buf)];
+    const exe = try ctx.exePath(&exe_buf);
     const dir = try board.dirPath(ctx, a, cfg);
     const path = try std.fmt.allocPrint(a, "{s}/claude-hooks.json", .{dir});
     const stop = try std.fmt.allocPrint(a, "'{s}' ticket hook stop", .{exe});
@@ -597,6 +598,7 @@ fn relocateMode(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator
         if (try targetHasTicket(db, t.tmux, t.id)) return error.Busy;
     }
     review.stopGutter(ctx, a, t.key) catch {};
+    autoreview.stop(ctx, db, a, t.key) catch {};
     review.stopLaunch(ctx, a, t.key, null) catch {};
     const short = t.change[0..@min(t.change.len, 12)];
     var note: []const u8 = undefined;

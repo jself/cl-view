@@ -231,6 +231,8 @@ bare `cl` with no terminal (an agent reading the help, say) prints the help
 rather than starting a session in the current folder, and `cl <dir>` without
 `-d` refuses when there is no terminal to attach to.
 
+`review.model` does the same for the automated review (Review and testing).
+
 `operator.model = sonnet` (any `claude --model` value) runs the operator on
 another model than the profile's default: faster answers, voice ones
 included. It takes effect the next time the operator starts (`/exit` in Chat).
@@ -762,6 +764,8 @@ tell it goes in its notes.
 
 ```
 cl t gutter QA-1 [--stop]          review the ticket's changes in gutter's window; Submit sends it to Claude
+cl t autoreview QA-1 [--stop]      a second Claude reviews the changes; its findings wait on the ticket for you
+cl t autoreview QA-1 --send        send the findings to the ticket's session (another round)
 cl t testplan QA-1                 Claude's test plan, step by step
 cl t launch QA-1 --step 2          run step 2's run: command (tmux session clrun_qa-1_s2; --stop ends it)
 cl t test QA-1                     walk through the plan here; failures go back to Claude (s at a check stops and sends what you have)
@@ -790,6 +794,52 @@ submitting (or `--stop`) leaves the ticket as it was. gutter only listens on
 same port on its other `web.listen` addresses (tailscale) and forwards it. Test results that all pass move a ticket in testing to
 done; a failure sends them to Claude for another round, and so can comments
 when everything passed (the board asks).
+
+#### Automated review
+
+`cl t autoreview QA-1`, or the board's Auto review (in a ticket's action bar,
+or Run automated review on its Review tab; in Review or Testing), has a second
+Claude go over the changes before you spend time on them. It isn't the
+ticket's own session, which is anchored on its own reasoning; the ticket stays
+where it is while it runs, out of Needs You (`cl t needs` and `cl t watch`
+too), as when Claude is working on it. When the review finishes or fails, the
+ticket is back there with its Ready for review flag (raised again if you
+dismissed or hid it meanwhile), and its card says how many findings there
+are. The reviewer is
+an interactive `claude` in tmux session clrv_qa-1 (`tmux attach -t clrv_qa-1`
+to watch), in the ticket's directory, under the same profile as the ticket's
+session (the ticket's, else its project's, else `default`; never whatever
+`CLAUDE_CONFIG_DIR` `cl web` happens to have), so its usage goes to the same
+account. `review.model = sonnet` picks its model; without it, the profile's.
+
+It is told the ticket, its plan, your comments and Claude's summary, and
+looks for bugs first, then gaps against what was asked, then breaches of the
+repo's CLAUDE.md, AGENTS.md or CONTRIBUTING.md. A project can have it use a
+skill instead (`cl project set <p> --review-skill code-review`); the skill's
+findings still come back in cl's format. cl writes what it reviews to
+`~/.local/state/cl/autoreview/QA-1.diff` (the changes' descriptions and the
+diff, as of the start) and its instructions to `QA-1.md` next to it, both kept
+for you to look at. It runs with Claude's `dontAsk` permission mode and an
+allow list: reading files (Read, Grep, Glob) and writing one file, its
+findings (`QA-1.json`). No shell, so not even a read command's `--output`.
+Anything else is refused, not asked, so it can't change the work or wait on
+a prompt nobody sees. It has
+none of the ticket's hooks, so it can't flag, move or finish the ticket. When
+it stops, its own Stop hook hands the findings to cl (sending it back once if
+the JSON is wrong) and closes its session. One that is still running after 20
+minutes, or whose session ends without findings, is recorded as failed.
+
+Nothing goes to the ticket's session by itself. The findings show on the
+Review tab and in `cl t show`, most severe first, with two ways on: Send
+findings to Claude (`--send`) pastes them in like a review you wrote, which
+starts another round, and Open in gutter with findings opens gutter with them
+as your draft review: those with a file and line as inline comments, the rest
+in the overall note. Delete the wrong ones, edit or add, and Submit as usual.
+A draft of your own for the same changes is kept instead (the board says so);
+one cl wrote that you left as it was is replaced by newer findings.
+After a new round, the old findings say which round they were from. Done,
+deleting the ticket, or moving it back to Queued stops a review that's
+running.
 
 Tests clean up after themselves. Sending test results stops the ticket's
 launches, and so does finishing it. Once a minute the main `cl web` also

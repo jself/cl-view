@@ -28,6 +28,7 @@ const config = @import("config.zig");
 const tmux = @import("tmux.zig");
 const claude = @import("claude.zig");
 const board = @import("board.zig");
+const autoreview = @import("autoreview.zig");
 
 /// A ticket as the watch sees it: its stage and active flags.
 pub const Seen = struct {
@@ -136,10 +137,11 @@ pub fn snapshot(db: board.Db, a: std.mem.Allocator, sessions: Sessions) ![]Seen 
         \\SELECT t.id, t.key, t.project, t.title, t.stage, t.tmux,
         \\  EXISTS (SELECT 1 FROM projects p WHERE p.name = t.project AND p.hidden != 0),
         \\  f.id, f.kind, f.detail, f.hidden,
-        \\  EXISTS (SELECT 1 FROM parks k WHERE k.ticket = t.id)
+        \\  EXISTS (SELECT 1 FROM parks k WHERE k.ticket = t.id),
+        \\  instr(t.autoreview, ?1) > 0
         \\FROM tickets t LEFT JOIN flags f ON f.ticket = t.id AND f.cleared IS NULL
         \\ORDER BY t.id, f.id
-    , .{});
+    , .{board.reviewing_json});
     defer st.finalize();
     var out: std.ArrayList(Seen) = .empty;
     var flags: std.ArrayList(SeenFlag) = .empty;
@@ -149,8 +151,9 @@ pub fn snapshot(db: board.Db, a: std.mem.Allocator, sessions: Sessions) ![]Seen 
             if (out.items.len > 0) out.items[out.items.len - 1].flags = try flags.toOwnedSlice(a);
             const session = st.text(5);
             const project_hidden = st.int(6) != 0;
-            const working = session.len > 0 and anyEql(sessions.busy, session, false) and
-                (try board.sessionTicket(db, session)) == id;
+            // Its session is busy on it, or an automated review of it runs.
+            const working = st.int(12) != 0 or (session.len > 0 and anyEql(sessions.busy, session, false) and
+                (try board.sessionTicket(db, session)) == id);
             try out.append(a, .{
                 .id = id,
                 .key = try st.dupe(a, 1),
@@ -291,6 +294,9 @@ pub fn run(ctx: Ctx, cfg: config.Config, db: board.Db, json: bool, filter: Filte
         ctx.sleepMs(2000);
         var cur = std.heap.ArenaAllocator.init(ctx.gpa);
         const a = cur.allocator();
+        // A review whose reviewer died stops keeping its ticket out of Needs
+        // You, cl web running or not.
+        _ = autoreview.checkAll(ctx, db, a) catch {};
         // A busy board (a write in progress) just means the next read.
         const now = snapshot(db, a, readSessions(ctx, cfg, a)) catch {
             cur.deinit();
@@ -424,6 +430,13 @@ test "ticket watch: Needs You, as the board decides it" {
     try testing.expectEqualStrings("QA-1 qa left question T\n", try needsLines(a, s4, s5));
     const s6 = try snapshot(db, a, .{});
     try testing.expectEqualStrings("QA-1 qa needs question T\n", try needsLines(a, s5, s6));
+    // So does an automated review of it, until it is done.
+    const id = (try board.getTicket(db, a, k)).id;
+    try board.setAutoreview(db, id, "{\"status\":\"running\",\"started\":1}");
+    const s6r = try snapshot(db, a, .{});
+    try testing.expectEqualStrings("QA-1 qa left question T\n", try needsLines(a, s6, s6r));
+    try board.setAutoreview(db, id, "{\"status\":\"done\",\"started\":1}");
+    try testing.expectEqualStrings("QA-1 qa needs question T\n", try needsLines(a, s6r, try snapshot(db, a, .{})));
 
     // Parked: out. Done: out too (only work that didn't land, or a failed
     // after-merge run, stays).

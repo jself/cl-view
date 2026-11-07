@@ -26,6 +26,25 @@ pub fn init(i: std.process.Init) Ctx {
     };
 }
 
+/// This program's path, for commands cl hands out that run it again (hooks,
+/// detached runners, the board's terminals). A binary rebuilt or installed
+/// over while it runs reads as "<path> (deleted)" in /proc/self/exe; the path
+/// itself is where its new build is, which is what those commands want (the
+/// old file is gone).
+pub fn exePath(self: Ctx, buf: *[std.fs.max_path_bytes]u8) ![]const u8 {
+    return liveExe(buf[0..try std.process.executablePath(self.io, buf)]);
+}
+
+fn liveExe(path: []const u8) []const u8 {
+    const gone = " (deleted)";
+    return if (std.mem.endsWith(u8, path, gone)) path[0 .. path.len - gone.len] else path;
+}
+
+test liveExe {
+    try std.testing.expectEqualStrings("/w/zig-out/bin/cl", liveExe("/w/zig-out/bin/cl (deleted)"));
+    try std.testing.expectEqualStrings("/home/u/.local/bin/cl", liveExe("/home/u/.local/bin/cl"));
+}
+
 /// Expand a leading `~` to $HOME. Caller owns the result.
 pub fn expandHome(self: Ctx, path: []const u8) ![]const u8 {
     if (path.len > 0 and path[0] == '~') {

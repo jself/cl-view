@@ -57,7 +57,7 @@ pub fn start(ctx: Ctx, db: board.Db, a: std.mem.Allocator, project: []const u8, 
 /// it running.
 fn spawnRunner(ctx: Ctx, a: std.mem.Allocator, project: []const u8) !void {
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const exe = exe_buf[0..try std.process.executablePath(ctx.io, &exe_buf)];
+    const exe = try ctx.exePath(&exe_buf);
     const r = try std.process.run(a, ctx.io, .{ .argv = &.{
         "sh", "-c", "exec setsid -f \"$@\" </dev/null >/dev/null 2>&1", "sh", exe, "project", "after-merge", project, "--run",
     } });
