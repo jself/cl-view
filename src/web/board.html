@@ -44,6 +44,18 @@
   .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
   .btn.danger { border-color: #6b2b2b; color: #ffb4b4; }
   .btn:disabled { opacity: .5; cursor: default; }
+  /* A button waiting on its click (busyWhile): a spinner in place of its
+     label, keeping its size. A ticket card keeps its text and spins in its
+     corner; a list row pulses. */
+  @keyframes busy-spin { to { transform: rotate(360deg); } }
+  @keyframes busy-pulse { to { opacity: .45; } }
+  .busy { position: relative; cursor: progress !important; }
+  .busy:not(.card):not(tr) { color: transparent !important; }
+  .busy:not(.card):not(tr) > * { visibility: hidden; }
+  .busy:not(tr)::after { content: ""; position: absolute; top: 50%; left: 50%; width: calc(14 * var(--u)); height: calc(14 * var(--u)); margin: calc(-7 * var(--u)) 0 0 calc(-7 * var(--u));
+                         box-sizing: border-box; border: calc(2 * var(--u)) solid #e6e7e9; border-right-color: transparent; border-radius: 50%; animation: busy-spin .7s linear infinite; }
+  .card.busy::after { top: auto; left: auto; bottom: calc(10 * var(--u)); right: calc(10 * var(--u)); margin: 0; }
+  tr.busy { animation: busy-pulse .6s ease-in-out infinite alternate; }
   .seg { display: inline-flex; border: 1px solid var(--line); border-radius: calc(10 * var(--u)); overflow: hidden; }
   .seg button { min-height: calc(36 * var(--u)); padding: 0 calc(12 * var(--u)); border: 0; background: #18191c; color: #c4c6ca; cursor: pointer; }
   .seg button.on { background: var(--line); color: #fff; }
@@ -439,6 +451,33 @@ async function api(path, body) {
   if (!r.ok) throw new Error(j.error || r.statusText);
   return j;
 }
+// ---- busy buttons ----
+// A click (or form submit) whose handler is still waiting, on the server or
+// on a confirm dialog, spins its button until the handler finishes or fails.
+// One that finishes at once (a tab, a toggle) never spins. The 3-second
+// refresh redraws buttons, so a busy one is known by its id or data-*
+// attributes and the redrawn copy spins too.
+const busySigs = new Map(); // signature -> handlers still running
+const busySig = (el) => el.id ? "#" + el.id : Object.keys(el.dataset).length ? el.tagName + JSON.stringify(Object.entries(el.dataset).sort()) : null;
+const busyEls = (sig) => [...document.querySelectorAll("[data-unpark], button, a, tr.row")].filter((x) => busySig(x) === sig);
+function busyWhile(el, p) {
+  if (!el || !(p instanceof Promise)) return;
+  const sig = busySig(el); let settled = false, shown = false;
+  const fin = () => {
+    settled = true; if (!shown) return;
+    const n = (busySigs.get(sig) || 1) - 1;
+    if (sig && n > 0) { busySigs.set(sig, n); return; }
+    if (sig) busySigs.delete(sig);
+    for (const x of new Set([el, ...(sig ? busyEls(sig) : [])])) x.classList.remove("busy");
+  };
+  p.then(fin, fin);
+  // After the handler's synchronous part and its microtasks, before the next paint.
+  setTimeout(() => { if (settled) return; shown = true; el.classList.add("busy"); if (sig) busySigs.set(sig, (busySigs.get(sig) || 0) + 1); });
+}
+new MutationObserver(() => { for (const sig of busySigs.keys()) for (const x of busyEls(sig)) x.classList.add("busy"); })
+  .observe(document.body, { childList: true, subtree: true });
+// A busy button ignores clicks: they would run its action again.
+document.addEventListener("click", (e) => { if (e.target.closest(".busy")) { e.stopPropagation(); e.preventDefault(); } }, true);
 // What a move between the queue and a worktree did (`dispatch.relocate`).
 function relocatedMsg(result, to) {
   const wt = to === "worktree";
@@ -1608,7 +1647,7 @@ document.addEventListener("click", (e) => { if (Date.now() - dragDone < 400 && e
 const unparkMsg = (k, how) => how === "started" ? `${k} unparked and resumed` : how === "waiting" ? `${k} unparked; it waits in Queued for its session` : how === "running" ? `${k} unparked` : `${k} unparked; its session stays stopped`;
 
 // ---- events ----
-document.addEventListener("click", async (e) => {
+async function onClick(e) {
   const img = e.target.closest("[data-img]");
   if (img) { e.preventDefault(); document.getElementById("imgFull").src = img.dataset.img; document.getElementById("imgDlg").showModal(); return; }
   const up = e.target.closest("[data-unpark]");
@@ -1757,7 +1796,8 @@ document.addEventListener("click", async (e) => {
     if (el.dataset.sure !== "1") { el.dataset.sure = "1"; el.textContent = "Really delete?"; return; }
     await act(key, "rm", {}, "Deleted"); document.getElementById("ticketDlg").close(); return;
   }
-});
+}
+document.addEventListener("click", (e) => busyWhile(e.target.closest("[data-unpark], button, a, tr.row"), onClick(e)));
 document.addEventListener("input", (e) => {
   const ds = e.target.dataset;
   if (ds.other !== undefined) { state.other[ds.other] = e.target.value; }
@@ -2062,8 +2102,7 @@ document.addEventListener("keydown", (e) => {
   document.documentElement.style.setProperty("--zoom", next);
   toast(`Board size ${Math.round(next * 100)}%`);
 });
-document.addEventListener("submit", async (e) => {
-  e.preventDefault();
+async function onSubmit(e) {
   if (e.target.id === "newForm") return submitNew(e.target);
   if (e.target.id === "quickForm") return submitQuick(e.target);
   if (e.target.id === "projForm") return submitProject(e.target);
@@ -2075,7 +2114,8 @@ document.addEventListener("submit", async (e) => {
     toast(r?.result && was && was !== f.mode ? "Saved. " + relocatedMsg(r.result, f.mode) : "Saved");
     if (e.submitter?.value === "close") document.getElementById("ticketDlg").close();
   }
-});
+}
+document.addEventListener("submit", (e) => { e.preventDefault(); busyWhile(e.submitter || e.target.querySelector("[type=submit]"), onSubmit(e)); });
 document.getElementById("ticketDlg").addEventListener("close", () => { state.open = null; state.detail = null; });
 
 // ---- where you were ----
