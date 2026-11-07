@@ -1784,18 +1784,41 @@ document.addEventListener("keydown", (e) => {
 // and types it into the operator as "[voice] ...". The operator answers with
 // `cl say`, which this polls for and speaks: voice.tts's WAV, or the
 // browser's own voice without it.
-const voice = { want: false, rec: null, poll: 0, last: "", audio: null };
+const voice = { want: false, rec: null, poll: 0, last: "", audio: null, hide: 0, linger: 0, hold: false };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // A silent WAV: playing it during the click unlocks audio on phones,
 // so the answer can play when it arrives seconds later.
 const SILENT_WAV = "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQQAAAAAAAAA";
 function voiceBar(heard, text, done) {
   const bar = document.getElementById("voiceBar");
+  voiceLinger(0);
   if (heard === null) { bar.hidden = true; return; }
   document.getElementById("voiceHeard").textContent = heard;
   document.getElementById("voiceText").textContent = text;
   document.getElementById("voiceReplay").hidden = !done;
   bar.hidden = false;
+}
+// Close the box `ms` after now (0: don't). While the mouse is over it or a
+// key put focus in it, wait, and count from when it leaves.
+const VOICE_LINGER = 5000;
+function voiceLinger(ms) {
+  clearTimeout(voice.hide);
+  voice.linger = ms;
+  if (ms && !voice.hold) voice.hide = setTimeout(() => voiceBar(null), ms);
+}
+function voiceHold(on) {
+  voice.hold = on;
+  if (on) clearTimeout(voice.hide);
+  else if (voice.linger) voiceLinger(voice.linger);
+}
+{
+  const bar = document.getElementById("voiceBar");
+  // Mouse only: a tap on a phone would "enter" and never leave.
+  bar.addEventListener("pointerenter", (e) => { if (e.pointerType === "mouse") voiceHold(true); });
+  bar.addEventListener("pointerleave", (e) => { if (e.pointerType === "mouse") voiceHold(bar.matches(":has(:focus-visible)")); });
+  // Keyboard focus only: clicking ↻ focuses it too, and that shouldn't hold.
+  bar.addEventListener("focusin", (e) => { if (e.target.matches(":focus-visible")) voiceHold(true); });
+  bar.addEventListener("focusout", (e) => { if (!bar.contains(e.relatedTarget)) voiceHold(bar.matches(":hover")); });
 }
 function micState(cls) { const b = document.getElementById("micBtn"); b.className = "btn" + (cls ? " " + cls : ""); }
 function voiceQuiet() {
@@ -1840,7 +1863,7 @@ async function micStop(cancel) {
   if (cancel || Date.now() - r.at < 500) { voiceBar(null); return; }
   // Whisper makes words up out of silence ("you", "Thank you."): don't send
   // a recording that never got louder than background noise.
-  if (loudest(r.chunks) < 0.015) { voiceBar("", "Didn't hear anything. Hold V or click the mic, then speak.", false); return; }
+  if (loudest(r.chunks) < 0.015) { voiceBar("", "Didn't hear anything. Hold V or click the mic, then speak.", false); voiceLinger(VOICE_LINGER); return; }
   micState("wait");
   voiceBar("", "Working out what you said…");
   try {
@@ -1851,6 +1874,7 @@ async function micStop(cancel) {
     voiceBar(heard, j.started ? "Starting the operator…" : "Waiting for the operator…");
     await voiceWait(j.since, heard);
   } catch (e) {
+    // A failed request (transcribing, reaching cl web) stays until closed.
     voiceBar("", e.message, true); voice.last = "";
   } finally { micState(""); }
 }
@@ -1948,6 +1972,7 @@ async function voiceSay(heard, text) {
         if (id !== voice.poll) { URL.revokeObjectURL(url); continue; }
         await playClip(url);
       }
+      if (id === voice.poll) voiceLinger(VOICE_LINGER);
       return;
     } catch (e) {
       if (id !== voice.poll) return;
@@ -1958,13 +1983,17 @@ async function voiceSay(heard, text) {
     const u = new SpeechSynthesisUtterance(text);
     u.rate = v?.speed || 1;
     u.pitch = v?.pitch || 1;
+    // Stopped by voiceQuiet (cancel) also ends it: the poll id tells them apart.
+    u.onend = u.onerror = () => { if (id === voice.poll) voiceLinger(VOICE_LINGER); };
+    voice.utter = u; // Chrome drops onend for an utterance nothing refers to
     speechSynthesis.cancel(); speechSynthesis.speak(u);
-  }
+  } else voiceLinger(VOICE_LINGER);
 }
 document.getElementById("micBtn").addEventListener("click", () => (voice.want || voice.rec ? micStop(false) : micStart()));
 document.getElementById("voiceClose").addEventListener("click", () => { voiceQuiet(); if (voice.want || voice.rec) micStop(true); voiceBar(null); });
 document.getElementById("voiceReplay").addEventListener("click", () => {
-  if (voice.last) voiceSay(document.getElementById("voiceHeard").textContent, voice.last);
+  // Stop the one playing first, so its end doesn't start the close timer.
+  if (voice.last) { voiceQuiet(); voiceSay(document.getElementById("voiceHeard").textContent, voice.last); }
 });
 // Hold V to talk (push-to-talk), outside text boxes and dialogs; Esc cancels.
 function voiceKeyOk(e) {
