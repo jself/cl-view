@@ -15,6 +15,7 @@ const web_board = @import("web_board.zig");
 const board = @import("board.zig");
 const worktree = @import("worktree.zig");
 const web_service = @import("web_service.zig");
+const push = @import("push.zig");
 
 const index_html = @embedFile("web/index.html");
 const login_html = @embedFile("web/login.html");
@@ -99,6 +100,8 @@ fn serve(ctx: Ctx, cfg: config.Config) !void {
     }
     if (threads.items.len == 0) fail("web.listen is empty", .{});
     (try std.Thread.spawn(.{}, reapLoop, .{&state})).detach();
+    // Push notifications: whichever server holds the lock sends them.
+    (try std.Thread.spawn(.{}, push.loop, .{ ctx, cfg, &logLine })).detach();
     if (cfg.board.dispatch) {
         (try std.Thread.spawn(.{}, dispatch.loop, .{ ctx, cfg, &logLine })).detach();
         (try std.Thread.spawn(.{}, sweepLoop, .{ ctx, cfg })).detach();
@@ -525,6 +528,17 @@ fn handleRequest(state: *State, req: *std.http.Server.Request) !bool {
         }
     }
 
+    // The service worker that shows push notifications (push.zig). It is
+    // fetched by the browser, signed in or not, and checked for a new
+    // version each time the board registers it.
+    if (std.mem.eql(u8, path, "/sw.js")) {
+        try req.respond(@embedFile("web/sw.js"), .{ .extra_headers = &.{
+            .{ .name = "content-type", .value = "text/javascript" },
+            .{ .name = "cache-control", .value = "no-cache" },
+        } });
+        return false;
+    }
+
     if (std.mem.eql(u8, path, "/login") and req.head.method == .POST) {
         try handleLogin(state, req);
         return false;
@@ -622,6 +636,10 @@ fn handleLogin(state: *State, req: *std.http.Server.Request) !void {
         try req.respond(loginPage("<p class=err>Too many attempts. Wait a minute.</p>"), .{ .status = .too_many_requests, .extra_headers = &html_headers });
         return;
     }
+    // Where the sign-in was asked for (loginLocation), if it is the board.
+    // Read before the body: reading it reuses the buffer the target is in.
+    var next_buf: [1024]u8 = undefined;
+    const next = safeNext(queryValue(req.head.target, "next", &next_buf) orelse "") orelse "/";
     var body_buf: [4096]u8 = undefined;
     const len: usize = @intCast(@min(req.head.content_length orelse 0, body_buf.len));
     const body_reader = try req.readerExpectContinue(&.{});
@@ -644,9 +662,63 @@ fn handleLogin(state: *State, req: *std.http.Server.Request) !void {
     var cookie_buf: [256]u8 = undefined;
     const cookie = try std.fmt.bufPrint(&cookie_buf, cookie_name ++ "={s}; Path=/; Max-Age={d}; HttpOnly; SameSite=Strict", .{ token, session_days * 86400 });
     try req.respond("", .{ .status = .see_other, .extra_headers = &.{
-        .{ .name = "location", .value = "/" },
+        .{ .name = "location", .value = next },
         .{ .name = "set-cookie", .value = cookie },
     } });
+}
+
+/// `/?next=<target>`: the sign-in page, which comes back to `target` (the
+/// board, with a notification's `?open=`) once signed in. Caller frees.
+pub fn loginLocation(alloc: std.mem.Allocator, target: []const u8) ![]u8 {
+    if (std.mem.eql(u8, target, "/board") or safeNext(target) == null) return alloc.dupe(u8, "/");
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    try out.appendSlice(alloc, "/?next=");
+    for (target) |c| {
+        if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == '~' or c == '/') try out.append(alloc, c) else try out.print(alloc, "%{X:0>2}", .{c});
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+/// `next` when it is somewhere on the board to go back to after signing in
+/// (never another site: `//host` or a scheme), else null.
+fn safeNext(next: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, next, "/board")) return null;
+    const rest = next["/board".len..];
+    if (rest.len > 0 and rest[0] != '?') return null;
+    for (next) |c| if (c < 0x21 or c == '\\' or c >= 0x7f) return null;
+    return next;
+}
+
+/// One query parameter of `target`, percent-decoded into `buf`.
+fn queryValue(target: []const u8, name: []const u8, buf: []u8) ?[]const u8 {
+    const q = target[(std.mem.indexOfScalar(u8, target, '?') orelse return null) + 1 ..];
+    var it = std.mem.splitScalar(u8, q, '&');
+    while (it.next()) |pair| {
+        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse continue;
+        if (!std.mem.eql(u8, pair[0..eq], name)) continue;
+        const v = pair[eq + 1 ..];
+        if (v.len > buf.len) return null;
+        @memcpy(buf[0..v.len], v);
+        return std.Uri.percentDecodeInPlace(buf[0..v.len]);
+    }
+    return null;
+}
+
+test "sign-in comes back to the board's link" {
+    const a = std.testing.allocator;
+    const loc = try loginLocation(a, "/board?open=CL-3&tab=plan");
+    defer a.free(loc);
+    try std.testing.expectEqualStrings("/?next=/board%3Fopen%3DCL-3%26tab%3Dplan", loc);
+    var buf: [256]u8 = undefined;
+    // The form posts to /login with the page's query (login.html).
+    const next = queryValue("/login?next=/board%3Fopen%3DCL-3%26tab%3Dplan", "next", &buf).?;
+    try std.testing.expectEqualStrings("/board?open=CL-3&tab=plan", safeNext(next).?);
+    for ([_][]const u8{ "//evil.example/board", "https://evil.example", "/boardx", "/board/../x", "/board?x=\\evil" }) |bad|
+        try std.testing.expect(safeNext(bad) == null);
+    const plain = try loginLocation(a, "/board");
+    defer a.free(plain);
+    try std.testing.expectEqualStrings("/", plain);
 }
 
 /// More than five failures within a minute locks logins until they age out.

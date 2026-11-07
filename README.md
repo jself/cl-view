@@ -386,6 +386,36 @@ microphone for voice (below).
   shortcut that opens in a browser tab; an iPhone's Add to Home Screen
   still opens full-screen.
 
+#### Notifications
+
+The phone (or any browser on the HTTPS address) can get a notification when
+something lands in Needs You: a question or permission prompt, a plan or
+work ready for you, work that didn't land, a parked ticket waking, Claude
+idle, or a `cl alert`. Tapping it opens the board on that ticket, at the tab
+that answers it. On the board, Projects → **Notifications** → **Turn on for
+this device**, and allow them. On an iPhone this works only in the app added
+to the home screen (iOS 16.4 or later), not in Safari.
+
+- The same dialog lists every device that's on, each with an on/off switch,
+  **Test** (sends one now, or shows why it couldn't) and **Remove** (it
+  stays removed until you press Turn on on that device again); picks
+  which kinds notify; and sets quiet hours (in each device's own time).
+  What comes up in quiet hours waits in Needs You without a notification.
+- Each thing notifies once, when it is new: a flag that leaves Needs You
+  while Claude works on it and comes back doesn't notify again. What lands
+  while `cl web` restarts (after a merge, say) still notifies once it is
+  back. Tapping a notification while signed out comes back to its ticket
+  after you sign in. A newer
+  notification for the same ticket replaces the older one, and opening the
+  board clears those about what no longer needs you.
+- It is standard Web Push: `cl web` sends to the browser's push service
+  (Google's for Chrome on Android, Apple's for an iPhone, Mozilla's for
+  Firefox), so this machine needs to reach those over HTTPS. Only one
+  server sends (the one holding `<board.dir>/push.lock`), so a test server
+  next to the main one doesn't notify twice. Devices and the key cl signs
+  with are kept in the board database; a device whose browser dropped its
+  subscription is removed the first time a send says so.
+
 ## Window
 
 `cl window` opens the web UI (board, session terminals, chat) in its own

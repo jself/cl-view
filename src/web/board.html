@@ -255,6 +255,13 @@
   .list td { padding: calc(9 * var(--u)) calc(12 * var(--u)); border-top: 1px solid var(--line2); vertical-align: top; }
   .list tr.row { cursor: pointer; }
   .list tr.row:hover td { background: #17181b; }
+  .pushdev { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: calc(4 * var(--u)) calc(10 * var(--u)); align-items: center; padding: calc(10 * var(--u)) 0; border-top: 1px solid var(--line); }
+  .pushdev .acts { display: flex; gap: calc(6 * var(--u)); align-items: center; }
+  .pushdev .err { grid-column: 1 / -1; color: #f87171; font-size: calc(12 * var(--u)); overflow-wrap: anywhere; }
+  #pushBody h2 { font-size: calc(14 * var(--u)); margin: calc(18 * var(--u)) 0 calc(6 * var(--u)); }
+  #pushBody .kinds { display: grid; gap: calc(2 * var(--u)); }
+  #pushBody .kinds .switch { white-space: normal; min-width: 0; }
+  #pushBody .quiet { display: flex; flex-wrap: wrap; gap: calc(8 * var(--u)); align-items: center; }
   .projects-head { display: flex; flex-wrap: wrap; align-items: center; gap: calc(10 * var(--u)); margin: calc(14 * var(--u)) 0 calc(12 * var(--u)); }
   .list tr.dim td:not(.acts) { opacity: .5; }
   .list td.acts { white-space: nowrap; }
@@ -512,6 +519,7 @@
 <dialog id="projRmDlg" aria-label="Delete the project" style="width:min(calc(520 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="projRmBody"></div></dialog>
 <dialog id="dismissDlg" aria-label="Dismiss alerts" style="width:min(calc(480 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="dismissBody"></div></dialog>
 <dialog id="pauseDlg" aria-label="Pause" style="width:min(calc(520 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="pauseBody"></div></dialog>
+<dialog id="pushDlg" aria-label="Notifications" style="width:min(calc(560 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="pushBody"></div></dialog>
 <dialog id="killDlg" aria-label="Kill the session" style="width:min(calc(480 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="killBody"></div></dialog>
 <div id="toast" role="status" popover="manual"></div>
 <div id="voiceBar" hidden role="status"><div class="txt"><div class="heard" id="voiceHeard"></div><div id="voiceText"></div></div><button type="button" id="voiceReplay" title="Say it again" aria-label="Say it again" hidden>&#8635;</button><button type="button" id="voiceClose" title="Stop and close" aria-label="Stop and close">&times;</button></div>
@@ -752,6 +760,7 @@ async function refresh() {
   document.getElementById("micBtn").hidden = !state.data.voice?.on;
   if (!drag) render();
   if (state.open) loadDetail(state.open, true);
+  if (!document.hidden) pushTidy();
 }
 // cl was rebuilt and restarted (an after-merge command, say): the page is
 // from the old build. Reload, which keeps your place (see "where you were"),
@@ -996,6 +1005,7 @@ function projectsHtml() {
   const ps = state.data.projects;
   const allPaused = ps.length && ps.every((p) => p.paused);
   const head = `<div class="projects-head"><button type="button" class="btn primary" id="addProjBtn">Add project</button>
+    <button type="button" class="btn" id="pushBtn" title="Push notifications on your phone (or this browser) when something needs you">Notifications</button>
     ${ps.length ? (allPaused ? `<button type="button" class="btn" data-resume-all="1" title="Start dispatching in every project again">Resume all</button>`
       : `<button type="button" class="btn" data-pause-all="1" title="Start nothing new in any project">Pause all</button>`) : ""}
     <span class="muted" style="font-size:calc(12.5 * var(--u))">A hidden project's tickets stay out of the other views and Needs you; its queued tickets still run. A paused project's queued tickets wait until you resume it.</span></div>`;
@@ -2021,6 +2031,7 @@ async function onClick(e) {
   const ds = el.dataset;
   if (ds.view) { state.view = ds.view; store("cl-view", ds.view); render(); return; }
   if (el.id === "addProjBtn") return openProject(null);
+  if (el.id === "pushBtn") return openPush();
   if (el.id === "closeProj") return document.getElementById("projDlg").close();
   if (el.id === "closeProjRm") return document.getElementById("projRmDlg").close();
   if (ds.projHide) { e.stopPropagation(); return projectAction(ds.projHide, "hide", `${ds.projHide} hidden: its tickets are out of the views and Needs you`); }
@@ -2480,6 +2491,140 @@ document.getElementById("ticketDlg").addEventListener("keydown", (e) => {
   items[(i + (e.key === "ArrowDown" ? 1 : items.length - 1)) % items.length].focus();
 });
 
+// ---- push notifications (src/push.zig, /sw.js) ----
+// Each device turns them on for itself (a push subscription, kept by cl web);
+// what notifies and the quiet hours are the same for every device.
+const PUSH_KINDS = [["ask", "Questions and permission prompts"], ["review", "Plans, reviews and tests ready for you"],
+  ["problem", "Work that didn't land, conflicts, failed after-merge runs"], ["park", "Parked tickets waking up (or giving up)"],
+  ["idle", "Claude idle, waiting on you"], ["alert", "Alerts (cl alert, the operator)"]];
+const push = { reg: null, id: null, info: null };
+const pushable = () => isSecureContext && "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+const standalone = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+function deviceName() {
+  const ua = navigator.userAgent;
+  const os = /iPhone/.test(ua) ? "iPhone" : /iPad/.test(ua) ? "iPad" : /Android/.test(ua) ? "Android" : /Mac OS X/.test(ua) ? "Mac"
+    : /Windows/.test(ua) ? "Windows" : /Linux/.test(ua) ? "Linux" : "Device";
+  const br = /Edg\//.test(ua) ? "Edge" : /Firefox\//.test(ua) ? "Firefox" : /Chrome\//.test(ua) ? "Chrome" : /Safari\//.test(ua) ? "Safari" : "Browser";
+  return `${os} · ${br}${standalone() ? " app" : ""}`;
+}
+function b64bytes(s) {
+  const b = atob(s.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((s.length + 3) % 4));
+  return Uint8Array.from(b, (c) => c.charCodeAt(0));
+}
+// Tell cl web about this device's subscription (again on each load: keys and
+// time zone stay current). `explicit`: Turn on was pressed, which alone brings
+// back a device removed from the list; checking in from one unsubscribes it here.
+async function pushSend(sub, explicit) {
+  const j = sub.toJSON();
+  const r = await fetch("/api/push/subscribe", { method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ endpoint: j.endpoint, keys: j.keys, name: deviceName(), tz_offset: -new Date().getTimezoneOffset(), explicit: !!explicit }) });
+  if (r.status === 410) { push.id = null; await sub.unsubscribe().catch(() => {}); return; }
+  const b = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(b.error || r.statusText);
+  push.id = b.id;
+}
+async function pushInit() {
+  if (!pushable()) return;
+  navigator.serviceWorker.addEventListener("message", (e) => { if (e.data?.type === "open" && e.data.key) openTicket(e.data.key, e.data.tab || null); });
+  try {
+    push.reg = await navigator.serviceWorker.register("/sw.js");
+    const sub = await push.reg.pushManager.getSubscription();
+    if (sub && Notification.permission === "granted") await pushSend(sub);
+  } catch (e) { console.warn("push:", e); }
+}
+// Notifications about what has left Needs You since (answered here, or elsewhere) go.
+async function pushTidy() {
+  if (!push.reg || !state.data) return;
+  const needs = new Set(state.data.tickets.filter(needsMe).map((r) => r.ticket.key));
+  const al = new Set((state.data.alerts || []).map((a) => `a${a.tmux}@${a.at}`));
+  try {
+    for (const n of await push.reg.getNotifications()) {
+      const m = n.data || {}; if (!m.item || m.kind === "test") continue;
+      if (m.kind === "alert" ? !al.has(m.item) : !needs.has(m.key)) n.close();
+    }
+  } catch {}
+}
+async function pushOn() {
+  if (await Notification.requestPermission() !== "granted") { toast("Notifications weren't allowed", true); return renderPush(); }
+  const reg = push.reg || (push.reg = await navigator.serviceWorker.register("/sw.js"));
+  await navigator.serviceWorker.ready;
+  const key = b64bytes(push.info.key);
+  let sub = await reg.pushManager.getSubscription();
+  // Subscribed with another key (cl's was made again): start over.
+  const had = sub?.options?.applicationServerKey;
+  if (sub && !(had && new Uint8Array(had).every((x, i) => x === key[i]))) { await sub.unsubscribe(); sub = null; }
+  sub = sub || await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+  await pushSend(sub, true);
+  toast("Notifications are on for this device");
+  await openPush();
+}
+async function openPush() {
+  const dlg = document.getElementById("pushDlg");
+  if (!dlg.open) { document.getElementById("pushBody").innerHTML = `<p class="muted">Loading…</p>`; dlg.showModal(); }
+  try { push.info = await api("push"); } catch (e) { toast(e.message, true); return; }
+  renderPush();
+}
+const hhmm = (m) => m == null ? "" : `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
+const minutes = (v) => { const [h, m] = (v || "").split(":").map(Number); return Number.isFinite(h) && Number.isFinite(m) ? h * 60 + m : null; };
+function renderPush() {
+  const i = push.info; if (!i) return;
+  const ios = /iPhone|iPad/.test(navigator.userAgent);
+  const mine = i.devices.find((d) => d.id === push.id);
+  const here = !isSecureContext ? `This page isn't on HTTPS, which notifications need: put <span class="mono">tailscale serve</span> in front of cl web and open the board at its <span class="mono">https://…ts.net</span> address (README, On a phone).`
+    : ios && !standalone() ? `On an iPhone only the installed app gets notifications: Share → Add to Home Screen, open cl from the home screen, and turn them on here.`
+    : !pushable() ? `This browser can't get push notifications.`
+    : Notification.permission === "denied" ? `Notifications are blocked for this site. Allow them in the browser's site settings (on Android: long-press the app icon → App info → Notifications), then come back here.`
+    : mine ? `This device is on the list as <strong>${esc(mine.name)}</strong>.`
+    : `<button type="button" class="btn primary" id="pushOnBtn">Turn on for this device</button>`;
+  const quietOn = i.quiet_from != null && i.quiet_to != null;
+  document.getElementById("pushBody").innerHTML = `
+    <div class="head"><h1 style="flex:1">Notifications</h1><button type="button" class="btn" id="closePush">Close</button></div>
+    <p class="muted" style="margin:0">When something lands in Needs you, each device that's on gets a notification; tapping it opens the ticket.</p>
+    <h2>This device</h2><p style="margin:0">${here}</p>
+    <h2>Devices</h2>
+    ${i.devices.length ? i.devices.map((d) => `<div class="pushdev"><div><strong>${esc(d.name || "Device")}</strong>${d.id === push.id ? ` <span class="pill">this one</span>` : ""}
+        <div class="muted" style="font-size:calc(12 * var(--u))">added ${ago(d.created)} ago${d.sent ? ` · last sent ${ago(d.sent)} ago` : ""}</div></div>
+      <div class="acts"><label class="switch" title="On or off for this device"><input type="checkbox" role="switch" data-push-dev="${d.id}"${d.enabled ? " checked" : ""}><span class="track"></span></label>
+        <button type="button" class="btn" data-push-test="${d.id}">Test</button><button type="button" class="btn danger" data-push-rm="${d.id}">Remove</button></div>
+      ${d.error ? `<div class="err">${esc(d.error)}</div>` : ""}</div>`).join("") : `<p class="muted" style="margin:0">None yet.</p>`}
+    <h2>What notifies</h2>
+    <div class="kinds">${PUSH_KINDS.map(([k, label]) => `<label class="switch"><input type="checkbox" role="switch" data-push-kind="${k}"${i.kinds.includes(k) ? " checked" : ""}><span class="track"></span>${label}</label>`).join("")}</div>
+    <h2>Quiet hours</h2>
+    <div class="quiet"><label class="switch"><input type="checkbox" role="switch" id="quietSw"${quietOn ? " checked" : ""}><span class="track"></span>None from</label>
+      <input type="time" id="quietFrom" value="${hhmm(quietOn ? i.quiet_from : 22 * 60)}" aria-label="Quiet from"> to <input type="time" id="quietTo" value="${hhmm(quietOn ? i.quiet_to : 7 * 60)}" aria-label="Quiet until"></div>
+    <p class="muted" style="margin:0;font-size:calc(12 * var(--u))">In each device's own time. What comes up meanwhile waits in Needs you without a notification.</p>`;
+}
+// Saved as they change, one after another so the last change wins.
+function pushSettings() {
+  const q = document.getElementById("quietSw").checked;
+  const kinds = [...document.querySelectorAll("[data-push-kind]")].filter((x) => x.checked).map((x) => x.dataset.pushKind);
+  const body = { kinds, quiet_from: q ? minutes(document.getElementById("quietFrom").value) : null, quiet_to: q ? minutes(document.getElementById("quietTo").value) : null };
+  push.saving = (push.saving || Promise.resolve()).then(() => api("push/settings", body)).catch((e) => toast(e.message, true));
+}
+document.getElementById("pushDlg").addEventListener("change", async (e) => {
+  const t = e.target;
+  if (t.dataset.pushDev) {
+    try { await api("push/device", { id: Number(t.dataset.pushDev), enabled: t.checked }); toast(t.checked ? "On for that device" : "Off for that device"); } catch (err) { toast(err.message, true); }
+    return openPush();
+  }
+  if (t.dataset.pushKind || ["quietSw", "quietFrom", "quietTo"].includes(t.id)) pushSettings();
+});
+document.getElementById("pushDlg").addEventListener("click", (e) => {
+  const el = e.target.closest("button"); if (!el) return;
+  const ds = el.dataset;
+  if (el.id === "closePush") return document.getElementById("pushDlg").close();
+  if (el.id === "pushOnBtn") return busyWhile(el, pushOn().catch((err) => toast("Couldn't turn them on: " + err.message, true)));
+  if (ds.pushTest) return busyWhile(el, api("push/test", { id: Number(ds.pushTest) }).then(() => toast("Sent: it should show on that device in a moment"), (err) => toast(err.message, true)).then(openPush));
+  if (ds.pushRm) return busyWhile(el, (async () => {
+    const id = Number(ds.pushRm);
+    try {
+      if (id === push.id) { await (await push.reg?.pushManager.getSubscription())?.unsubscribe(); push.id = null; }
+      await api("push/remove", { id }); toast("Removed");
+    } catch (err) { toast(err.message, true); }
+    await openPush();
+  })());
+});
+
 // ---- where you were ----
 // Leaving the board (Shell, Chat, Terminal, a reload) saves this tab's place:
 // filters, search, the open ticket and its tab, what's half typed in it, and
@@ -2521,7 +2666,13 @@ async function restorePlace() {
   if (place.tailPinned !== false) { tail.term?.scrollToBottom(); setPinned(true); }
 }
 
-restorePlace();
+// A tapped notification opens the board on its ticket (/board?open=CL-3&tab=plan).
+const deepLink = new URLSearchParams(location.search);
+if (deepLink.get("open")) {
+  history.replaceState(null, "", "/board");
+  refresh().then(() => openTicket(deepLink.get("open"), deepLink.get("tab") || null));
+} else restorePlace();
+pushInit();
 // In a background tab, every 30 s: enough to keep the title's count current.
 let ticks = 0;
 setInterval(() => { if (!document.hidden || ++ticks % 10 === 0) refresh(); }, 3000);

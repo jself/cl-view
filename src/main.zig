@@ -422,4 +422,5 @@ test {
     std.testing.refAllDecls(@import("board_view.zig"));
     std.testing.refAllDecls(@import("images.zig"));
     std.testing.refAllDecls(alerts);
+    std.testing.refAllDecls(@import("push.zig"));
 }

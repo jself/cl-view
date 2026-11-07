@@ -19,6 +19,8 @@
 //!   POST /api/alert/<tmux>/dismiss      clear a session's alert (cl alert)
 //!   POST /api/project                   add a project
 //!   POST /api/project/<name>/<action>   set rm hide unhide after-merge
+//!   GET  /api/push                      push notifications: the key, devices, settings
+//!   POST /api/push/<action>             subscribe settings device remove test
 const std = @import("std");
 const Ctx = @import("ctx.zig");
 const config = @import("config.zig");
@@ -38,6 +40,7 @@ const images = @import("images.zig");
 const alerts = @import("alerts.zig");
 const voice = @import("voice.zig");
 const ticket_watch = @import("ticket_watch.zig");
+const push = @import("push.zig");
 
 const board_html = @embedFile("web/board.html");
 
@@ -67,7 +70,10 @@ pub fn handle(ctx: Ctx, cfg: config.Config, req: *std.http.Server.Request, path:
         if (is_api) {
             try req.respond("{\"error\":\"log in first\"}", .{ .status = .unauthorized, .extra_headers = &json_headers });
         } else {
-            try req.respond("", .{ .status = .see_other, .extra_headers = &.{.{ .name = "location", .value = "/" }} });
+            // Back here after signing in: a notification's link keeps its ticket.
+            const location = try web.loginLocation(ctx.gpa, req.head.target);
+            defer ctx.gpa.free(location);
+            try req.respond("", .{ .status = .see_other, .extra_headers = &.{.{ .name = "location", .value = location }} });
         }
         return true;
     }
@@ -116,6 +122,20 @@ pub fn handle(ctx: Ctx, cfg: config.Config, req: *std.http.Server.Request, path:
     }
     if (post and std.mem.eql(u8, what, "voice") and std.mem.eql(u8, name, "text")) {
         voiceText(ctx, cfg, a, req) catch |err| try fail(req, voiceStatus(err), try voiceDetail(a, err, "voice.stt"));
+        return true;
+    }
+
+    // Push notifications: bodies of their own.
+    if (std.mem.eql(u8, what, "push")) {
+        pushApi(ctx, cfg, db, a, req, post, name) catch |err| switch (err) {
+            error.NotFound => try fail(req, .not_found, "no such device"),
+            error.BadInput => try fail(req, .bad_request, "that isn't a push subscription or setting cl can use"),
+            // The board unsubscribes the browser when it hears this.
+            error.Removed => try fail(req, .gone, "this device was removed from notifications; turn them on again here to bring it back"),
+            error.Refused, error.Gone => try fail(req, .bad_gateway, push.lastError()),
+            error.Sqlite => try fail(req, .internal_server_error, db.message()),
+            else => try fail(req, .internal_server_error, @errorName(err)),
+        };
         return true;
     }
 
@@ -752,6 +772,126 @@ test "needsIds: the flags that put a ticket in Needs You, then alerts" {
     try std.testing.expectEqualStrings("f7", ids[0]);
     try std.testing.expectEqualStrings("f10", ids[1]);
     try std.testing.expectEqualStrings("acl_x@42", ids[2]);
+}
+
+// ---- push notifications (push.zig) ----
+
+const PushBody = struct {
+    /// subscribe: the browser's PushSubscription (its toJSON()).
+    endpoint: ?[]const u8 = null,
+    keys: ?struct { p256dh: []const u8 = "", auth: []const u8 = "" } = null,
+    name: ?[]const u8 = null,
+    /// subscribe: the device's time zone, in minutes east of UTC.
+    tz_offset: ?i64 = null,
+    /// subscribe: the human pressed Turn on (see push.Subscription).
+    explicit: ?bool = null,
+    /// subscribe: the browser renewed the subscription that had this endpoint.
+    old_endpoint: ?[]const u8 = null,
+    /// device, remove, test: which one.
+    id: ?i64 = null,
+    /// device: on or off.
+    enabled: ?bool = null,
+    /// settings: the kinds that notify, and quiet hours (minutes after
+    /// midnight; null or equal for none).
+    kinds: ?[]const []const u8 = null,
+    quiet_from: ?i64 = null,
+    quiet_to: ?i64 = null,
+};
+
+/// A subscription from the board or the service worker.
+fn pushSubscription(b: PushBody) !push.Subscription {
+    const keys = b.keys orelse return error.BadInput;
+    return .{
+        .endpoint = b.endpoint orelse return error.BadInput,
+        .p256dh = keys.p256dh,
+        .auth = keys.auth,
+        .name = b.name orelse "",
+        .tz_offset = b.tz_offset orelse 0,
+        .explicit = b.explicit orelse false,
+        .old_endpoint = b.old_endpoint orelse "",
+    };
+}
+
+/// The settings the board sent: known kinds only; quiet hours both set (as
+/// minutes after midnight) or none.
+fn pushSettings(a: std.mem.Allocator, b: PushBody) !push.Settings {
+    var kinds: std.ArrayList(push.Group) = .empty;
+    for (b.kinds orelse &.{}) |k| try kinds.append(a, std.meta.stringToEnum(push.Group, k) orelse return error.BadInput);
+    const minute = struct {
+        fn f(v: ?i64) ?u16 {
+            const m = v orelse return null;
+            return if (m >= 0 and m < 24 * 60) @intCast(m) else null;
+        }
+    }.f;
+    const from = minute(b.quiet_from);
+    const to = minute(b.quiet_to);
+    return .{ .kinds = kinds.items, .quiet_from = if (to != null) from else null, .quiet_to = if (from != null) to else null };
+}
+
+test "push API bodies: subscriptions and settings" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const parse = struct {
+        fn f(al: std.mem.Allocator, text: []const u8) !PushBody {
+            return std.json.parseFromSliceLeaky(PushBody, al, text, .{ .ignore_unknown_fields = true, .allocate = .alloc_always });
+        }
+    }.f;
+    try std.testing.expectError(error.BadInput, pushSubscription(try parse(a, "{\"endpoint\":\"https://x\"}")));
+    try std.testing.expectError(error.BadInput, pushSubscription(try parse(a, "{\"keys\":{\"p256dh\":\"k\",\"auth\":\"a\"}}")));
+    const sub = try pushSubscription(try parse(a, "{\"endpoint\":\"https://x\",\"keys\":{\"p256dh\":\"k\",\"auth\":\"a\"},\"explicit\":true,\"old_endpoint\":\"https://o\"}"));
+    try std.testing.expect(sub.explicit);
+    try std.testing.expectEqualStrings("https://o", sub.old_endpoint);
+    try std.testing.expect(!(try pushSubscription(try parse(a, "{\"endpoint\":\"https://x\",\"keys\":{}}"))).explicit);
+
+    try std.testing.expectError(error.BadInput, pushSettings(a, try parse(a, "{\"kinds\":[\"ask\",\"bogus\"]}")));
+    const s = try pushSettings(a, try parse(a, "{\"kinds\":[\"ask\",\"alert\"],\"quiet_from\":1320,\"quiet_to\":420}"));
+    try std.testing.expectEqualSlices(push.Group, &.{ .ask, .alert }, s.kinds);
+    try std.testing.expectEqual(@as(?u16, 420), s.quiet_to);
+    // Half set, or out of range: no quiet hours.
+    const half = try pushSettings(a, try parse(a, "{\"kinds\":[],\"quiet_from\":1320,\"quiet_to\":null}"));
+    try std.testing.expect(half.quiet_from == null and half.quiet_to == null);
+    const bad = try pushSettings(a, try parse(a, "{\"quiet_from\":1320,\"quiet_to\":1440}"));
+    try std.testing.expect(bad.quiet_from == null and bad.quiet_to == null);
+}
+
+fn pushApi(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: *std.http.Server.Request, post: bool, action: []const u8) !void {
+    if (!post) {
+        if (action.len > 0) return error.NotFound;
+        const s = try push.settings(db, a);
+        var kinds: std.ArrayList([]const u8) = .empty;
+        for (s.kinds) |g| try kinds.append(a, @tagName(g));
+        const ds = try push.devices(db, a);
+        const Shown = struct { id: i64, name: []const u8, enabled: bool, created: i64, seen: i64, sent: i64, @"error": []const u8, endpoint: []const u8 };
+        var shown: std.ArrayList(Shown) = .empty;
+        for (ds) |d| try shown.append(a, .{ .id = d.id, .name = d.name, .enabled = d.enabled, .created = d.created, .seen = d.seen, .sent = d.sent, .@"error" = d.@"error", .endpoint = d.endpoint });
+        return ok(req, a, .{
+            .key = try push.publicKey(ctx, db, a),
+            .devices = shown.items,
+            .kinds = kinds.items,
+            .quiet_from = s.quiet_from,
+            .quiet_to = s.quiet_to,
+        });
+    }
+    const len: usize = @intCast(@min(req.head.content_length orelse 0, 64 * 1024));
+    const buf = try a.alloc(u8, len);
+    if (len > 0) try (try req.readerExpectContinue(&.{})).readSliceAll(buf);
+    const b = std.json.parseFromSliceLeaky(PushBody, a, if (len > 0) buf else "{}", .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch return error.BadInput;
+    const eql = std.mem.eql;
+    if (eql(u8, action, "subscribe")) return ok(req, a, .{ .id = try push.subscribe(db, a, ctx.nowSeconds(), try pushSubscription(b)) });
+    if (eql(u8, action, "settings")) {
+        try push.saveSettings(db, a, try pushSettings(a, b));
+        return ok(req, a, .{ .ok = true });
+    }
+    const id = b.id orelse return error.BadInput;
+    if (eql(u8, action, "device")) {
+        try push.setEnabled(db, id, b.enabled orelse return error.BadInput);
+    } else if (eql(u8, action, "remove")) {
+        try push.remove(db, id, true, ctx.nowSeconds());
+    } else if (eql(u8, action, "test")) {
+        try push.sendTest(ctx, cfg, db, a, id);
+    } else return error.NotFound;
+    return ok(req, a, .{ .ok = true });
 }
 
 // ---- voice (voice.zig): the board records, cl transcribes and speaks ----

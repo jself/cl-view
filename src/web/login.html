@@ -33,5 +33,11 @@
   <input type="password" name="password" placeholder="password" autocomplete="current-password" autofocus required>
   <button type="submit">Sign in</button>
 </form>
+<script>
+  // Signed out while opening a link to the board (a notification's): come
+  // back to it once signed in (cl web checks it is on the board).
+  const next = new URLSearchParams(location.search).get("next");
+  if (next) document.querySelector("form").action = "/login?next=" + encodeURIComponent(next);
+</script>
 </body>
 </html>

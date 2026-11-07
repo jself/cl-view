@@ -227,7 +227,7 @@ fn hasFlag(flags: []const SeenFlag, id: i64) bool {
     return false;
 }
 
-fn readSessions(ctx: Ctx, cfg: config.Config, a: std.mem.Allocator) Sessions {
+pub fn readSessions(ctx: Ctx, cfg: config.Config, a: std.mem.Allocator) Sessions {
     // No tmux (a sandbox without a socket, no server): no sessions.
     if (ctx.tmux_blocked) return .{};
     const sessions = tmux.list(ctx, a) catch return .{};
