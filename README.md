@@ -42,6 +42,22 @@ install -m755 zig-out/bin/cl ~/.local/bin/cl
 
 With zvm: `~/.local/share/zvm/0.16.0/zig build -Doptimize=ReleaseSafe`.
 
+Or with make, which does the same (zvm's 0.16.0 when it's installed, else
+the `zig` on PATH; `make ZIG=...` picks another):
+
+```
+make            # cl, plus cl-window when it can be built (see Window)
+make install    # both into ~/.local/bin (PREFIX=... for elsewhere)
+make cl         # cl only
+make window     # cl and cl-window, failing if cl-window can't be built
+make test
+make clean
+```
+
+`make` builds `cl` first, so a machine without `webkitgtk-6.0` (or where
+cl-window fails to compile) still gets `cl`, with a warning; `make install`
+then installs `cl` alone.
+
 ## Config
 
 `~/.config/cl/config`, one profile per line. Values are Claude config dirs
