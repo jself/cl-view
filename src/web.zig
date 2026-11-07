@@ -552,11 +552,11 @@ test tailnetPeer {
             return tailnetPeer(std.Io.net.IpAddress.parse(s, 1) catch unreachable);
         }
     }.f;
-    try std.testing.expect(p("100.96.124.100"));
+    try std.testing.expect(p("100.101.102.103"));
     try std.testing.expect(p("100.64.0.1"));
     try std.testing.expect(p("100.127.255.255"));
     try std.testing.expect(p("fd7a:115c:a1e0::1"));
-    try std.testing.expect(p("::ffff:100.96.124.100"));
+    try std.testing.expect(p("::ffff:100.101.102.103"));
     try std.testing.expect(!p("::ffff:192.168.1.20"));
     try std.testing.expect(!p("100.128.0.1"));
     try std.testing.expect(!p("100.63.255.255"));

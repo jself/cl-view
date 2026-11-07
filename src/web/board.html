@@ -1679,8 +1679,8 @@ function testTab(d) {
   if (at === n) {
     const rows = p.steps.map((st, si) => { const own = all.map((c, ci) => [c, ci]).filter(([c]) => c.si === si); const comment = state.checks["s" + si];
       if (!own.length && !comment) return "";
-      return `<li><strong>${si + 1}. ${esc(st.title)}</strong><ul class="results">${own.map(([c, ci]) => { const r = state.checks["c" + ci] || {};
-        return `<li><span class="res ${r.pass === true ? "pass" : r.pass === false ? "fail" : ""}">${r.pass === true ? "Pass" : r.pass === false ? "Fail" : "Not tested"}</span> ${esc(c.text)}${r.note ? ` <span class="muted">— ${esc(r.note)}</span>` : ""}</li>`; }).join("")}
+      return `<li><strong>${si + 1}. ${linkify(st.title, (u) => here(u, d))}</strong><ul class="results">${own.map(([c, ci]) => { const r = state.checks["c" + ci] || {};
+        return `<li><span class="res ${r.pass === true ? "pass" : r.pass === false ? "fail" : ""}">${r.pass === true ? "Pass" : r.pass === false ? "Fail" : "Not tested"}</span> ${linkify(c.text, (u) => here(u, d))}${r.note ? ` <span class="muted">— ${esc(r.note)}</span>` : ""}</li>`; }).join("")}
         ${comment ? `<li class="muted">Comment: ${esc(comment)}</li>` : ""}</ul></li>`; }).join("");
     return `<div class="wiz">${dots}<strong>Results</strong><ul class="results">${rows}</ul>
       <label class="muted" style="display:flex;flex-direction:column;gap:calc(5 * var(--u));font-size:calc(12.5 * var(--u))">Anything else for Claude<textarea id="testNote" rows="2">${esc(state.checks.note || "")}</textarea></label>
@@ -1689,17 +1689,17 @@ function testTab(d) {
   const st = p.steps[at]; const l = d.launches?.[at]; const ready = d.ready?.[at];
   let ci = all.findIndex((c) => c.si === at);
   return `<div class="wiz">${dots}
-    <div class="muted" style="font-size:calc(12 * var(--u))">Step ${at + 1} of ${n}</div><strong style="font-size:calc(16 * var(--u))">${esc(st.title)}</strong>
+    <div class="muted" style="font-size:calc(12 * var(--u))">Step ${at + 1} of ${n}</div><strong style="font-size:calc(16 * var(--u))">${linkify(st.title, (u) => here(u, d))}</strong>
     ${st.do.length ? `<div class="do">${st.do.map((x) => `<p>${linkify(x, (u) => here(u, d))}</p>`).join("")}</div>` : ""}
     ${st.run ? `<div><pre class="term">${esc(st.run)}</pre>
       <div class="actions" style="margin-top:calc(8 * var(--u));align-items:center"><button type="button" class="btn primary" data-launch="${at + 1}">${l ? "Restart" : "Run"}</button>${l ? `<button type="button" class="btn" data-launch-stop="${at + 1}">Stop</button>` : ""}
       ${l ? `<span class="muted">${l.running ? "Running" : "Exited"}</span>` : ""}</div>
       ${l ? `<div class="tail" style="margin-top:calc(8 * var(--u))"><pre class="term runout" data-follow="${esc(d.ticket.key)}:${at}">${esc(l.output || "(no output yet)")}</pre>
         <button type="button" class="tobottom" data-run-bottom="${esc(d.ticket.key)}:${at}" ${runUnfollowed[d.ticket.key + ":" + at] ? "" : "hidden"}>Scroll to bottom ↓</button></div>` : ""}</div>` : ""}
-    ${st.wait ? `<p class="wait ${ready ? "up" : ""}">${ready === true ? "✓ Answering" : ready === false ? "… Not answering yet" : "Waits for"}: ${esc(st.wait)}</p>` : ""}
+    ${st.wait ? `<p class="wait ${ready ? "up" : ""}">${ready === true ? "✓ Answering" : ready === false ? "… Not answering yet" : "Waits for"}: ${linkify(st.wait, (u) => here(u, d))}</p>` : ""}
     ${st.open.length ? `<div class="actions">${st.open.map((u) => here(u, d)).map((u) => `<a class="btn" href="${esc(u)}" target="_blank" rel="noopener">Open ${esc(u.replace(/^https?:\/\//, ""))} ↗</a>`).join("")}</div>` : ""}
     ${st.checks.length ? `<div style="display:flex;flex-direction:column;gap:calc(8 * var(--u))">${st.checks.map((c) => { const i = ci++; const r = state.checks["c" + i] || {};
-      return `<div class="check"><span>${esc(c)}</span><div class="pf"><button type="button" class="btn pass ${r.pass === true ? "on" : ""}" data-check="${i}" data-pass="1">Pass</button>
+      return `<div class="check"><span>${linkify(c, (u) => here(u, d))}</span><div class="pf"><button type="button" class="btn pass ${r.pass === true ? "on" : ""}" data-check="${i}" data-pass="1">Pass</button>
         <button type="button" class="btn fail ${r.pass === false ? "on" : ""}" data-check="${i}" data-pass="0">Fail</button></div>
         ${r.pass === false ? `<input type="text" data-note="${i}" placeholder="What happened?" value="${esc(r.note || "")}">` : ""}</div>`; }).join("")}</div>` : ""}
     <label class="muted" style="display:flex;flex-direction:column;gap:calc(5 * var(--u));font-size:calc(12.5 * var(--u))">Comment on this step (goes to Claude with the results)<textarea data-comment="${at}" rows="2">${esc(state.checks["s" + at] || "")}</textarea></label>
@@ -1731,9 +1731,18 @@ function saveProgress() {
   progressTimer = setTimeout(() => api(`ticket/${encodeURIComponent(key)}/test-progress`, { progress }).catch((e) => toast("Couldn't save your progress: " + e.message, true)), 600);
 }
 // Plain text with its http(s) URLs as links that open in a new tab (where
-// `to` sends them, when given).
+// `to` sends them, when given), so the board stays where it was. In cl's
+// window these go to the default browser (cl-window's decide-policy).
+// URLs are found in the raw text and each piece escaped on its own, so quotes
+// or brackets around a URL ('…', "…", <…>) stay out of it.
 function linkify(text, to) {
-  return esc(text).replace(/https?:\/\/[^\s<)`]+[^\s<)`.,;]/g, (u) => { const v = to ? esc(to(u.replace(/&amp;/g, "&"))) : u; return `<a href="${v}" target="_blank" rel="noopener">${v}</a>`; });
+  text = String(text ?? ""); let out = "", at = 0;
+  for (const m of text.matchAll(/https?:\/\/[^\s<>)`"']+[^\s<>)`"'.,;]/g)) {
+    const v = esc(to ? to(m[0]) : m[0]);
+    out += `${esc(text.slice(at, m.index))}<a href="${v}" target="_blank" rel="noopener">${v}</a>`;
+    at = m.index + m[0].length;
+  }
+  return out + esc(text.slice(at));
 }
 // Seen from another machine (the phone, over tailscale), a test plan's
 // localhost links mean nothing there: they go to cl web's relays for those
