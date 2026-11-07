@@ -462,6 +462,16 @@ pub const Line = struct {
 const heading: vaxis.Style = .{ .bold = true };
 const dim: vaxis.Style = .{ .dim = true };
 
+/// Where a ticket that plans first stands (board.planState), for its detail line.
+fn planLabel(t: board.Ticket) []const u8 {
+    return switch (board.planState(t)) {
+        .none => "",
+        .plan_first => " · plans first",
+        .planned => " · planned",
+        .planned_umbrella => " · planned, now an umbrella",
+    };
+}
+
 /// A ticket in full, as `cl ticket show` has it: what it is, what it asks,
 /// its description, plan, sub-tickets, comments and activity.
 pub fn detailLines(a: std.mem.Allocator, now: i64, t: board.Ticket, status: CardStatus, subs: []const board.Ticket, cs: []const board.Comment, evs: []const board.Event) ![]Line {
@@ -472,7 +482,7 @@ pub fn detailLines(a: std.mem.Allocator, now: i64, t: board.Ticket, status: Card
         }
     }.f;
     try add(a, &l, try std.fmt.allocPrint(a, "{s} · {s} · {s}{s} · round {d} · {s}", .{
-        stageName(t.stage), t.project, @tagName(t.mode), if (t.plan) " · plans first" else "", t.round, status.label(),
+        stageName(t.stage), t.project, @tagName(t.mode), planLabel(t), t.round, status.label(),
     }), dim, 0);
     if (t.parent.len > 0) try add(a, &l, try std.fmt.allocPrint(a, "sub-ticket of {s}", .{t.parent}), dim, 0);
     if (t.children > 0) try add(a, &l, try std.fmt.allocPrint(a, "sub-tickets {d}/{d} done", .{ t.children_done, t.children }), dim, 0);
@@ -555,7 +565,7 @@ fn askLines(a: std.mem.Allocator, l: *std.ArrayList(Line), t: board.Ticket, f: b
         return;
     }
     if (eql(u8, f.kind, board.flag_review)) {
-        const text = if (eql(u8, f.detail, "plan")) "the plan is ready: a approves it (Queued, a new session builds it)" else if (t.summary.len > 0) t.summary else "Claude says it's done: a approves it, to Testing";
+        const text = if (eql(u8, f.detail, "plan")) (if (!t.umbrella) "the plan is ready: a approves it (Queued, a new session builds it)" else if (t.children > 0) "the plan is ready: a approves it (Queued, and its sub-tickets with it)" else "the plan is ready, but it's an umbrella with no sub-tickets yet: have Claude file them first") else if (t.summary.len > 0) t.summary else "Claude says it's done: a approves it, to Testing";
         try l.append(a, .{ .text = text, .indent = 4 });
         return;
     }
@@ -1401,6 +1411,7 @@ pub fn errText(err: anyerror) []const u8 {
         error.BadAnswer => "one answer per question, separated by |: an option number or your own words (\"1,3\" for a multi-select one)",
         error.NotDelivered => "Claude didn't take the answer; it's still waiting. Check the session (o)",
         error.Umbrella => "it's an umbrella: its sub-tickets run, not it",
+        error.NoSubtickets => actions.no_subtickets,
         error.OpenSubtickets => "it has sub-tickets that aren't done yet; finish them or spin them off",
         error.CustomClose => "Claude asked to close it its own way; tell Claude, or just close it",
         error.Conflicts => "merging it back conflicts (the files are on the ticket); it stays in Testing",

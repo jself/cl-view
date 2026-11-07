@@ -789,7 +789,7 @@ const statusOf = (row) => row.ticket.umbrella && !row.status ? "umbrella" : row.
   : row.ticket.stage === "queued" && projectPaused(row.ticket.project) ? "paused" : ["running", "review", "testing"].includes(row.ticket.stage) ? "nosession" : row.ticket.stage === "queued" && !row.ticket.tmux && holdOf(row.ticket) || "none");
 const waitTitle = (t) => waitingOn(t).map((d) => `${d.key} (${STAGE_NAME[d.stage]}${d.order ? ", the sub-ticket before it" : d.parent ? ", its parent: it runs first" : ""}): ${d.title}`).join("\n");
 // A Done ticket has no status unless its session is still live: "Not started" or "Session ended" says nothing about finished work.
-const umbrellaLabel = (t) => t.stage === "backlog" || t.stage === "planning" ? "Umbrella"
+const umbrellaLabel = (t) => t.stage === "planning" ? "Umbrella · planning its sub-tickets" : t.stage === "backlog" ? "Umbrella"
   : t.stage === "queued" ? "Umbrella · waiting for a sub-ticket to start" : "Umbrella · sub-tickets under way";
 const statusHtml = (row) => { const s = statusOf(row); const t = row.ticket; if (t.stage === "done" && (!row.status || row.status === "gone")) return "";
   const label = s === "umbrella" ? umbrellaLabel(t) : s === "none" ? (t.stage === "queued" ? "Waiting for a slot" : "Not started") : s === "waits" ? "Waits on " + waitingOn(t).map((d) => d.key).join(", ") : (STATUS_NAME[s] || s);
@@ -1287,9 +1287,20 @@ function drawTail() {
 }
 // Claude handed in a plan (cl ticket done --plan) that can be approved. Sending
 // feedback keeps it so: Claude may only answer, not hand in a new one.
+// A ticket that plans first (board.planState): "plan first" until it is planned, then "planned", or for
+// one whose plan became its sub-tickets "planned · now an umbrella" (its plan stays under the Plan tab).
+// Moved out of Planning without a plan, it says neither.
+const planFact = (t) => {
+  if (!t.plan) return "";
+  if (t.stage !== "planning" && (t.plan_md || "").trim()) return t.umbrella ? `<span title="Its planning session filed the plan's sub-tickets; it runs as them. The plan is under the Plan tab">planned · now an umbrella</span>` : `<span>planned</span>`;
+  if (t.stage !== "planning" && t.stage !== "backlog") return "";
+  return `<span>plan first${t.skill ? " · " + esc(t.skill) : ""}</span>`;
+};
+// An umbrella's plan with nothing filed under it yet: approving is refused (it would wait in Queued for nothing).
+const emptyUmbrella = (t) => t.umbrella && !t.children;
 const planReady = (t) => t.stage === "planning" && ((t.plan_md || "").trim() || t.flags.some((f) => f.kind === "review"));
 // The ticket's approve button (the ticket view's bar, Ctrl+K's actions): its label, or "" for none.
-const approveLabel = (t) => planReady(t) ? "Approve plan" : t.stage === "review" ? "Approve, to testing" : t.stage === "testing" && !t.finishing ? "Tested, done" : "";
+const approveLabel = (t) => planReady(t) ? (emptyUmbrella(t) ? "" : "Approve plan") : t.stage === "review" ? "Approve, to testing" : t.stage === "testing" && !t.finishing ? "Tested, done" : "";
 function tabsFor(d) {
   const t = d.ticket; const tabs = [];
   if (t.flags.some((f) => f.kind === "question" || f.kind === "input")) tabs.push(["needs", "Needs you"]);
@@ -1386,7 +1397,7 @@ function renderDetailInner() {
       ${moreMenu}<button type="button" class="xclose" id="closeDlg" title="Close" aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button></span></div>
     <h1>${esc(t.title)}</h1>
     <div class="facts"><span class="stat">${shell}${status}</span>${ws}${t.onto ? `<span class="mono" title="It starts from this branch and merges into it, not trunk${t.onto_own ? "" : " (the project's target)"}">onto ${esc(t.onto)}</span>` : ""}${t.tmux ? `<span class="mono">${esc(t.tmux)}</span>` : ""}
-      ${t.round > 1 ? `<span>round ${t.round}</span>` : ""}${t.plan ? `<span>plan first${t.skill ? " · " + esc(t.skill) : ""}</span>` : ""}${parent}</div>
+      ${t.round > 1 ? `<span>round ${t.round}</span>` : ""}${planFact(t)}${parent}</div>
     ${acts.length ? `<div class="actions">${acts.join("")}</div>` : ""}${parkBox(t)}${driftBox(t, liveSession)}${depBox(d)}
     <div class="tabs" role="tablist">${tabs.map(([k, l]) => `<button type="button" role="tab" class="${state.tab === k ? "on" : ""}" aria-selected="${state.tab === k}" data-tab="${k}">${esc(l)}</button>`).join("")}</div>
     <div id="tabBody">${state.tab === tabs[0][0] && (t.body || "").trim() ? `<div class="desc">${descHtml(t.body)}</div>` : ""}${tabHtml(d)}</div>`;
@@ -1614,8 +1625,9 @@ function planTab(d) {
   const t = d.ticket; const ready = planReady(t);
   const md = (t.plan_md || "").trim();
   // Only while a fresh session will build it (board.planEditable): one that resumes its
-  // conversation is only told it's back on, never the plan.
-  const editable = t.stage === "planning" || (["backlog", "queued"].includes(t.stage) && !t.session_id);
+  // conversation is only told it's back on, never the plan. An umbrella's, only in Planning:
+  // after that no session builds it, its sub-tickets run.
+  const editable = t.stage === "planning" || (!t.umbrella && ["backlog", "queued"].includes(t.stage) && !t.session_id);
   const edit = editable ? `<button type="button" class="btn" data-edit="plan" title="Change the plan's text yourself; the session that builds it gets your version">${md ? "Edit plan" : "Write the plan"}</button>` : "";
   if (state.editing === "plan" && editable) return `<div style="display:flex;flex-direction:column;gap:calc(10 * var(--u))">
     ${(state.edit.plan?.base ?? md).trim() !== md ? `<p class="pill f-conflict" style="margin:0;align-self:flex-start">The plan changed since you started editing: Save is refused. Copy what you need, then Cancel to see the new one.</p>` : ""}
@@ -1624,12 +1636,15 @@ function planTab(d) {
     <div class="actions">${editButtons("plan")}</div></div>`;
   return `<div style="display:flex;flex-direction:column;gap:calc(10 * var(--u))">
     ${md ? `<div class="plan">${mdHtml(md)}</div>` : `<p class="muted" style="margin:0">Claude hasn't handed in the plan's text; its summary is under Comments.</p>`}
-    ${ready ? `<p class="muted" style="margin:0">Approving moves it to Queued: a new session builds it from this plan.</p>
-    <div class="actions"><button type="button" class="btn primary" data-act="approve">Approve plan</button>${edit}</div>
+    ${ready ? `<p class="muted" style="margin:0">${emptyUmbrella(t) ? "It's an umbrella with no sub-tickets yet, so there is nothing to approve into running: ask Claude below to file them (it does before handing in the plan)."
+      : t.umbrella ? `Approving queues it and its ${t.children === 1 ? "sub-ticket, which runs" : `${t.children} sub-tickets, which run`}; it follows them (Running when one starts, Done when all are).`
+      : "Approving moves it to Queued: a new session builds it from this plan."}</p>
+    <div class="actions">${emptyUmbrella(t) ? "" : `<button type="button" class="btn primary" data-act="approve">Approve plan</button>`}${edit}</div>
     <label class="muted" style="display:flex;flex-direction:column;gap:calc(5 * var(--u));font-size:calc(12.5 * var(--u))">Or ask about it or say what to change (when Claude hands in a revised plan, it shows here)
       <textarea id="backText" rows="3"></textarea></label>
     <div class="actions"><button type="button" class="btn" id="sendBack">Send to Claude</button></div>`
     : t.stage === "planning" ? `<p class="muted" style="margin:0">Claude hasn't handed in a plan yet.</p>`
+    : t.umbrella && md ? `<p class="muted" style="margin:0">Planned, now an umbrella: this plan became its sub-tickets, and it runs as them.</p>`
     : edit ? `<div class="actions">${edit}</div>` : ""}</div>`;
 }
 // Enough markdown for a plan: headings, lists, code blocks, inline code,

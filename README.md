@@ -761,7 +761,20 @@ cl t done QA-1 --summary "Fixed the race"
   isn't told the plan): that session gets the plan as you saved it, and
   Claude isn't told you changed it. If Claude hands
   in a revised plan while you edit, Save is refused rather than replace it. `cl t approve` moves it to Queued, and a new session builds it; on
-  a ticket in review or testing, approve moves it on a stage.
+  a ticket in review or testing, approve moves it on a stage. Leaving
+  Planning any way (approve, `cl t move`, the board's Stage) clears the
+  plan's `review` flag, so a plan that's been dealt with doesn't stay in
+  Needs You.
+- Plan, then tickets: `--plan --umbrella` makes an umbrella that is planned
+  first (a brainstorm, a roadmap still to shape). Its planning session
+  interviews you, files the sub-tickets under it (Backlog, in order, with
+  `--parallel` / `--after` where the plan says) and hands in the plan, which
+  lists them. Approving it queues them; the umbrella gets no build session
+  and follows its sub-tickets like any umbrella (below). A plain `--plan`
+  ticket's session may make it an umbrella the same way, asking you first,
+  when the plan turns out to be only tickets. Once past Planning, `show`
+  says `(planned, now an umbrella)` and the board "planned · now an
+  umbrella"; the plan stays on the Plan tab and in `cl t show <key> --plan`.
 
 ### Running tickets
 

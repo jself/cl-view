@@ -206,6 +206,17 @@ const tickets_skill =
     \\- The umbrella has no work of its own: queueing it is the one action that queues its
     \\  sub-tickets. It never gets a session. Without --umbrella the parent runs first and
     \\  its sub-tickets wait until it is done.
+    \\- Plan, then tickets: when the work should be worked out with the human before it can be
+    \\  split up (a brainstorm, a roadmap still to shape), make the umbrella plan first:
+    \\
+    \\    cl ticket new <project> "<goal>" --plan --umbrella -m "<what to work out, what to file>"
+    \\
+    \\  Its planning session interviews the human, files the sub-tickets under it (in Backlog, in
+    \\  order, with --parallel / --after where the plan says) and hands in the plan. Approving
+    \\  the plan queues them; the umbrella never gets a build session and follows them like any
+    \\  umbrella. A plain `--plan` ticket's session may turn it into one the same way (with the
+    \\  human's say) when the plan turns out to be only tickets. Don't file its sub-tickets
+    \\  yourself or queue it by hand: approving does that, and leaves no plan flag behind.
     \\- Any ticket can wait on others, in any project: `cl ticket edit QA-5 --after QA-3,WEB-2`
     \\  (or `new ... --after`); `--not-after QA-3` drops it. The dispatcher starts it only once
     \\  they're all done. A link that would make tickets wait on each other is refused.

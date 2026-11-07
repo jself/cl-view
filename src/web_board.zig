@@ -176,6 +176,7 @@ pub fn handle(ctx: Ctx, cfg: config.Config, req: *std.http.Server.Request, path:
             error.NotDelivered => .{ .conflict, "Claude didn't take the answer; it's still waiting. Check the session" },
             error.AlreadyStarted => .{ .conflict, "it already has a session" },
             error.Umbrella => .{ .conflict, "it's an umbrella: its sub-tickets run, not it" },
+            error.NoSubtickets => .{ .conflict, actions.no_subtickets },
             error.TargetBusy => .{ .conflict, "its session is busy or has another ticket in progress; it waits in Queued and starts there when the session is free" },
             error.WorktreeFailed => .{ .internal_server_error, worktree.lastError() },
             error.Busy => .{ .conflict, "Claude is working in its session or waiting on you; it can move once it is idle" },

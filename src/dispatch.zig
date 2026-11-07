@@ -168,13 +168,36 @@ pub fn planPrompt(a: std.mem.Allocator, t: board.Ticket, notes: []const board.Co
         try w.writeAll("\nNotes on the ticket:\n");
         for (notes) |n| try w.print("- {s}\n", .{n.body});
     }
-    try w.writeAll("\nThis is a planning session: plan the ticket, don't build it. Don't write or change code or any other file, and don't commit; once I approve the plan, a new session builds it.\n");
+    try w.writeAll(if (t.umbrella)
+        "\nThis is a planning session for an umbrella: the plan's output is its sub-tickets, and once I approve it they run, not it (no session builds this ticket itself). Don't write or change code or any other file, and don't commit.\n"
+    else
+        "\nThis is a planning session: plan the ticket, don't build it. Don't write or change code or any other file, and don't commit; once I approve the plan, a new session builds it.\n");
     switch (where) {
         .trunk => |rev| try w.print("You're in a read-only copy of the project at {s}, for reading the code; it goes away when planning ends.\n", .{rev}),
         .checkout => try w.writeAll("You're in the project's checkout, which may hold another ticket's unfinished work: read it as the code to plan against, but its files may not be what is merged.\n"),
     }
     try w.writeAll("\nAsk me with AskUserQuestion until the plan is clear");
     if (t.skill.len > 0) try w.print(" (use the {s} skill for the interview)", .{t.skill});
+    if (t.umbrella) {
+        try w.print(
+            \\. Then, before handing the plan in, file the sub-tickets, in the order they should run:
+            \\`cl ticket new --parent {s} "<title>" -m "<details>"`. Each one's session sees only its own
+            \\body, not this conversation: write it for a reader who starts cold, with what to do, why,
+            \\where to look and what done looks like. Each waits for the one before it to be done; add
+            \\`--parallel` to one that needn't, and `--after <key,...>` when it waits on others. They stay
+            \\in Backlog until I approve; if I send feedback, change them with `cl ticket edit`, `cl ticket
+            \\rank` and `cl ticket rm` and hand the plan in again.
+            \\
+            \\Then hand in the plan with
+            \\`cl ticket done {s} --summary "<the plan in a sentence>" --plan` and the plan as markdown on
+            \\stdin (a heredoc, not a file): the sub-tickets by key, in order, what each is for, and what
+            \\we decided and why. The board shows it to me for approval; approving queues the sub-tickets
+            \\and this ticket follows them (running when one starts, done when all are). That is the end of
+            \\your part. Don't call ExitPlanMode.
+            \\
+        , .{ t.key, t.key });
+        return aw.written();
+    }
     try w.print(
         \\. The session that builds it won't see
         \\this conversation, only the plan: write it for a reader who starts cold, with every decision
@@ -187,7 +210,14 @@ pub fn planPrompt(a: std.mem.Allocator, t: board.Ticket, notes: []const board.Co
         \\same way. To split off a separate piece of work: `cl ticket new --parent {s} "<title>" -m "<details>"`
         \\(it waits until the plan is approved).
         \\
-    , .{ t.key, t.key });
+        \\If the plan turns out to be only a set of separate tickets, with no work of its own here (a
+        \\roadmap, a brainstorm whose ideas become tickets), ask me; if I agree, file them that way
+        \\(in the order they should run; `--parallel` for one that needn't wait for the one before it,
+        \\`--after <key,...>` to wait on others), make this ticket their umbrella with
+        \\`cl ticket edit {s} --umbrella`, and hand in the plan listing them. Approving it then queues
+        \\them instead of starting a session for this ticket.
+        \\
+    , .{ t.key, t.key, t.key });
     return aw.written();
 }
 
@@ -1513,6 +1543,18 @@ test planPrompt {
     try std.testing.expect(std.mem.indexOf(u8, text, "jj change") == null);
     const here = try planPrompt(a, t, &.{}, .checkout);
     try std.testing.expect(std.mem.indexOf(u8, here, "another ticket's unfinished work") != null);
+    // A plan that turns out to be tickets may make it an umbrella.
+    try std.testing.expect(std.mem.indexOf(u8, text, "`cl ticket edit QA-3 --umbrella`") != null);
+
+    // Plan, then tickets: an umbrella's planning session files its sub-tickets.
+    var u = t;
+    u.umbrella = true;
+    const ut = try planPrompt(a, u, &.{}, .{ .trunk = "master" });
+    try std.testing.expect(std.mem.indexOf(u8, ut, "planning session for an umbrella") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ut, "`cl ticket new --parent QA-3 \"<title>\" -m \"<details>\"`") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ut, "`cl ticket done QA-3 --summary \"<the plan in a sentence>\" --plan`") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ut, "approving queues the sub-tickets") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ut, "a new session builds it") == null);
 }
 
 test "planning takes no queue turn or worktree slot, and holds back its sub-tickets" {
@@ -1728,6 +1770,35 @@ test "an umbrella is never started; its sub-tickets are" {
     const w = try waitingToStart(db, a);
     try std.testing.expectEqual(@as(usize, 1), w.len);
     try std.testing.expectEqualStrings(ks, w[0].key);
+    try std.testing.expectError(error.Umbrella, startIn(ctx, undefined, db, a, try board.getTicket(db, a, ku), false, View{ .sessions = &.{}, .statuses = .empty }, false));
+}
+
+test "plan, then tickets: the umbrella plans, its sub-tickets wait for approval, then they start and it doesn't" {
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp" };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "qa", .dir = "/x/qa-tool" });
+    const ku = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Ideate", .plan = true, .umbrella = true });
+    // It gets a planning session like any planning ticket.
+    const p = try planningToStart(db, a);
+    try std.testing.expectEqual(@as(usize, 1), p.len);
+    try std.testing.expectEqualStrings(ku, p[0].key);
+    // What its session files waits for the plan, even queued.
+    const k1 = try board.createTicket(ctx, db, a, .{ .parent = ku, .title = "One" });
+    const k2 = try board.createTicket(ctx, db, a, .{ .parent = ku, .title = "Two", .stage = .queued });
+    try std.testing.expectError(error.TargetBusy, startIn(ctx, undefined, db, a, try board.getTicket(db, a, k2), false, View{ .sessions = &.{}, .statuses = .empty }, false));
+    try board.done(ctx, db, a, ku, "Two tickets");
+    _ = try board.approve(ctx, db, a, ku);
+    try std.testing.expectEqual(@as(usize, 0), (try planningToStart(db, a)).len);
+    try std.testing.expectEqual(@as(usize, 0), (try board.getTicket(db, a, ku)).flags.len);
+    // Approved: the first sub-ticket is what starts; the umbrella never does.
+    const w = try waitingToStart(db, a);
+    try std.testing.expectEqual(@as(usize, 1), w.len);
+    try std.testing.expectEqualStrings(k1, w[0].key);
     try std.testing.expectError(error.Umbrella, startIn(ctx, undefined, db, a, try board.getTicket(db, a, ku), false, View{ .sessions = &.{}, .statuses = .empty }, false));
 }
 

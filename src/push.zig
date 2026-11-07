@@ -168,7 +168,8 @@ fn actionsFor(a: std.mem.Allocator, t: ticket_watch.Seen, f: ticket_watch.SeenFl
         return out.items;
     }
     if (eql(u8, f.kind, board.flag_review) and t.stage == .planning) {
-        if (eql(u8, f.detail, "plan")) try out.append(a, .{ .action = "approve", .title = "Approve plan" });
+        // Not an umbrella's with nothing filed under it: approving is refused.
+        if (eql(u8, f.detail, "plan") and !t.empty_umbrella) try out.append(a, .{ .action = "approve", .title = "Approve plan" });
         return out.items;
     }
     if (eql(u8, f.kind, board.flag_review) or eql(u8, f.kind, board.flag_testing)) {
@@ -349,7 +350,7 @@ pub fn act(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, ite
     if (eql(u8, action, "approve")) {
         if (!eql(u8, kind, board.flag_review) or !eql(u8, detail, "plan") or t.stage != .planning) return error.BadAction;
         _ = try actions.approve(ctx, db, a, key, false, .close);
-        return .{ .message = try std.fmt.allocPrint(a, "{s}: plan approved; a new session builds it", .{key}) };
+        return .{ .message = try std.fmt.allocPrint(a, "{s}: plan approved; {s}", .{ key, if (t.umbrella) "its sub-tickets are queued" else "a new session builds it" }) };
     }
     if (eql(u8, action, "merge")) {
         if (!eql(u8, kind, board.flag_review) and !eql(u8, kind, board.flag_testing)) return error.BadAction;
@@ -1246,6 +1247,9 @@ test "actionsFor: the buttons each kind of item gets" {
     var planning = t;
     planning.stage = .planning;
     try testing.expectEqualStrings("approve=Approve plan;", try names(a, try actionsFor(a, planning, .{ .id = 1, .kind = "review", .detail = "plan" })));
+    // Not an umbrella's with no sub-tickets yet: approving it is refused.
+    planning.empty_umbrella = true;
+    try testing.expectEqual(@as(usize, 0), (try actionsFor(a, planning, .{ .id = 1, .kind = "review", .detail = "plan" })).len);
     // Review or test: Merge, only for work Merge can land.
     var rev = t;
     rev.stage = .review;
@@ -1294,9 +1298,16 @@ test "act: a notification's button does what the board's would, once" {
     const plan_item = try flagItem(a, db, k, "review");
     try testing.expectError(error.BadAction, act(ctx, cfg, db, a, plan_item, "merge", ""));
     try testing.expectError(error.BadAction, act(ctx, cfg, db, a, plan_item, "answer:1", ""));
-    _ = try act(ctx, cfg, db, a, plan_item, "approve", "");
+    try testing.expectEqualStrings("Kn: plan approved; a new session builds it", try std.mem.replaceOwned(u8, a, (try act(ctx, cfg, db, a, plan_item, "approve", "")).message, k, "Kn"));
     try testing.expectEqual(board.Stage.queued, (try board.getTicket(db, a, k)).stage);
     try testing.expectError(error.Handled, act(ctx, cfg, db, a, plan_item, "approve", ""));
+    // An umbrella's plan: refused while nothing is filed under it, then its sub-tickets queue.
+    const ku = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Plan tickets", .stage = .planning, .umbrella = true });
+    try board.setFlag(ctx, db, a, ku, "review", "auto", "plan");
+    const u_item = try flagItem(a, db, ku, "review");
+    try testing.expectError(error.NoSubtickets, act(ctx, cfg, db, a, u_item, "approve", ""));
+    _ = try board.createTicket(ctx, db, a, .{ .parent = ku, .title = "One" });
+    try testing.expectEqualStrings("Kn: plan approved; its sub-tickets are queued", try std.mem.replaceOwned(u8, a, (try act(ctx, cfg, db, a, u_item, "approve", "")).message, ku, "Kn"));
 
     // Dismiss: only what doesn't wait on you; then it's gone.
     try board.setFlag(ctx, db, a, k, "after-merge", "auto", "make failed");

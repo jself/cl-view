@@ -1402,14 +1402,36 @@ pub fn editPlan(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, md: []c
 }
 
 /// Whether an edit of `t`'s plan reaches the session that builds it: in
-/// Planning (approving starts a fresh session), or in Backlog or Queued with
-/// no conversation to resume (a resumed one is only told it's back on).
+/// Planning (approving starts a fresh session, or for an umbrella, it is
+/// what you approve), or in Backlog or Queued with no conversation to resume
+/// (a resumed one is only told it's back on). Never an umbrella's past
+/// Planning: no session builds it, its sub-tickets run.
 pub fn planEditable(t: Ticket) bool {
-    return t.stage == .planning or ((t.stage == .backlog or t.stage == .queued) and t.session_id.len == 0);
+    return t.stage == .planning or (!t.umbrella and (t.stage == .backlog or t.stage == .queued) and t.session_id.len == 0);
 }
 
 /// `planEditable` as SQL on the tickets table.
-const plan_editable_sql = "(stage = 'planning' OR (stage IN ('backlog', 'queued') AND session_id = ''))";
+const plan_editable_sql = "(stage = 'planning' OR (umbrella = 0 AND stage IN ('backlog', 'queued') AND session_id = ''))";
+
+/// Where a ticket that plans first stands, for `show`, the terminal board and
+/// (as planFact in board.html) the web board.
+pub const PlanState = enum {
+    /// It doesn't plan first, or it left Planning without a plan.
+    none,
+    /// Planning, or in Backlog before it was planned.
+    plan_first,
+    /// Past Planning with the plan it handed in.
+    planned,
+    /// The same, an umbrella: the plan became its sub-tickets.
+    planned_umbrella,
+};
+
+pub fn planState(t: Ticket) PlanState {
+    if (!t.plan) return .none;
+    if (t.stage == .planning) return .plan_first;
+    if (std.mem.trim(u8, t.plan_md, " \t\r\n").len > 0) return if (t.umbrella) .planned_umbrella else .planned;
+    return if (t.stage == .backlog) .plan_first else .none;
+}
 
 test editPlan {
     const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp" };
@@ -1439,6 +1461,39 @@ test editPlan {
     try db.exec("UPDATE tickets SET session_id = '' WHERE id = ?1", .{id});
     try editPlan(ctx, db, a, k, "## Mine\n", "## Revised\n");
     try std.testing.expectEqualStrings("## Mine\n", (try getTicket(db, a, k)).plan_md);
+    // An umbrella's plan is editable while it waits for approval, not after:
+    // nothing reads it then.
+    const ku = try createTicket(ctx, db, a, .{ .project = "qa", .title = "U", .plan = true, .umbrella = true });
+    try editPlan(ctx, db, a, ku, "## Tickets\n", "");
+    try move(ctx, db, a, ku, .queued);
+    try std.testing.expectError(error.PlanStarted, editPlan(ctx, db, a, ku, "x", "## Tickets\n"));
+}
+
+test planState {
+    var t: Ticket = .{
+        .id = 1, .key = "QA-3", .project = "qa", .title = "Ideate", .body = "", .stage = .planning,
+        .mode = .queue, .plan = true, .skill = "", .target = "", .worktree = "", .branch = "", .profile = "",
+        .tmux = "", .session_id = "", .summary = "", .round = 1, .created = 0, .updated = 0, .parent = "", .children = 0,
+    };
+    try std.testing.expectEqual(PlanState.plan_first, planState(t));
+    t.umbrella = true;
+    t.plan_md = "## Sub-tickets\n";
+    try std.testing.expectEqual(PlanState.plan_first, planState(t));
+    t.stage = .running;
+    try std.testing.expectEqual(PlanState.planned_umbrella, planState(t));
+    t.umbrella = false;
+    try std.testing.expectEqual(PlanState.planned, planState(t));
+    t.stage = .backlog;
+    try std.testing.expectEqual(PlanState.planned, planState(t));
+    // Shelved before it was planned: it still plans first.
+    t.plan_md = "";
+    try std.testing.expectEqual(PlanState.plan_first, planState(t));
+    // Moved on by hand without a plan: neither planned nor planning.
+    t.stage = .queued;
+    try std.testing.expectEqual(PlanState.none, planState(t));
+    t.plan = false;
+    t.stage = .planning;
+    try std.testing.expectEqual(PlanState.none, planState(t));
 }
 
 /// Save how far testing got (left out of `updated`: it changes as you type).
@@ -1750,7 +1805,8 @@ pub fn logEvent(ctx: Ctx, db: Db, id: i64, kind: []const u8, detail: []const u8)
 }
 
 /// Move a ticket to `stage`. Flags follow the workflow: entering Testing sets
-/// `testing`, leaving Review or Testing clears its flag, Done clears them all.
+/// `testing`, leaving Planning, Review or Testing clears its flag, Done clears
+/// them all.
 /// Any move ends finishing.
 pub fn move(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, stage: Stage) Error!void {
     const t = try getTicket(db, a, key);
@@ -1763,7 +1819,9 @@ fn moveId(ctx: Ctx, db: Db, id: i64, from: Stage, to: Stage) Error!void {
     try db.exec("UPDATE tickets SET stage = ?2, finishing = '', killed = killed AND ?2 != 'queued' WHERE id = ?1", .{ id, @as([]const u8, @tagName(to)) });
     var buf: [64]u8 = undefined;
     try logEvent(ctx, db, id, "moved", std.fmt.bufPrint(&buf, "{s} -> {s}", .{ @tagName(from), @tagName(to) }) catch "");
-    if (from == .review) try clearFlagId(ctx, db, id, flag_review);
+    // Out of Planning by any path (approved, queued or shelved by hand), the
+    // plan is no longer waiting for review: its `review` (detail "plan") goes.
+    if (from == .review or from == .planning) try clearFlagId(ctx, db, id, flag_review);
     if (from == .testing) try clearFlagId(ctx, db, id, flag_testing);
     // Moved, it is the move that says what's next (the dispatcher raises it
     // again if it's still in progress and idle).
@@ -2017,7 +2075,7 @@ pub fn approvedStage(stage: Stage) ?Stage {
 pub fn approve(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8) Error!Stage {
     const t = try getTicket(db, a, key);
     const to = approvedStage(t.stage) orelse return error.BadInput;
-    if (t.stage == .planning) try clearFlagId(ctx, db, t.id, flag_review);
+    // (Leaving Planning clears the plan's review flag: see moveId.)
     try moveId(ctx, db, t.id, t.stage, to);
     try logEvent(ctx, db, t.id, "approved", @tagName(t.stage));
     return t.stage;
@@ -2747,6 +2805,82 @@ test "an umbrella is picked up when a sub-ticket starts and closes when they are
     try testing.expectEqual(@as(usize, 0), t.flags.len);
     // Its own umbrella had only it left: it closes as well.
     try testing.expectEqual(Stage.done, (try getTicket(db, a, top)).stage);
+}
+
+test "plan, then tickets: an approved umbrella plan queues the sub-tickets it filed and runs as them" {
+    const ctx = testCtx();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try Db.open(":memory:");
+    defer db.close();
+    try migrate(db);
+    try addProject(db, .{ .name = "qa", .dir = "/x/qa" });
+    const k = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Ideate", .plan = true, .umbrella = true });
+    var t = try getTicket(db, a, k);
+    try testing.expectEqual(Stage.planning, t.stage);
+    try testing.expect(t.umbrella and t.plan);
+
+    // The planning session files the sub-tickets (in Backlog, in order, one
+    // linked to wait on another), then hands in the plan.
+    const s1 = try createTicket(ctx, db, a, .{ .parent = k, .title = "One" });
+    const s2 = try createTicket(ctx, db, a, .{ .parent = k, .title = "Two" });
+    const s3 = try createTicket(ctx, db, a, .{ .parent = k, .title = "Three" });
+    try setParallel(ctx, db, a, s2, true);
+    try setParallel(ctx, db, a, s3, true);
+    _ = try addBlocker(ctx, db, a, s3, s1);
+    try setPlan(ctx, db, t.id, "## Sub-tickets\n1. One\n2. Two\n3. Three\n");
+    try done(ctx, db, a, k, "Three tickets");
+    try testing.expectEqual(@as(usize, 1), (try listTickets(db, a, .{ .needs = true })).len);
+    // Nothing of it runs while the plan waits.
+    for ([_][]const u8{ s1, s2, s3 }) |s| try testing.expectEqual(Stage.backlog, (try getTicket(db, a, s)).stage);
+
+    // Approved: the review flag goes, the umbrella and its sub-tickets queue.
+    try testing.expectEqual(Stage.planning, try approve(ctx, db, a, k));
+    t = try getTicket(db, a, k);
+    try testing.expectEqual(Stage.queued, t.stage);
+    try testing.expectEqual(@as(usize, 0), t.flags.len);
+    try testing.expectEqual(@as(usize, 0), (try listTickets(db, a, .{ .needs = true })).len);
+    for ([_][]const u8{ s1, s2, s3 }) |s| try testing.expectEqual(Stage.queued, (try getTicket(db, a, s)).stage);
+    try testing.expectEqualStrings("## Sub-tickets\n1. One\n2. Two\n3. Three\n", t.plan_md);
+    // Two runs alongside One; Three waits on One only.
+    try testing.expectEqual(@as(usize, 0), (try getTicket(db, a, s2)).blocked_by.len);
+    const b3 = (try getTicket(db, a, s3)).blocked_by;
+    try testing.expectEqual(@as(usize, 1), b3.len);
+    try testing.expectEqualStrings(s1, b3[0].key);
+
+    // It runs as its sub-tickets: Running when one starts, Done when all are.
+    try move(ctx, db, a, s1, .running);
+    try testing.expectEqual(Stage.running, (try getTicket(db, a, k)).stage);
+    try move(ctx, db, a, s1, .done);
+    try move(ctx, db, a, s2, .done);
+    try testing.expectEqual(Stage.running, (try getTicket(db, a, k)).stage);
+    try move(ctx, db, a, s3, .done);
+    t = try getTicket(db, a, k);
+    try testing.expectEqual(Stage.done, t.stage);
+    try testing.expectEqual(@as(usize, 0), t.flags.len);
+    try testing.expectEqual(@as(usize, 0), (try listTickets(db, a, .{ .needs = true })).len);
+}
+
+test "leaving Planning by any path clears the plan's review flag" {
+    const ctx = testCtx();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try Db.open(":memory:");
+    defer db.close();
+    try migrate(db);
+    try addProject(db, .{ .name = "qa", .dir = "/x/qa" });
+    // Moved by hand (the board's stage select, `cl ticket move`, dragging
+    // the card) to Queued, Backlog or further on: CL-128 kept its flag.
+    for ([_]Stage{ .queued, .backlog, .running, .done }) |to| {
+        const k = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Plan me", .plan = true, .umbrella = to == .queued });
+        try done(ctx, db, a, k, "Plan ready");
+        try testing.expectEqual(@as(usize, 1), (try getTicket(db, a, k)).flags.len);
+        try move(ctx, db, a, k, to);
+        try testing.expectEqual(@as(usize, 0), (try getTicket(db, a, k)).flags.len);
+    }
+    try testing.expectEqual(@as(usize, 0), (try listTickets(db, a, .{ .needs = true })).len);
 }
 
 test "an umbrella in Backlog stays put; queued with its sub-tickets done, it closes" {

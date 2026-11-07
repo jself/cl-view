@@ -47,6 +47,9 @@ pub const Seen = struct {
     /// Its work is on a branch or jj change of its own that Merge can land:
     /// no custom close asked for, and not finishing already.
     mergeable: bool = false,
+    /// An umbrella with no sub-tickets: its plan can't be approved yet
+    /// (actions.approve refuses it).
+    empty_umbrella: bool = false,
     flags: []const SeenFlag,
 
     /// In Needs You, as the board decides it: a flag the human hasn't hidden
@@ -142,7 +145,8 @@ pub fn snapshot(db: board.Db, a: std.mem.Allocator, sessions: Sessions) ![]Seen 
         \\  f.id, f.kind, f.detail, f.hidden,
         \\  EXISTS (SELECT 1 FROM parks k WHERE k.ticket = t.id),
         \\  instr(t.autoreview, ?1) > 0,
-        \\  (t.branch != '' OR t.change_id != '') AND t.custom_close = '' AND t.finishing = ''
+        \\  (t.branch != '' OR t.change_id != '') AND t.custom_close = '' AND t.finishing = '',
+        \\  t.umbrella != 0 AND NOT EXISTS (SELECT 1 FROM tickets c WHERE c.parent = t.id)
         \\FROM tickets t LEFT JOIN flags f ON f.ticket = t.id AND f.cleared IS NULL
         \\ORDER BY t.id, f.id
     , .{board.reviewing_json});
@@ -169,6 +173,7 @@ pub fn snapshot(db: board.Db, a: std.mem.Allocator, sessions: Sessions) ![]Seen 
                 .parked = st.int(11) != 0,
                 .working = working,
                 .mergeable = st.int(13) != 0,
+                .empty_umbrella = st.int(14) != 0,
                 .flags = &.{},
             });
         }

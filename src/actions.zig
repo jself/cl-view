@@ -523,11 +523,18 @@ pub fn closeLeftSessions(ctx: Ctx, db: board.Db, a: std.mem.Allocator) ![]const 
     return out.items;
 }
 
+/// Why an umbrella's plan can't be approved yet (error.NoSubtickets).
+pub const no_subtickets = "it's an umbrella with no sub-tickets yet, so approving would leave it queued with nothing to run: have Claude file them (cl ticket new --parent) first";
+
 /// Approve. An approved plan goes to Queued: the dispatcher closes the
-/// planning session and a new one builds it, told the plan. A tested ticket
-/// going on to Done finishes as `move` does.
+/// planning session and a new one builds it, told the plan; an umbrella's
+/// sub-tickets queue instead (refused, error.NoSubtickets, while it has none:
+/// it would wait in Queued for nothing). A tested ticket going on to Done
+/// finishes as `move` does.
 pub fn approve(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, spin_off: bool, finish: Finish) !board.Stage {
-    if ((try board.getTicket(db, a, key)).stage == .testing) {
+    const t = try board.getTicket(db, a, key);
+    if (t.stage == .planning and t.umbrella and t.children == 0) return error.NoSubtickets;
+    if (t.stage == .testing) {
         try readyForDone(ctx, db, a, key, spin_off);
         if (try startFinish(ctx, db, a, key, finish)) return .testing;
     }
@@ -968,6 +975,33 @@ test "afterAutoreview: findings cl can't send itself stay for you" {
     const t = try board.getTicket(db, a, k);
     try std.testing.expectEqual(board.Stage.review, t.stage);
     try std.testing.expectEqual(@as(i64, 0), autoreview.load(a, t).?.sent);
+}
+
+test "an umbrella's plan isn't approved until it has sub-tickets" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env: std.process.Environ.Map = .init(a);
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = a, .env = &env, .home = "/tmp", .tmux_blocked = true };
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "qa", .dir = "/x" });
+    const k = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Ideate", .plan = true, .umbrella = true });
+    try board.done(ctx, db, a, k, "Plan ready");
+    // Approved now it would wait in Queued for nothing: refused, and the plan
+    // still waits for you.
+    try std.testing.expectError(error.NoSubtickets, approve(ctx, db, a, k, false, .close));
+    var t = try board.getTicket(db, a, k);
+    try std.testing.expectEqual(board.Stage.planning, t.stage);
+    try std.testing.expectEqual(@as(usize, 1), t.flags.len);
+    // Once Claude filed one, it goes, and the sub-ticket with it.
+    const s1 = try board.createTicket(ctx, db, a, .{ .parent = k, .title = "One" });
+    try std.testing.expectEqual(board.Stage.planning, try approve(ctx, db, a, k, false, .close));
+    t = try board.getTicket(db, a, k);
+    try std.testing.expectEqual(board.Stage.queued, t.stage);
+    try std.testing.expectEqual(@as(usize, 0), t.flags.len);
+    try std.testing.expectEqual(board.Stage.queued, (try board.getTicket(db, a, s1)).stage);
 }
 
 test "findings from an earlier round aren't sent" {

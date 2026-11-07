@@ -37,6 +37,12 @@ pub const ticket_usage =
     \\                              running when a sub-ticket starts and to done when they
     \\                              all are (in backlog it stays put). Any other parent is
     \\                              flagged ready-to-close.
+    \\                              --plan --umbrella: plan, then tickets. Its planning
+    \\                              session interviews you, files the sub-tickets (in Backlog)
+    \\                              and hands in the plan; approving it queues them, and the
+    \\                              umbrella follows them as above. A --plan ticket's session
+    \\                              may also make it an umbrella this way when the plan turns
+    \\                              out to be only tickets.
     \\                              --onto: it targets that branch (jj bookmark or git branch)
     \\                              instead of trunk: it starts from it, and --merge / --pr go
     \\                              into it. Without it a ticket takes its parent's, else the
@@ -71,8 +77,9 @@ pub const ticket_usage =
     \\                              Hidden projects' and hidden sessions' tickets stay quiet
     \\  hide <key> / unhide <key>   keep it out of the inbox (Needs You) without clearing its
     \\                              flags, or bring it back; a new flag brings it back too
-    \\  show <key>                  details, flags, what it waits on and blocks, sub-tickets
-    \\                              (in order, how many done), comments and activity
+    \\  show <key> [--json | --plan] details, flags, what it waits on and blocks, sub-tickets
+    \\                              (in order, how many done), comments and activity;
+    \\                              --plan: just the plan its planning session handed in
     \\  edit <key> [--title <t>] [-m <body>] [--project <p>] [--worktree | --queue]
     \\      [--target <session>] [--plan | --no-plan] [--skill <name>] [--profile <name>]
     \\      [--after <key,...>] [--not-after <key,...>] [--parallel | --in-order]
@@ -142,8 +149,10 @@ pub const ticket_usage =
     \\                              its Claude to rebase onto it and settle the conflicts. Only into
     \\                              an idle session on that ticket; review/testing go back to running
     \\  approve <key> [--spin-off] [--merge | --pr [--then <steps>] | --tell <text> | --close]
-    \\                              plan → queued (a new session builds it, told the plan),
-    \\                              review → testing, testing → done
+    \\                              plan → queued (a new session builds it, told the plan;
+    \\                              an umbrella's sub-tickets queue instead), review → testing,
+    \\                              testing → done. Leaving planning any way (approve, move)
+    \\                              clears the plan's review flag
     \\  answer <key> <answer>...    answer the question (one per question: an option number or
     \\                              your own words) or permission prompt (a number) it waits on;
     \\                              a multi-select question takes several numbers, maybe then
@@ -688,9 +697,14 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         });
     }
     if (std.mem.eql(u8, cmd, "show")) {
-        args.only(&.{"--json"}, ticket_usage);
+        args.only(&.{ "--json", "--plan" }, ticket_usage);
         const key = keyArg(pos, 0, env_key, "cl ticket show <key>");
         var t = board.getTicket(db, a, key) catch |e| boardFail(db, e, "ticket");
+        if (args.has("--plan")) {
+            const md = std.mem.trim(u8, t.plan_md, " \t\r\n");
+            if (md.len == 0) fail("{s} has no plan{s}", .{ t.key, if (t.plan) " handed in yet (its summary is under comments in `cl ticket show`)" else "" });
+            return out(try std.fmt.allocPrint(a, "{s}\n", .{md}));
+        }
         // A review whose reviewer died or ran too long reads as failed.
         if (t.autoreview.len > 0) if (autoreview.check(ctx, db, a, t) catch null) |_| {
             t = board.getTicket(db, a, key) catch |e| boardFail(db, e, "ticket");
@@ -1039,6 +1053,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
             restoreThen(ctx, db, a, key, old);
             switch (e) {
                 error.BadInput => fail("only a ticket in planning, review or testing can be approved", .{}),
+                error.NoSubtickets => fail("{s}: {s}", .{ key, actions.no_subtickets }),
                 else => boardFail(db, e, "ticket"),
             }
         };
@@ -1468,17 +1483,51 @@ fn stamp(a: std.mem.Allocator, t: i64) ![]const u8 {
     return std.fmt.allocPrint(a, "{d}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}Z", .{ day.year, md.month.numeric(), md.day_index + 1, ds.getHoursIntoDay(), ds.getMinutesIntoHour() });
 }
 
+/// What `show` says after the stage of a ticket that plans first (see
+/// board.planState): " (plan first)", " (planned)" or " (planned, now an
+/// umbrella)".
+fn planNote(a: std.mem.Allocator, t: board.Ticket) ![]const u8 {
+    return switch (board.planState(t)) {
+        .none => "",
+        .plan_first => if (t.skill.len > 0) try std.fmt.allocPrint(a, " (plan first, {s})", .{t.skill}) else " (plan first)",
+        .planned => " (planned)",
+        .planned_umbrella => " (planned, now an umbrella)",
+    };
+}
+
+test planNote {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var t: board.Ticket = .{
+        .id = 1, .key = "QA-3", .project = "qa", .title = "Ideate", .body = "", .stage = .planning,
+        .mode = .queue, .plan = true, .skill = "grilling", .target = "", .worktree = "", .branch = "", .profile = "",
+        .tmux = "", .session_id = "", .summary = "", .round = 1, .created = 0, .updated = 0, .parent = "", .children = 0,
+    };
+    try std.testing.expectEqualStrings(" (plan first, grilling)", try planNote(a, t));
+    t.umbrella = true;
+    t.plan_md = "## Sub-tickets\n";
+    t.stage = .running;
+    try std.testing.expectEqualStrings(" (planned, now an umbrella)", try planNote(a, t));
+    t.umbrella = false;
+    try std.testing.expectEqualStrings(" (planned)", try planNote(a, t));
+    // Dragged out of Planning without a plan: it says neither.
+    t.plan_md = "";
+    try std.testing.expectEqualStrings("", try planNote(a, t));
+}
+
 fn showText(ctx: Ctx, a: std.mem.Allocator, t: board.Ticket, blocks: []const []const u8, subs: []const board.Ticket, cs: []const board.Comment, evs: []const board.Event) ![]const u8 {
     var aw: std.Io.Writer.Allocating = .init(a);
     const w = &aw.writer;
     try w.print("{s}  {s}\n", .{ t.key, t.title });
-    try w.print("stage: {s}{s}{s}   round: {d}   project: {s}   mode: {s}{s}\n", .{
-        @tagName(t.stage), if (t.plan) " (plan first" else "", if (!t.plan) "" else if (t.skill.len > 0) try std.fmt.allocPrint(a, ", {s})", .{t.skill}) else ")", t.round, t.project, @tagName(t.mode),
+    try w.print("stage: {s}{s}   round: {d}   project: {s}   mode: {s}{s}\n", .{
+        @tagName(t.stage), try planNote(a, t), t.round, t.project, @tagName(t.mode),
         if (t.mode == .queue and t.target.len > 0) try std.fmt.allocPrint(a, " in {s}", .{t.target}) else "",
     });
     if (t.onto.len > 0) try w.print("onto: {s}{s} (starts from it and merges into it, not trunk)\n", .{ t.onto, if (t.onto_own.len == 0) ", the project's" else "" });
     if (t.parent.len > 0) try w.print("sub-ticket of: {s}{s}\n", .{ t.parent, if (t.parallel) " (parallel: doesn't wait for the one before it)" else "" });
     if (t.umbrella) try w.writeAll("umbrella: only a container for its sub-tickets; it never runs\n");
+    if (std.mem.trim(u8, t.plan_md, " \t\r\n").len > 0) try w.print("plan: {s}; `cl ticket show {s} --plan` prints it\n", .{ if (t.stage == .planning) "handed in" else "kept from its planning", t.key });
     if (t.children > 0) try w.print("sub-tickets: {d}/{d} done\n", .{ t.children_done, t.children });
     try writeDeps(w, a, t, blocks);
     if (t.tmux.len > 0) try w.print("session: {s}\n", .{t.tmux});
