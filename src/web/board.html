@@ -265,6 +265,22 @@
   .dlg h1 { margin: 0; font-size: calc(21 * var(--u)); font-weight: 600; overflow-wrap: anywhere; }
   .dlg .facts { display: flex; flex-wrap: wrap; gap: calc(6 * var(--u)) calc(16 * var(--u)); font-size: calc(13 * var(--u)); color: var(--dim); }
   .dlg .actions { display: flex; flex-wrap: wrap; gap: calc(8 * var(--u)); }
+  /* The ticket's status line: the shell icon on the left of the status, a size up from a card's. */
+  .dlg .facts .stat { display: inline-flex; align-items: center; gap: calc(6 * var(--u)); }
+  .dlg .facts .shell-ic { width: calc(28 * var(--u)); height: calc(24 * var(--u)); border: 1px solid #1d4d48; border-radius: calc(7 * var(--u)); }
+  .dlg .facts .shell-ic svg { width: calc(17 * var(--u)); height: calc(17 * var(--u)); }
+  /* The ⋯ menu next to Close: the ticket's less common actions (Park, Move to…, Kill). */
+  .more { position: relative; display: inline-flex; }
+  .more > .btn { min-width: calc(36 * var(--u)); padding: 0 calc(8 * var(--u)); font-size: calc(16 * var(--u)); letter-spacing: .05em; }
+  .more .menu { position: absolute; z-index: 5; top: calc(100% + calc(6 * var(--u))); right: 0; width: min(calc(320 * var(--u)), calc(100vw - calc(28 * var(--u)))); padding: calc(6 * var(--u));
+                display: flex; flex-direction: column; background: #1c1d21; border: 1px solid #3a3c42; border-radius: calc(12 * var(--u)); box-shadow: 0 calc(10 * var(--u)) calc(30 * var(--u)) rgba(0, 0, 0, .5); }
+  .more .menu[hidden] { display: none; }
+  .more .menu button { display: flex; flex-direction: column; align-items: flex-start; gap: calc(2 * var(--u)); width: 100%; padding: calc(8 * var(--u)) calc(10 * var(--u)); border: 0;
+                       border-radius: calc(8 * var(--u)); background: none; color: #e6e7e9; text-align: left; cursor: pointer; }
+  .more .menu button:hover, .more .menu button:focus-visible { background: #2a2c31; outline: none; }
+  .more .menu small { color: var(--muted); font-size: calc(12 * var(--u)); line-height: 1.35; }
+  .more .menu .danger { color: #ffb4b4; }
+  .more .menu hr { border: 0; border-top: 1px solid var(--line); margin: calc(4 * var(--u)); }
   .tabs { display: flex; gap: calc(18 * var(--u)); border-bottom: 1px solid var(--line); overflow-x: auto; }
   .tabs button { min-height: calc(40 * var(--u)); padding: 0 calc(2 * var(--u)); border: 0; border-bottom: calc(2 * var(--u)) solid transparent; background: none; color: var(--muted); cursor: pointer; white-space: nowrap; }
   .tabs button.on { color: #fff; border-bottom-color: #7fb2ff; }
@@ -1172,8 +1188,8 @@ function renderDetailInner() {
   if (!state.tab || !tabs.some(([k]) => k === state.tab)) state.tab = tabs[0][0];
   const liveSession = t.tmux && d.status && d.status !== "gone";
   const approve = planReady(t) ? "Approve plan" : t.stage === "review" ? "Approve, to testing" : t.stage === "testing" && !t.finishing ? "Tested, done" : "";
+  // The bar holds the ticket's next steps; Open shell is the icon by its status, and the rest are in the ⋯ menu.
   const acts = [];
-  if (liveSession) acts.push(`<a class="btn primary" href="${shellHref(t)}">Open shell</a>`);
   // Ran before (killed, or its session ended): a fresh session, resuming its conversation where Claude still has it.
   const ranBefore = t.killed || t.tmux || t.session_id;
   if (t.park) acts.push(`<button type="button" class="btn primary" data-act="unpark" title="End the park and resume its session now, told you unparked it">Resume now</button>`,
@@ -1181,13 +1197,18 @@ function renderDetailInner() {
   else if (!liveSession && t.stage !== "done" && !t.umbrella) acts.push(`<button type="button" class="btn primary" data-act="start"${ranBefore ? ` title="A fresh session for it${t.session_id ? ", resuming its conversation where Claude still has it" : ""}"` : ""}>${ranBefore ? "Restart" : "Start now"}</button>`);
   if (d.gutter && liveSession && (d.guide || t.worktree)) acts.push(`<button type="button" class="btn" data-act="gutter">Open in gutter</button>`);
   if (approve) acts.push(`<button type="button" class="btn" data-act="approve">${approve}</button>`);
-  if (liveSession) acts.push(`<button type="button" class="btn danger" data-act="kill" title="End its session; it keeps its stage and can be restarted">Kill</button>`);
-  if (!t.park && t.stage !== "done" && !t.umbrella) acts.push(`<button type="button" class="btn" data-act="park" title="Wait on something outside cl (a PR, a deploy) without a session; a check can wake it">Park</button>`);
   if (t.stage === "backlog") acts.push(`<button type="button" class="btn" data-move="queued">Queue it</button>`);
+  const item = (attrs, label, note, cls) => `<button type="button" role="menuitem"${cls ? ` class="${cls}"` : ""} ${attrs}><span>${label}</span><small>${note}</small></button>`;
+  const more = [];
+  if (!t.park && t.stage !== "done" && !t.umbrella) more.push(item(`data-act="park"`, "Park", "Wait on something outside cl (a PR, a deploy) without a session; a check can wake it"));
   // Moves it (with its change and conversation, once under way) to a worktree of its own or back.
-  if (t.stage !== "done" && !t.umbrella) acts.push(t.mode === "queue"
-    ? `<button type="button" class="btn" data-relocate="worktree" title="Give it a worktree of its own; Claude goes on there and the queue session is free">Move to a worktree</button>`
-    : `<button type="button" class="btn" data-relocate="queue" title="Go on in the project's main folder, in its session once that is free">Move to the queue</button>`);
+  if (t.stage !== "done" && !t.umbrella) more.push(t.mode === "queue"
+    ? item(`data-relocate="worktree"`, "Move to a worktree", "Give it a worktree of its own; Claude goes on there and the queue session is free")
+    : item(`data-relocate="queue"`, "Move to the queue", "Go on in the project's main folder, in its session once that is free"));
+  if (liveSession) more.push((more.length ? "<hr>" : "") + item(`data-act="kill"`, "Kill", "End its session; it keeps its stage and can be restarted", "danger"));
+  const moreMenu = more.length ? `<span class="more"><button type="button" class="btn" id="moreBtn" aria-label="More actions" title="More actions" aria-haspopup="menu" aria-expanded="${!!state.moreOpen}">⋯</button>
+    <div class="menu" role="menu" id="moreMenu"${state.moreOpen ? "" : " hidden"}>${more.join("")}</div></span>` : "";
+  const shell = liveSession ? `<a class="shell-ic" href="${shellHref(t)}" title="Open shell" aria-label="Open shell">${SHELL_SVG}</a>` : "";
   // The status line: a parent without a session of its own shows its sub-tickets' progress instead; one with a session shows both.
   // A Done ticket that never had a worktree or branch doesn't name its workspace.
   const own = { ticket: t, status: d.status }; const subs = d.subtickets || [];
@@ -1199,11 +1220,11 @@ function renderDetailInner() {
     <div class="head"><span class="mono muted">${esc(t.key)} · ${esc(t.project)}</span>${pills(t)}<span style="flex:1"></span>
       <label class="muted" style="display:flex;gap:calc(6 * var(--u));align-items:center;font-size:calc(13 * var(--u))">Stage
         <select id="stageSel">${STAGES.map((s) => `<option value="${s}" ${s === t.stage ? "selected" : ""}>${STAGE_NAME[s]}</option>`).join("")}</select></label>
-      <button type="button" class="btn" id="closeDlg">Close</button></div>
+      <button type="button" class="btn" id="closeDlg">Close</button>${moreMenu}</div>
     <h1>${esc(t.title)}</h1>
-    <div class="facts">${status}${ws}${t.onto ? `<span class="mono" title="It starts from this branch and merges into it, not trunk${t.onto_own ? "" : " (the project's target)"}">onto ${esc(t.onto)}</span>` : ""}${t.tmux ? `<span class="mono">${esc(t.tmux)}</span>` : ""}
+    <div class="facts"><span class="stat">${shell}${status}</span>${ws}${t.onto ? `<span class="mono" title="It starts from this branch and merges into it, not trunk${t.onto_own ? "" : " (the project's target)"}">onto ${esc(t.onto)}</span>` : ""}${t.tmux ? `<span class="mono">${esc(t.tmux)}</span>` : ""}
       ${t.round > 1 ? `<span>round ${t.round}</span>` : ""}${t.plan ? `<span>plan first${t.skill ? " · " + esc(t.skill) : ""}</span>` : ""}${parent}</div>
-    <div class="actions">${acts.join("")}</div>${parkBox(t)}${depBox(d)}
+    ${acts.length ? `<div class="actions">${acts.join("")}</div>` : ""}${parkBox(t)}${depBox(d)}
     <div class="tabs" role="tablist">${tabs.map(([k, l]) => `<button type="button" role="tab" class="${state.tab === k ? "on" : ""}" aria-selected="${state.tab === k}" data-tab="${k}">${esc(l)}</button>`).join("")}</div>
     <div id="tabBody">${state.tab === tabs[0][0] && (t.body || "").trim() ? `<div class="desc">${descHtml(t.body)}</div>` : ""}${tabHtml(d)}</div>`;
 }
@@ -1841,6 +1862,8 @@ const unparkMsg = (k, how) => how === "started" ? `${k} unparked and resumed` : 
 
 // ---- events ----
 async function onClick(e) {
+  if (e.target.closest("#moreBtn")) { setMore(!state.moreOpen); return; }
+  if (state.moreOpen) setMore(false, false);
   const img = e.target.closest("[data-img]");
   if (img) { e.preventDefault(); document.getElementById("imgFull").src = img.dataset.img; document.getElementById("imgDlg").showModal(); return; }
   const up = e.target.closest("[data-unpark]");
@@ -2318,7 +2341,20 @@ async function onSubmit(e) {
   }
 }
 document.addEventListener("submit", (e) => { e.preventDefault(); busyWhile(e.submitter || e.target.querySelector("[type=submit]"), onSubmit(e)); });
-document.getElementById("ticketDlg").addEventListener("close", () => { state.open = null; state.detail = null; });
+document.getElementById("ticketDlg").addEventListener("close", () => { state.open = null; state.detail = null; state.moreOpen = false; });
+// The ticket's ⋯ menu: kept in state so a redraw leaves it as it was. Escape closes it (not the dialog), and the arrows walk it.
+function setMore(open, focus = true) {
+  state.moreOpen = open;
+  const m = document.getElementById("moreMenu"), b = document.getElementById("moreBtn"); if (!m || !b) return;
+  m.hidden = !open; b.setAttribute("aria-expanded", String(open));
+  if (focus) (open ? m.querySelector("button") : b).focus();
+}
+document.getElementById("ticketDlg").addEventListener("cancel", (e) => { if (state.moreOpen) { e.preventDefault(); setMore(false); } });
+document.getElementById("ticketDlg").addEventListener("keydown", (e) => {
+  const m = e.target.closest?.("#moreMenu"); if (!m || (e.key !== "ArrowDown" && e.key !== "ArrowUp")) return;
+  e.preventDefault(); const items = [...m.querySelectorAll("button")]; const i = items.indexOf(document.activeElement);
+  items[(i + (e.key === "ArrowDown" ? 1 : items.length - 1)) % items.length].focus();
+});
 
 // ---- where you were ----
 // Leaving the board (Shell, Chat, Terminal, a reload) saves this tab's place:

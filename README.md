@@ -565,7 +565,7 @@ names a branch to build on or merge into gets it as `--onto`. Finishing it merge
 (below); merging the branch itself into trunk stays yours to do.
 
 A ticket can switch ways at any time (`cl t relocate QA-1 worktree|queue`, or
-**Move to a worktree** / **Move to the queue** on the board, or the ticket's
+**Move to a worktree** / **Move to the queue** in the board's ⋯ menu, or the ticket's
 **Runs as** and `cl t edit QA-1 --worktree|--queue`). One that hasn't
 started only changes mode, except that one sent to a worktree from Queued
 starts there right away (it no longer waits for a shared session), as does
@@ -664,8 +664,8 @@ and so on); one check may run up to 10 minutes. Exit 0 ends the park: the
 ticket gets the `unparked` flag and its session resumes, told "Parked
 condition met: <reason>. Continue." No pass within `--max` (default 7d)
 ends it with `park-expired`, and the session stays stopped. Without
-`--until` nothing checks it. On the board, Park in the ticket popup does the
-same with a form, and the Parked switch over the board hides parked tickets. `unpark` (the board's Resume, `P` in the
+`--until` nothing checks it. On the board, Park in the ticket popup's ⋯ menu does
+the same with a form, and the Parked switch over the board hides parked tickets. `unpark` (the board's Resume, `P` in the
 chooser) ends it by hand and resumes the session; `--no-resume` (Cancel
 park) only ends it. Claude can park its own ticket from its session (the
 key may be left out); the session closes after the command answers.
