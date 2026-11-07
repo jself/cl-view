@@ -579,7 +579,10 @@ session that never said done stays in running.
 
 Sessions cl starts for tickets get `CL_TICKET` and hooks (`--settings
 <board.dir>/claude-hooks.json`): a permission prompt sets `input`, and the
-end of a turn clears it. A ticket whose session goes away gets `ended`;
+end of a turn clears it. An AskUserQuestion call is kept on the ticket as it
+starts (PreToolUse), so the board has its questions and options while the
+menu is open, even where Claude Code writes the call to the transcript only
+once it is answered. A ticket whose session goes away gets `ended`;
 `cl t start` starts it again.
 
 ### Pausing

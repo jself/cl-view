@@ -175,6 +175,11 @@ pub const Ticket = struct {
     /// Claude said not to finish it the usual way (merge, PR): what to do
     /// instead. The board offers only that ("Custom close"); "" for none.
     custom_close: []const u8 = "",
+    /// The AskUserQuestion its session has on screen, from the PreToolUse
+    /// hook: {"id": tool_use_id, "input": the tool's input}, "" for none.
+    /// Claude Code writes the call to the transcript only once it is
+    /// answered, so while the menu is open this is where its questions are.
+    asking: []const u8 = "",
     /// 1, then +1 each time it is sent back after Claude said done.
     round: i64,
     created: i64,
@@ -254,6 +259,7 @@ const schema =
     \\  custom_close TEXT NOT NULL DEFAULT '',
     \\  plan_md TEXT NOT NULL DEFAULT '',
     \\  review_guide TEXT NOT NULL DEFAULT '',
+    \\  asking TEXT NOT NULL DEFAULT '',
     \\  created INTEGER NOT NULL,
     \\  updated INTEGER NOT NULL
     \\);
@@ -370,6 +376,8 @@ pub fn migrate(db: Db) !void {
         // ticket's directory, which tickets without a worktree shared.
         try addColumn(db, "tickets", "review_guide", "TEXT NOT NULL DEFAULT ''");
         try addColumn(db, "projects", "paused", "INTEGER NOT NULL DEFAULT 0");
+        // AskUserQuestion's questions used to come only from the transcript.
+        try addColumn(db, "tickets", "asking", "TEXT NOT NULL DEFAULT ''");
     }
     if (have >= version) return;
     // Version 1 had no sub-tickets, version 2 no planning skill.
@@ -745,7 +753,7 @@ pub fn createTicket(ctx: Ctx, db: Db, a: std.mem.Allocator, in: TicketInput) Err
 }
 
 const ticket_cols = "t.id, t.key, t.project, t.title, t.body, t.stage, t.mode, t.plan, t.target, t.worktree, t.branch, t.profile, t.tmux, t.session_id, t.summary, t.round, t.created, t.updated, " ++
-    "coalesce((SELECT p.key FROM tickets p WHERE p.id = t.parent), ''), (SELECT count(*) FROM tickets c WHERE c.parent = t.id), t.skill, t.base, t.finishing, t.change_id, t.rank, t.killed, t.test_plan, t.test_progress, t.custom_close, t.plan_md, t.review_guide";
+    "coalesce((SELECT p.key FROM tickets p WHERE p.id = t.parent), ''), (SELECT count(*) FROM tickets c WHERE c.parent = t.id), t.skill, t.base, t.finishing, t.change_id, t.rank, t.killed, t.test_plan, t.test_progress, t.custom_close, t.plan_md, t.review_guide, t.asking";
 
 fn readTicket(st: sqlite.Stmt, a: std.mem.Allocator) !Ticket {
     return .{
@@ -780,6 +788,7 @@ fn readTicket(st: sqlite.Stmt, a: std.mem.Allocator) !Ticket {
         .custom_close = try st.dupe(a, 28),
         .plan_md = try st.dupe(a, 29),
         .review_guide = try st.dupe(a, 30),
+        .asking = try st.dupe(a, 31),
     };
 }
 
@@ -969,6 +978,11 @@ pub fn setSession(ctx: Ctx, db: Db, id: i64, tmux_name: []const u8, session_id: 
 pub fn setTestPlan(ctx: Ctx, db: Db, id: i64, md: []const u8) Error!void {
     try db.exec("UPDATE tickets SET test_plan = ?2, test_progress = '' WHERE id = ?1", .{ id, md });
     try touch(ctx, db, id);
+}
+
+/// Keep the AskUserQuestion the ticket's session is asking ("" when none).
+pub fn setAsking(db: Db, id: i64, json: []const u8) Error!void {
+    try db.exec("UPDATE tickets SET asking = ?2 WHERE id = ?1", .{ id, json });
 }
 
 /// Keep the review guide Claude wrote for the ticket.

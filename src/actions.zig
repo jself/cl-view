@@ -703,7 +703,7 @@ pub fn answer(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, 
     const before = signals.Waiting.of(ctx, cfg, a, s);
     const statuses = claude.readStatuses(ctx, a, cfg) catch claude.StatusMap.empty;
     const info = statuses.get(s);
-    const pend = if (info) |i| signals.pendingFor(ctx, a, i) else null;
+    const pend = signals.waitingOn(ctx, a, t, info);
     const live = if (info) |i| i.status == .waiting or i.status == .blocked else false;
     const question = if (live) signals.isQuestion(pend, info) else std.mem.eql(u8, f.kind, board.flag_question);
 
@@ -720,8 +720,8 @@ pub fn answer(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, 
             }
         };
         if (qs.len == 0) {
-            // Not known in detail (Claude writes the call to the transcript
-            // only once it is answered): the menu on screen says how many.
+            // Not known in detail (a session started without the hook that
+            // keeps it): the menu on screen says how many.
             const pane = tmux.capturePlainLines(ctx, s, 60) catch "";
             defer if (pane.len > 0) ctx.gpa.free(pane);
             const n = signals.menuQuestions(pane);

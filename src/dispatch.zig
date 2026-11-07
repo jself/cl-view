@@ -206,12 +206,31 @@ fn hooksFile(ctx: Ctx, a: std.mem.Allocator, cfg: config.Config) ![]const u8 {
     const path = try std.fmt.allocPrint(a, "{s}/claude-hooks.json", .{dir});
     const stop = try std.fmt.allocPrint(a, "'{s}' ticket hook stop", .{exe});
     const notify = try std.fmt.allocPrint(a, "'{s}' ticket hook notify", .{exe});
+    // Some Claude Code versions write an AskUserQuestion call to the
+    // transcript only once it is answered; this keeps it while it is asked.
+    const ask = try std.fmt.allocPrint(a, "'{s}' ticket hook ask", .{exe});
     const json = try std.fmt.allocPrint(a,
-        \\{{"hooks":{{"Stop":[{{"hooks":[{{"type":"command","command":{f}}}]}}],"Notification":[{{"hooks":[{{"type":"command","command":{f}}}]}}]}}}}
+        \\{{"hooks":{{"Stop":[{{"hooks":[{{"type":"command","command":{f}}}]}}],"Notification":[{{"hooks":[{{"type":"command","command":{f}}}]}}],"PreToolUse":[{{"matcher":"AskUserQuestion","hooks":[{{"type":"command","command":{f}}}]}}]}}}}
         \\
-    , .{ std.json.fmt(stop, .{}), std.json.fmt(notify, .{}) });
+    , .{ std.json.fmt(stop, .{}), std.json.fmt(notify, .{}), std.json.fmt(ask, .{}) });
     try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = path, .data = json });
     return path;
+}
+
+test "the hooks file runs cl on a turn's end, notifications and AskUserQuestion" {
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp" };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cfg: config.Config = .{ .profiles = &.{}, .default = "", .operator = "", .board = .{ .dir = try tmp.dir.realPathFileAlloc(ctx.io, ".", a) } };
+    const path = try hooksFile(ctx, a, cfg);
+    const text = try std.Io.Dir.cwd().readFileAlloc(ctx.io, path, a, .limited(1 << 16));
+    const v = try std.json.parseFromSliceLeaky(std.json.Value, a, text, .{});
+    const pre = v.object.get("hooks").?.object.get("PreToolUse").?.array.items[0].object;
+    try std.testing.expectEqualStrings("AskUserQuestion", pre.get("matcher").?.string);
+    try std.testing.expect(std.mem.endsWith(u8, pre.get("hooks").?.array.items[0].object.get("command").?.string, "' ticket hook ask"));
 }
 
 /// Claude's arguments for a ticket's conversation: a new one with session id
@@ -1031,9 +1050,13 @@ const HookInput = struct {
     last_assistant_message: ?[]const u8 = null,
     message: ?[]const u8 = null,
     notification_type: ?[]const u8 = null,
+    /// PreToolUse: the tool call about to run.
+    tool_name: ?[]const u8 = null,
+    tool_use_id: ?[]const u8 = null,
+    tool_input: ?std.json.Value = null,
 };
 
-/// `cl ticket hook <stop|notify>`, run by Claude Code in a ticket's session
+/// `cl ticket hook <stop|notify|ask>`, run by Claude Code in a ticket's session
 /// with the event as JSON on stdin. Never fails: a hook's error would show
 /// up in Claude's session.
 pub fn hook(ctx: Ctx, cfg: config.Config, event: []const u8, input: []const u8) void {
@@ -1049,9 +1072,16 @@ pub fn hook(ctx: Ctx, cfg: config.Config, event: []const u8, input: []const u8) 
         // A finished turn: nothing is waiting on a prompt or question any more.
         board.clearFlagId(ctx, db, t.id, board.flag_input) catch {};
         board.clearFlagId(ctx, db, t.id, board.flag_question) catch {};
+        if (t.asking.len > 0) board.setAsking(db, t.id, "") catch {};
         board.logEvent(ctx, db, t.id, "turn ended", "") catch {};
         // Finishing still: Claude stopped before it ran `done --close`.
         if (t.finishing.len > 0 and t.stage != .done) stoppedFinishing(ctx, db, a, t, in.last_assistant_message orelse "") catch {};
+    } else if (std.mem.eql(u8, event, "ask")) {
+        // PreToolUse on AskUserQuestion: keep the call for signals.waitingOn.
+        // The question flag comes with the Notification that follows, once
+        // the menu is on screen.
+        const kept = (keptAsk(a, in) catch return) orelse return;
+        board.setAsking(db, t.id, kept) catch {};
     } else if (std.mem.eql(u8, event, "notify")) {
         const msg = in.message orelse "";
         const kind = in.notification_type orelse "";
@@ -1068,6 +1098,34 @@ pub fn hook(ctx: Ctx, cfg: config.Config, event: []const u8, input: []const u8) 
             board.setFlagId(ctx, db, t.id, board.flag_input, "auto", msg) catch {};
         }
     }
+}
+
+/// What the PreToolUse hook keeps of an AskUserQuestion call
+/// (board.Ticket.asking), null when it carries no input.
+fn keptAsk(a: std.mem.Allocator, in: HookInput) !?[]const u8 {
+    const call = in.tool_input orelse return null;
+    if (call != .object) return null;
+    return try std.fmt.allocPrint(a, "{f}", .{std.json.fmt(.{ .id = in.tool_use_id orelse "", .input = call }, .{})});
+}
+
+test "the AskUserQuestion hook keeps the questions the board answers from" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    // What Claude Code sends PreToolUse (trimmed).
+    const in = try std.json.parseFromSliceLeaky(HookInput, a,
+        \\{"session_id":"s","hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","tool_use_id":"toolu_1",
+        \\ "tool_input":{"questions":[{"question":"Fruits?","header":"Fruit","multiSelect":true,"options":[{"label":"Apple"},{"label":"Banana"}]}]}}
+    , .{ .ignore_unknown_fields = true });
+    const kept = (try keptAsk(a, in)).?;
+    const p = signals.keptAsk(a, kept).?;
+    try std.testing.expectEqualStrings("toolu_1", p.id);
+    const qs = try std.json.parseFromValueLeaky([]const actions.Question, a, p.input.object.get("questions").?, .{ .ignore_unknown_fields = true });
+    try std.testing.expect(qs[0].multiSelect);
+    // Answered as multi-select, with your own words: both need the questions.
+    const keys = try actions.questionKeys(a, qs, &.{"1,kiwi"});
+    try std.testing.expectEqualDeep(actions.Press{ .text = "kiwi" }, keys[5]);
+    try std.testing.expectEqual(@as(?[]const u8, null), try keptAsk(a, .{}));
 }
 
 /// Claude ended its turn while finishing a ticket, without taking it to Done:

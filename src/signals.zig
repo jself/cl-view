@@ -211,13 +211,68 @@ fn transcriptTail(ctx: Ctx, a: std.mem.Allocator, path: []const u8) ![]const u8 
     return data;
 }
 
+/// The newest part of a session's transcript, null when there is none to read.
+fn transcriptOf(ctx: Ctx, a: std.mem.Allocator, info: claude.Info) ?[]const u8 {
+    if (info.session_id.len == 0 or info.cwd.len == 0 or info.config_dir.len == 0) return null;
+    const path = claude.transcriptPath(a, info.config_dir, info.cwd, info.session_id) catch return null;
+    return transcriptTail(ctx, a, path) catch null;
+}
+
 /// The tool call a session is waiting on, from its transcript; null when
 /// none is pending or there is no transcript to read.
 pub fn pendingFor(ctx: Ctx, a: std.mem.Allocator, info: claude.Info) ?Pending {
-    if (info.session_id.len == 0 or info.cwd.len == 0 or info.config_dir.len == 0) return null;
-    const path = claude.transcriptPath(a, info.config_dir, info.cwd, info.session_id) catch return null;
-    const data = transcriptTail(ctx, a, path) catch return null;
-    return pendingTool(a, data);
+    return pendingTool(a, transcriptOf(ctx, a, info) orelse return null);
+}
+
+/// The AskUserQuestion call the PreToolUse hook kept on the ticket
+/// (board.Ticket.asking), null for none.
+pub fn keptAsk(a: std.mem.Allocator, asking: []const u8) ?Pending {
+    if (asking.len == 0) return null;
+    const Kept = struct { id: []const u8 = "", input: std.json.Value = .null };
+    const k = std.json.parseFromSliceLeaky(Kept, a, asking, .{ .ignore_unknown_fields = true }) catch return null;
+    if (k.input != .object) return null;
+    return .{ .id = k.id, .name = "AskUserQuestion", .input = k.input };
+}
+
+/// The tool call the ticket's session is waiting on: the pending one in its
+/// transcript, else the AskUserQuestion the hook kept. Some Claude Code
+/// versions (2.1.318) write an AskUserQuestion call to the transcript only
+/// once it is answered (or cancelled), so while its menu is open only the
+/// hook has it; once the transcript has the kept call's result, it is over.
+pub fn waitingOn(ctx: Ctx, a: std.mem.Allocator, t: board.Ticket, info: ?claude.Info) ?Pending {
+    const data = if (info) |i| transcriptOf(ctx, a, i) else null;
+    if (data) |d| if (pendingTool(a, d)) |p| return p;
+    return keptUnanswered(a, t.asking, data);
+}
+
+fn keptUnanswered(a: std.mem.Allocator, asking: []const u8, transcript: ?[]const u8) ?Pending {
+    const k = keptAsk(a, asking) orelse return null;
+    if (transcript) |d| if (k.id.len > 0) {
+        const result = std.fmt.allocPrint(a, "\"tool_use_id\":\"{s}\"", .{k.id}) catch return k;
+        if (std.mem.indexOf(u8, d, result) != null) return null;
+    };
+    return k;
+}
+
+test keptUnanswered {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const kept =
+        \\{"id":"toolu_9","input":{"questions":[{"question":"Which?","multiSelect":true,"options":[{"label":"A"},{"label":"B"}]}]}}
+    ;
+    const p = keptUnanswered(a, kept, "{\"type\":\"user\"}\n").?;
+    try std.testing.expectEqualStrings("AskUserQuestion", p.name);
+    try std.testing.expectEqualStrings("toolu_9", p.id);
+    try std.testing.expect(p.input.object.get("questions").?.array.items.len == 1);
+    // No transcript to check against: the kept call stands.
+    try std.testing.expect(keptUnanswered(a, kept, null) != null);
+    // The transcript has the call but no result yet: still open.
+    try std.testing.expect(keptUnanswered(a, kept, "{\"type\":\"tool_use\",\"id\":\"toolu_9\"}\n") != null);
+    // The transcript has its result: answered (or cancelled) already.
+    try std.testing.expect(keptUnanswered(a, kept, "{\"tool_use_id\":\"toolu_9\"}\n") == null);
+    try std.testing.expect(keptUnanswered(a, "", null) == null);
+    try std.testing.expect(keptUnanswered(a, "not json", null) == null);
 }
 
 /// What a session waits on before it is answered, to tell afterwards
@@ -275,9 +330,9 @@ pub const Ask = struct {
 };
 
 /// Whether a waiting session is on an AskUserQuestion menu rather than a
-/// permission prompt: the pending tool call says so, or, when the transcript
-/// doesn't have it (Claude writes the call only once it is answered), the
-/// registry's "input needed" (a permission prompt is "permission prompt").
+/// permission prompt: the pending tool call says so (see `waitingOn`), or,
+/// when nothing has it (a session started without the hook), the registry's
+/// "input needed" (a permission prompt is "permission prompt").
 pub fn isQuestion(pend: ?Pending, info: ?claude.Info) bool {
     if (pend) |p| return std.mem.eql(u8, p.name, "AskUserQuestion");
     const i = info orelse return false;
@@ -370,7 +425,7 @@ pub fn sync(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, info:
     const pane = try a.dupe(u8, pane_raw);
     if (pane_raw.len > 0) ctx.gpa.free(pane_raw);
     var ask: Ask = .{ .kind = "permission", .options = try menuOptions(a, pane) };
-    const pend: ?Pending = if (info) |inf| pendingFor(ctx, a, inf) else null;
+    const pend = waitingOn(ctx, a, t, info);
     const asking = isQuestion(pend, info);
     if (pend) |p| {
         ask.tool = p.name;
