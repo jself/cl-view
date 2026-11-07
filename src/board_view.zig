@@ -472,6 +472,7 @@ pub fn detailLines(a: std.mem.Allocator, now: i64, t: board.Ticket, status: Card
     if (t.tmux.len > 0 and t.tmux[0] != '(') try add(a, &l, try std.fmt.allocPrint(a, "session {s}", .{t.tmux}), dim, 0);
     if (t.worktree.len > 0) try add(a, &l, try std.fmt.allocPrint(a, "worktree {s}  branch {s}", .{ t.worktree, t.branch }), dim, 0);
     if (t.park) |p| try add(a, &l, try std.fmt.allocPrint(a, "parked {s} ago: {s}", .{ try ui.ageText(a, now - p.at), p.reason }), .{ .fg = .{ .index = 5 } }, 0);
+    if (t.drift) |d| if (t.stage != .done) try add(a, &l, try std.fmt.allocPrint(a, "will conflict with {s}: {s} (`cl ticket rebase {s}`)", .{ d.onto, try std.mem.replaceOwned(u8, a, std.mem.trim(u8, d.files, "\n"), "\n", ", "), t.key }), .{ .fg = .{ .index = 3 } }, 0);
     if (t.killed and t.park == null) try add(a, &l, try std.fmt.allocPrint(a, "its session was killed; `cl ticket start {s}` restarts it", .{t.key}), dim, 0);
     if (t.finishing.len > 0) try add(a, &l, try std.fmt.allocPrint(a, "finishing ({s}): it goes to Done once Claude is through", .{t.finishing}), .{ .fg = .{ .index = 2 } }, 0);
     if (t.custom_close.len > 0) try add(a, &l, try std.fmt.allocPrint(a, "custom close: {s}", .{t.custom_close}), .{ .fg = .{ .index = 2 } }, 0);

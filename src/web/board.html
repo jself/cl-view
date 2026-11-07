@@ -27,7 +27,7 @@
     --review: #9cc6ff; --review-bg: #11294a; --testing: #7ee6d6; --testing-bg: #0f3330;
     --other: #d6d7da; --other-bg: #2c2e33; --finishing: #b6e3a0; --finishing-bg: #1b3317; --parked: #c4b5fd; --parked-bg: #2a2342;
     --umbrella: #e0692e; /* burnt orange, well apart from parked's lilac */
-    --conflict: #ffb4b4; --conflict-bg: #3d1a1a;
+    --conflict: #ffb4b4; --conflict-bg: #3d1a1a; --drift: #fdba74; --drift-bg: #3a2410;
     /* One color per board column (stage): a stage badge and its column header's dot. */
     --st-backlog: #8b8e94; --st-backlog-bg: #26282c; --st-planning: #cdb8ff; --st-planning-bg: #2c2440; --st-queued: #93c5fd; --st-queued-bg: #172437;
     --st-running: #facc15; --st-running-bg: #352c08; --st-review: #9cc6ff; --st-review-bg: #11294a; --st-testing: #7ee6d6; --st-testing-bg: #0f3330;
@@ -206,6 +206,7 @@
   .f-input { background: var(--input-bg); color: var(--input); } .f-question { background: var(--question-bg); color: var(--question); }
   .f-review { background: var(--review-bg); color: var(--review); } .f-testing { background: var(--testing-bg); color: var(--testing); }
   .f-conflict { background: var(--conflict-bg); color: var(--conflict); }
+  .f-drift { background: var(--drift-bg); color: var(--drift); }
   .f-alert { background: #e3b341; color: #17150f; font-weight: 600; }
   .f-finishing { background: var(--finishing-bg); color: var(--finishing); }
   /* Parked: waiting on something outside cl. The reason is cut to the card's width. */
@@ -224,6 +225,10 @@
   .blockform input { width: calc(120 * var(--u)); }
   .parkbox { border: 1px solid var(--parked-bg); background: color-mix(in srgb, var(--parked-bg) 45%, transparent); border-radius: calc(10 * var(--u));
              padding: calc(10 * var(--u)) calc(12 * var(--u)); display: grid; gap: calc(4 * var(--u)); font-size: calc(13 * var(--u)); }
+  .driftbox { border: 1px solid var(--drift-bg); background: color-mix(in srgb, var(--drift-bg) 45%, transparent); border-radius: calc(10 * var(--u));
+              padding: calc(10 * var(--u)) calc(12 * var(--u)); display: grid; gap: calc(6 * var(--u)); font-size: calc(13 * var(--u)); margin-top: calc(10 * var(--u)); }
+  .driftbox code { font: calc(12 * var(--u)) var(--mono); overflow-wrap: anywhere; }
+  .driftbox .btn { justify-self: start; }
   .parkbox code { font: calc(12 * var(--u)) var(--mono); overflow-wrap: anywhere; }
 
   /* Lanes: a grid of panels, a row per project and a column per stage. The
@@ -691,7 +696,10 @@ const reviewNote = (t) => { if (!t.autoreview || reviewing(t)) return "";
 // An automated review running on it (autoreview.zig); the detail checks it's alive.
 const reviewing = (t) => (t.autoreview || "").includes('"status":"running"');
 const reviewPill = (t) => reviewing(t) ? `<span class="pill" title="A separate Claude is reviewing its changes">reviewing</span>` : "";
-const pills = (t) => cardFlags(t).length || t.finishing || t.custom_close || t.park || reviewing(t) ? `<span class="pills">${reviewPill(t)}${parkPill(t)}${customPill(t)}${finishPill(t)}${cardFlags(t).map((f) => `<span class="pill ${flagClass(f.kind)}">${esc(flagLabel(f))}</span>`).join("")}</span>` : "";
+// Its change would conflict with its target if rebased now (drift.zig): an early warning, not a flag.
+const driftFiles = (d) => d.files.split("\n").filter(Boolean);
+const driftPill = (t) => t.drift && t.stage !== "done" ? `<span class="pill f-drift" title="${esc(`Rebasing it onto ${t.drift.onto} now would conflict in: ${driftFiles(t.drift).join(", ")}`)}">Will conflict</span>` : "";
+const pills = (t) => cardFlags(t).length || t.finishing || t.custom_close || t.park || t.drift || reviewing(t) ? `<span class="pills">${reviewPill(t)}${parkPill(t)}${driftPill(t)}${customPill(t)}${finishPill(t)}${cardFlags(t).map((f) => `<span class="pill ${flagClass(f.kind)}">${esc(flagLabel(f))}</span>`).join("")}</span>` : "";
 // "(starting)" is the dispatcher's claim while it opens the session.
 // A Backlog or Queued ticket whose session is gone hasn't ended: it's waiting to start.
 // A killed one waits for you to restart it.
@@ -1293,7 +1301,7 @@ function renderDetailInner() {
     <h1>${esc(t.title)}</h1>
     <div class="facts"><span class="stat">${shell}${status}</span>${ws}${t.onto ? `<span class="mono" title="It starts from this branch and merges into it, not trunk${t.onto_own ? "" : " (the project's target)"}">onto ${esc(t.onto)}</span>` : ""}${t.tmux ? `<span class="mono">${esc(t.tmux)}</span>` : ""}
       ${t.round > 1 ? `<span>round ${t.round}</span>` : ""}${t.plan ? `<span>plan first${t.skill ? " · " + esc(t.skill) : ""}</span>` : ""}${parent}</div>
-    ${acts.length ? `<div class="actions">${acts.join("")}</div>` : ""}${parkBox(t)}${depBox(d)}
+    ${acts.length ? `<div class="actions">${acts.join("")}</div>` : ""}${parkBox(t)}${driftBox(t, liveSession)}${depBox(d)}
     <div class="tabs" role="tablist">${tabs.map(([k, l]) => `<button type="button" role="tab" class="${state.tab === k ? "on" : ""}" aria-selected="${state.tab === k}" data-tab="${k}">${esc(l)}</button>`).join("")}</div>
     <div id="tabBody">${state.tab === tabs[0][0] && (t.body || "").trim() ? `<div class="desc">${descHtml(t.body)}</div>` : ""}${tabHtml(d)}</div>`;
 }
@@ -1355,6 +1363,17 @@ function depBox(d) {
         <datalist id="blockKeys">${choices}</datalist><button type="submit" class="btn">Add</button></form></div>
     ${held ? `<div class="muted">cl starts it once ${waitingOn(t).length > 1 ? "they're" : "it's"} done.</div>` : ""}
     ${blocks.length ? `<div class="deprow"><strong>Blocks</strong> ${blocks.map((k) => chip(k, "")).join(" ")}</div>` : ""}</div>`;
+}
+// Will conflict: the files, and Rebase now, which asks its Claude (idle, on this ticket) to rebase and settle them.
+function driftBox(t, live) {
+  const d = t.drift; if (!d || t.stage === "done") return "";
+  const files = driftFiles(d);
+  const back = t.stage === "review" || t.stage === "testing" ? "; it goes back to Running and says done again after" : "";
+  return `<div class="driftbox"><div><strong>Will conflict with ${esc(d.onto)}</strong> · found ${ago(d.at) === "now" ? "just now" : ago(d.at) + " ago"}</div>
+    <div class="muted">${esc(d.onto)} has moved on since its change was made; rebasing onto it now would conflict in:</div>
+    <code>${files.map(esc).join("<br>")}</code>
+    ${live ? `<button type="button" class="btn" data-act="rebase" title="Ask Claude to rebase its change onto ${esc(d.onto)} and settle the conflicts${back}. Only while its session is idle on this ticket">Rebase now</button>`
+      : `<div class="muted">Start its session to have Claude rebase it.</div>`}</div>`;
 }
 function parkBox(t) {
   const p = t.park; if (!p) return "";
@@ -2180,6 +2199,7 @@ async function onClick(e) {
     try { const r = await act(key, "unpark", { no_resume: ds.act === "unpark-only" }); toast(unparkMsg(key, r.resumed)); } catch {}
     return;
   }
+  if (ds.act === "rebase") return act(key, "rebase", {}, "Asked Claude to rebase and settle the conflicts").catch(() => {});
   if (ds.act === "start") return act(key, "start", {}, state.detail?.ticket.killed || state.detail?.ticket.session_id ? "Restarted" : "Started");
   if (ds.act === "kill") {
     const d = state.detail; if (!d || !await confirmKill(d)) return;

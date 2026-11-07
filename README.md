@@ -1199,6 +1199,42 @@ Needs You with the ticket's key and why, Done or not:
 A flag rather than a prompt at Close: the board, the CLI and Claude all close
 tickets, and only the result says whether the work is on trunk.
 
+#### Before it gets there: Will conflict
+
+Conflicts needn't wait for the merge. The dispatcher (`cl web`, `cl t
+dispatch`) test-rebases every open ticket's jj change onto its target (trunk,
+or its `--onto` branch) once a minute, on a thread of its own, whenever the
+target or the change has moved since the last test. First it checks whether
+the files the change touches overlap the ones the target changed; only when
+they do does it merge for real, with `git merge-tree` (renames not followed,
+as jj's rebase doesn't follow them either). The test itself changes no working copy,
+bookmark or jj operation. When the target moves, each ticket's workspace is
+snapshotted first (a plain `jj log` there, as any jj command does), so work jj
+hasn't recorded yet counts; that can add a snapshot to jj's operation log.
+Each jj or git command gets 30 seconds. A ticket whose result can't be
+told (its target bookmark gone, say) loses its warning rather than keeping
+an old one.
+
+A ticket that would conflict gets a **Will conflict** pill on its card (the
+files in its tooltip), a box in its popup listing the files, a "will conflict"
+event, and a line in `cl t show` (`drift` in `--json`). It isn't a flag:
+nothing goes to Needs You, and nothing is typed into its session. The pill
+goes by itself once the change no longer conflicts (rebased, or trunk moved
+again).
+
+```
+cl t rebase QA-1      Rebase now: Claude rebases onto the target and settles the conflicts
+```
+
+Rebase now (the popup's button, or `cl t rebase`) types that into the
+ticket's session: `jj rebase -b <change> -d '"<target>"'`, then settle what jj
+records, check it builds, and carry on. It is only sent into a session that
+is idle and on that ticket, so a working session isn't interrupted and a
+question isn't answered by accident; otherwise it says why and waits for you
+to try again. A ticket in Review or Testing goes back to Running, as a sent
+comment does, and Claude says done again after. Git branches (no jj change)
+aren't checked.
+
 #### After merge
 
 A project can have a command cl runs once a ticket is merged, to rebuild,

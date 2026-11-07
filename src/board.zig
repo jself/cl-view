@@ -273,6 +273,20 @@ pub const Ticket = struct {
     flags: []Flag = &.{},
     /// Set while it is parked.
     park: ?Park = null,
+    /// Set while its change would conflict with its target (trunk, or its
+    /// `onto` branch) if rebased onto it now (drift.zig).
+    drift: ?Drift = null,
+};
+
+/// A ticket's change would conflict with its target if rebased now: the
+/// dispatcher's test rebase (drift.zig) found it.
+pub const Drift = struct {
+    /// The files that would conflict, one per line.
+    files: []const u8,
+    /// The bookmark it was tested against (trunk, or its `onto` branch).
+    onto: []const u8,
+    /// When that was found.
+    at: i64,
 };
 
 pub const Error = error{
@@ -441,6 +455,21 @@ const parks_schema =
     \\);
 ;
 
+/// The last test rebase of each open ticket's change onto its target
+/// (drift.zig): `key` is what was tested (the target's commit, the change's
+/// parent and tip), so it is tested again only when one of them moves;
+/// `files` the files that would conflict, "" for none. Made whatever the
+/// version says, as the columns above are.
+const drift_schema =
+    \\CREATE TABLE IF NOT EXISTS drift (
+    \\  ticket INTEGER PRIMARY KEY REFERENCES tickets(id) ON DELETE CASCADE,
+    \\  key TEXT NOT NULL,
+    \\  files TEXT NOT NULL DEFAULT '',
+    \\  onto TEXT NOT NULL DEFAULT '',
+    \\  at INTEGER NOT NULL
+    \\);
+;
+
 /// Dependencies: `ticket` doesn't start until `blocker` is Done. Made
 /// whatever the version says, as the columns above are.
 const deps_schema =
@@ -499,6 +528,8 @@ pub fn migrate(db: Db) !void {
         // Parks on a PR, and the steps for after one merges.
         _ = try addColumn(db, "parks", "pr", "TEXT NOT NULL DEFAULT ''");
         _ = try addColumn(db, "tickets", "pr_then", "TEXT NOT NULL DEFAULT ''");
+        // Early warnings of conflicts with trunk.
+        try db.execMulti(drift_schema);
     }
     if (have >= version) return;
     // Version 1 had no sub-tickets, version 2 no planning skill.
@@ -518,6 +549,7 @@ pub fn migrate(db: Db) !void {
     try db.execMulti(schema);
     try db.execMulti(parks_schema);
     try db.execMulti(deps_schema);
+    try db.execMulti(drift_schema);
     try db.execMulti(std.fmt.comptimePrint("PRAGMA user_version = {d}", .{version}));
 }
 
@@ -1034,6 +1066,7 @@ pub fn getTicket(db: Db, a: std.mem.Allocator, key: []const u8) Error!Ticket {
     var t = try readTicket(st, a);
     t.flags = try activeFlags(db, a, t.id);
     t.park = try parkOf(db, a, t.id);
+    t.drift = try driftOf(db, a, t.id);
     t.blocked_by = try blockers(db, a, t.id);
     return t;
 }
@@ -1149,6 +1182,7 @@ pub fn listTickets(db: Db, a: std.mem.Allocator, f: Filter) Error![]Ticket {
     for (out.items) |*t| {
         t.flags = try activeFlags(db, a, t.id);
         t.park = try parkOf(db, a, t.id);
+        t.drift = try driftOf(db, a, t.id);
         t.blocked_by = try blockers(db, a, t.id);
     }
     return out.toOwnedSlice(a);
@@ -1434,6 +1468,7 @@ pub fn removeTicket(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8) Err
     try db.exec("DELETE FROM deps WHERE ticket = ?1 OR blocker = ?1", .{t.id});
     // Foreign keys aren't enforced, and a new ticket may get its id back.
     try db.exec("DELETE FROM parks WHERE ticket = ?1", .{t.id});
+    try db.exec("DELETE FROM drift WHERE ticket = ?1", .{t.id});
     const pid = try parentId(db, t.id);
     try db.exec("DELETE FROM tickets WHERE id = ?1", .{t.id});
     if (pid) |p| if (t.stage != .done) {
@@ -2038,6 +2073,45 @@ pub fn setBase(db: Db, id: i64, base: []const u8) Error!void {
 /// Set the queue-mode target (once the dispatcher made a session for it).
 pub fn setTarget(db: Db, id: i64, target: []const u8) Error!void {
     try db.exec("UPDATE tickets SET target = ?2 WHERE id = ?1", .{ id, target });
+}
+
+// ---- drift ----
+
+/// Its last test rebase when that found conflicts (see `Drift`).
+fn driftOf(db: Db, a: std.mem.Allocator, id: i64) Error!?Drift {
+    // A Done ticket's result is history until the next pass prunes it.
+    var st = try db.query("SELECT d.files, d.onto, d.at FROM drift d JOIN tickets t ON t.id = d.ticket WHERE d.ticket = ?1 AND d.files != '' AND t.stage != 'done'", .{id});
+    defer st.finalize();
+    if (!try st.step()) return null;
+    return .{ .files = try st.dupe(a, 0), .onto = try st.dupe(a, 1), .at = st.int(2) };
+}
+
+pub const DriftRow = struct { key: []const u8, files: []const u8 };
+
+/// What its last test rebase tested and found; null when it had none.
+pub fn driftRow(db: Db, a: std.mem.Allocator, id: i64) Error!?DriftRow {
+    var st = try db.query("SELECT key, files FROM drift WHERE ticket = ?1", .{id});
+    defer st.finalize();
+    if (!try st.step()) return null;
+    return .{ .key = try st.dupe(a, 0), .files = try st.dupe(a, 1) };
+}
+
+/// Keep a test rebase's result: `files` "" when it was clean.
+pub fn setDrift(db: Db, id: i64, key: []const u8, files: []const u8, onto: []const u8, at: i64) Error!void {
+    try db.exec("INSERT OR REPLACE INTO drift (ticket, key, files, onto, at) VALUES (?1, ?2, ?3, ?4, ?5)", .{ id, key, files, onto, at });
+}
+
+/// Forget a ticket's result, so it is tested afresh; true when that took a
+/// warning away.
+pub fn dropDrift(db: Db, id: i64) Error!bool {
+    const warned = (try db.int("SELECT 1 FROM drift WHERE ticket = ?1 AND files != ''", .{id})) != null;
+    try db.exec("DELETE FROM drift WHERE ticket = ?1", .{id});
+    return warned;
+}
+
+/// Forget the results of tickets that are Done or have no change of their own.
+pub fn pruneDrift(db: Db) Error!void {
+    try db.execMulti("DELETE FROM drift WHERE ticket NOT IN (SELECT id FROM tickets WHERE stage != 'done' AND change_id != '')");
 }
 
 // ---- parks ----

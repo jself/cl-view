@@ -20,6 +20,7 @@ const history = @import("history.zig");
 const review = @import("review.zig");
 const autoreview = @import("autoreview.zig");
 const park = @import("park.zig");
+const drift = @import("drift.zig");
 const actions = @import("actions.zig");
 const images = @import("images.zig");
 
@@ -331,11 +332,11 @@ fn carryConversation(ctx: Ctx, cfg: config.Config, a: std.mem.Allocator, t: boar
 }
 
 /// Live sessions and their statuses, read once per dispatcher pass.
-const View = struct {
+pub const View = struct {
     sessions: []tmux.Session,
     statuses: claude.StatusMap,
 
-    fn read(ctx: Ctx, a: std.mem.Allocator, cfg: config.Config) !View {
+    pub fn read(ctx: Ctx, a: std.mem.Allocator, cfg: config.Config) !View {
         return .{ .sessions = try tmux.list(ctx, a), .statuses = try claude.readStatuses(ctx, a, cfg) };
     }
 
@@ -348,7 +349,7 @@ const View = struct {
         return self.find(tmux_name) != null;
     }
 
-    fn idle(self: View, ctx: Ctx, tmux_name: []const u8) bool {
+    pub fn idle(self: View, ctx: Ctx, tmux_name: []const u8) bool {
         const s = self.find(tmux_name) orelse return false;
         return switch (claude.statusFor(ctx, self.statuses, s)) {
             .idle, .shell => true,
@@ -1049,6 +1050,9 @@ pub fn interrupt(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocato
 
 /// Run the dispatcher until killed, every few seconds.
 pub fn loop(ctx: Ctx, cfg: config.Config, log: *const fn ([]const u8) void) void {
+    // Open tickets' changes test-rebased onto their target as it moves (a
+    // minute apart), on a thread of its own: jj can be slow.
+    if (std.Thread.spawn(.{}, drift.loop, .{ ctx, cfg })) |th| th.detach() else |_| log("dispatch: the conflict check didn't start");
     while (true) : (ctx.sleepMs(3000)) {
         const db = board.open(ctx, cfg) catch {
             log("dispatch: cannot open the board");

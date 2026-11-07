@@ -410,6 +410,7 @@ test {
     std.testing.refAllDecls(@import("db.zig"));
     std.testing.refAllDecls(ticket_cli);
     std.testing.refAllDecls(@import("dispatch.zig"));
+    std.testing.refAllDecls(@import("drift.zig"));
     std.testing.refAllDecls(@import("worktree.zig"));
     std.testing.refAllDecls(@import("signals.zig"));
     std.testing.refAllDecls(dictate);

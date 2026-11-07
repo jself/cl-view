@@ -37,6 +37,7 @@ const web = @import("web.zig");
 const operator = @import("operator.zig");
 const after_merge = @import("after_merge.zig");
 const park = @import("park.zig");
+const drift = @import("drift.zig");
 const images = @import("images.zig");
 const alerts = @import("alerts.zig");
 const voice = @import("voice.zig");
@@ -179,6 +180,9 @@ pub fn handle(ctx: Ctx, cfg: config.Config, req: *std.http.Server.Request, path:
             error.Busy => .{ .conflict, "Claude is working in its session or waiting on you; it can move once it is idle" },
             error.NoChange => .{ .conflict, "its work has no jj change of its own to move with it" },
             error.NotParked => .{ .conflict, "it isn't parked" },
+            error.NoDrift => .{ .conflict, "its change no longer conflicts with its target" },
+            error.Working => .{ .conflict, "Claude is working in its session or waiting on you; Rebase now asks only once it is idle, so nothing is cut off or answered by accident" },
+            error.SessionElsewhere => .{ .conflict, "its session is on another ticket now; Rebase now waits until it is back on this one" },
             error.BadPr => .{ .bad_request, "the PR is its URL (https://github.com/<owner>/<repo>/pull/<n>), #<n>, or <owner>/<repo>#<n>" },
             error.NoRemote => .{ .bad_request, "its checkout has no GitHub origin remote to find that PR number in; give the PR's URL" },
             error.Finished => .{ .conflict, "it's done; there's nothing to park" },
@@ -626,6 +630,8 @@ fn ticketAction(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator
         const r = try park.park(ctx, db, a, key, .{ .reason = b.reason orelse "", .until = b.until orelse "", .pr = b.pr orelse "", .every = every, .max = max });
         try park.stopSession(ctx, cfg, db, a, key);
         return ok(req, a, .{ .session = r.session orelse "", .others = r.others });
+    } else if (eql(u8, action, "rebase")) {
+        try drift.rebase(ctx, cfg, db, a, key);
     } else if (eql(u8, action, "unpark")) {
         const r = try park.unpark(ctx, cfg, db, a, key, !(b.no_resume orelse false));
         return ok(req, a, .{ .resumed = if (r.resumed) |x| @tagName(x) else "" });

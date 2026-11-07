@@ -15,6 +15,7 @@ const review = @import("review.zig");
 const after_merge = @import("after_merge.zig");
 const autoreview = @import("autoreview.zig");
 const park = @import("park.zig");
+const drift = @import("drift.zig");
 const ticket_watch = @import("ticket_watch.zig");
 const alerts = @import("alerts.zig");
 
@@ -126,6 +127,10 @@ pub const ticket_usage =
     \\                              The dispatcher never starts a parked ticket, even in Queued
     \\  unpark <key> [--no-resume]   end the park now and resume its session (--no-resume: just
     \\                              end it; the session stays stopped)
+    \\  rebase <key>                its change will conflict with its target (the dispatcher test-
+    \\                              rebases open tickets' changes as trunk moves; show says so): ask
+    \\                              its Claude to rebase onto it and settle the conflicts. Only into
+    \\                              an idle session on that ticket; review/testing go back to running
     \\  approve <key> [--spin-off] [--merge | --pr [--then <steps>] | --tell <text> | --close]
     \\                              plan → queued (a new session builds it, told the plan),
     \\                              review → testing, testing → done
@@ -901,6 +906,20 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         park.stopSession(ctx, cfg, db, a, t.key) catch |e| boardFail(db, e, "ticket");
         return;
     }
+    if (std.mem.eql(u8, cmd, "rebase")) {
+        args.only(&.{}, ticket_usage);
+        if (pos.len != 1) fail("usage: cl ticket rebase <key>", .{});
+        const was = (board.getTicket(db, a, pos[0]) catch |e| boardFail(db, e, "ticket")).stage;
+        drift.rebase(ctx, cfg, db, a, pos[0]) catch |e| switch (e) {
+            error.NoDrift => fail("{s}'s change doesn't conflict with its target (as of the dispatcher's last check, a minute apart)", .{pos[0]}),
+            error.NoSession => fail("{s} has no live session; start it again first", .{pos[0]}),
+            error.SessionElsewhere => fail("{s}'s session is on another ticket now; try again once it is back on this one", .{pos[0]}),
+            error.Working => fail("Claude is working in {s}'s session or waiting on you; try again once it is idle", .{pos[0]}),
+            else => boardFail(db, e, "ticket"),
+        };
+        const t = board.getTicket(db, a, pos[0]) catch |e| boardFail(db, e, "ticket");
+        return out(try std.fmt.allocPrint(a, "{s}: asked Claude to rebase onto {s} and settle the conflicts{s}\n", .{ t.key, if (t.drift) |d| d.onto else "its target", if (was == .review or was == .testing) "; it went back to running" else "" }));
+    }
     if (std.mem.eql(u8, cmd, "unpark")) {
         args.only(&.{"--no-resume"}, ticket_usage);
         if (pos.len != 1) fail("usage: cl ticket unpark <key> [--no-resume]", .{});
@@ -1093,6 +1112,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         tmux.requireServer(ctx);
         if (args.has("--once")) {
             const n = dispatch.tick(ctx, cfg, db) catch |e| boardFail(db, e, "ticket");
+            drift.once(ctx, cfg);
             return out(try std.fmt.allocPrint(a, "started {d}\n", .{n}));
         }
         dispatch.loop(ctx, cfg, &logLine);
@@ -1368,6 +1388,7 @@ fn showText(ctx: Ctx, a: std.mem.Allocator, t: board.Ticket, blocks: []const []c
     if (t.finishing.len > 0) try w.print("finishing: {s} (Claude is {s}; it goes to done after)\n", .{ t.finishing, finishingWhat(t.finishing) });
     if (t.worktree.len > 0) try w.print("worktree: {s}   branch: {s}\n", .{ try ctx.shortenHomeIn(a, t.worktree), t.branch });
     if (t.change.len > 0) try w.print("change: {s}{s}{s}\n", .{ t.change[0..@min(t.change.len, 12)], if (t.branch.len > 0) "   bookmark: " else "", t.branch });
+    if (t.drift) |d| try w.print("will conflict with {s}: {s} (found {s}; `cl ticket rebase {s}` asks Claude to rebase and settle it)\n", .{ d.onto, try drift.oneLine(a, d.files), try stamp(a, d.at), t.key });
     for (t.flags) |f| try w.print("flag: {s} ({s}, {s}){s}{s}\n", .{ f.kind, f.source, try stamp(a, f.at), if (f.detail.len > 0) ": " else "", f.detail });
     if (t.body.len > 0) try w.print("\n{s}\n", .{t.body});
     if (subs.len > 0) {
