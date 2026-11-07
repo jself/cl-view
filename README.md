@@ -362,6 +362,8 @@ cl window install
   inspector. F5 reloads as well, from the board, a terminal or the chat
   (so a terminal never gets F5), and Ctrl+F5 or Shift+F5 reloads past the
   cache. On the board, Ctrl+= / Ctrl+- resize it too (see `web.font_size`).
+- With voice on, Ctrl+Shift+Space in a terminal dictates into it (Voice,
+  "Dictating into a session").
 - The clipboard is the desktop's. In a terminal, a copy in tmux (a mouse
   selection) or by a program in it (Claude Code, via OSC 52) lands there;
   so does Ctrl+Shift+C on a Shift+drag selection. Ctrl+Shift+V pastes. A
@@ -501,6 +503,33 @@ Then restart the server (`cl web stop`) and reload the board.
 - Where the time goes: whisper (2–4 s), the operator's turn, and Piper. For a
   quicker turn, set `operator.model` (above); for quicker speech, run Piper
   as a server. The board hears about `cl say` within ~150 ms (a long poll).
+
+### Dictating into a session
+
+The same mic types into a session instead of talking to the operator. In a
+session's terminal page (opened from the board, in `cl window` or a browser),
+hold **Ctrl+Shift+Space** while you speak and let go, or tap it, speak, and
+tap it again; the mic button in the key bar under the terminal does the same
+with a click (or a tap on a phone). Esc cancels, while it listens or while
+the words are being worked out. `cl web` turns the recording
+into text with `voice.stt`, as above, and the page pastes it into the
+session, so the words land at Claude's prompt (with a space after them)
+without being sent: read them, fix them, press Enter. A box at the top right
+shows what it's doing, and why when it fails.
+
+It needs only `voice.stt`: without it there is no mic button and
+Ctrl+Shift+Space goes to the terminal as usual. Holding works because the
+page sees the key go up, which a terminal inside tmux never passes on.
+
+- It's the browser's microphone, so the HTTPS rule above applies: `cl
+  window`, a browser on this machine, or a phone through `tailscale serve`.
+- Not in a plain terminal attached to tmux (`cl attach` in Konsole, say):
+  there's no page to record. Claude Code's own `/voice` is the one for that.
+  It records with SoX or `arecord` on the machine Claude runs on (so not a
+  phone's mic, and not here until one of them is installed: `/voice` says so)
+  and transcribes on Anthropic's servers, not locally. If holding Space
+  doesn't work through tmux, `"voice": {"mode": "tap"}` in Claude's
+  settings makes it a toggle.
 
 ## Board
 

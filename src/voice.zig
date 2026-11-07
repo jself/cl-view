@@ -8,6 +8,9 @@
 //! ms). The board polls for a newer one and plays it, through `voice.tts`
 //! when that is set and the browser's own speech otherwise.
 //!
+//! The terminal page uses `voice.stt` too, to dictate into a session: it
+//! gets the words back (POST /api/voice/text) and pastes them itself.
+//!
 //! Nothing here runs unless `voice.stt` is set: cl works the same without it.
 const std = @import("std");
 const Ctx = @import("ctx.zig");

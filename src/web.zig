@@ -22,6 +22,8 @@ const vendor = .{
     .{ "/xterm.css", "text/css", @embedFile("web/vendor/xterm.css") },
     .{ "/addon-fit.js", "text/javascript", @embedFile("web/vendor/addon-fit.js") },
     .{ "/addon-web-links.js", "text/javascript", @embedFile("web/vendor/addon-web-links.js") },
+    // Recording for voice, shared by the board and the terminal page.
+    .{ "/mic.js", "text/javascript", @embedFile("web/mic.js") },
     // What a phone needs to install the board as an app (README, "On a phone").
     .{ "/manifest.webmanifest", "application/manifest+json", @embedFile("web/manifest.webmanifest") },
     .{ "/icon.svg", "image/svg+xml", @embedFile("window/cl.svg") },

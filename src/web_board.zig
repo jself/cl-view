@@ -114,6 +114,10 @@ pub fn handle(ctx: Ctx, cfg: config.Config, req: *std.http.Server.Request, path:
         voiceAsk(ctx, cfg, a, req) catch |err| try fail(req, voiceStatus(err), try voiceDetail(a, err, "voice.stt"));
         return true;
     }
+    if (post and std.mem.eql(u8, what, "voice") and std.mem.eql(u8, name, "text")) {
+        voiceText(ctx, cfg, a, req) catch |err| try fail(req, voiceStatus(err), try voiceDetail(a, err, "voice.stt"));
+        return true;
+    }
 
     const body: Body = if (post) readBody(req, a) catch {
         try fail(req, .bad_request, "the request body isn't valid JSON");
@@ -273,6 +277,8 @@ fn ok(req: *std.http.Server.Request, a: std.mem.Allocator, value: anytype) !void
 fn route(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: *std.http.Server.Request, post: bool, what: []const u8, name: []const u8, action: []const u8, b: Body) !void {
     if (std.mem.eql(u8, what, "voice")) {
         if (!post and std.mem.eql(u8, name, "reply")) return voiceReply(ctx, cfg, a, req, action);
+        // The terminal page's mic shows only with voice.stt.
+        if (!post and std.mem.eql(u8, name, "on")) return ok(req, a, .{ .on = cfg.voice.stt.len > 0 });
         if (post and std.mem.eql(u8, name, "speak")) return voiceSpeak(ctx, cfg, a, req, b.text orelse "");
         return error.NotFound;
     }
@@ -741,16 +747,31 @@ fn voiceDetail(a: std.mem.Allocator, err: anyerror, setting: []const u8) ![]cons
 /// POST /api/voice/ask with a WAV: transcribe it and type it into the
 /// operator. `since` is the time to poll /api/voice/reply/<since> from.
 fn voiceAsk(ctx: Ctx, cfg: config.Config, a: std.mem.Allocator, req: *std.http.Server.Request) !void {
-    const len: usize = @intCast(req.head.content_length orelse 0);
-    if (len > voice.max_wav) return error.TooBig;
-    const wav = try a.alloc(u8, len);
-    const r = try req.readerExpectContinue(&.{});
-    try r.readSliceAll(wav);
+    const wav = try readWav(a, req);
     if (cfg.voice.stt.len == 0) return error.VoiceOff;
     const words = try voice.transcribe(ctx, a, cfg, wav);
     const since = voice.nowMs(ctx);
     const started = operator.sendInBackground(ctx, cfg, try voice.message(a, words)) catch return error.OperatorFailed;
     return ok(req, a, .{ .text = words, .since = since, .started = started });
+}
+
+/// POST /api/voice/text with a WAV: just the words, for the terminal page to
+/// type into its session (README, "Dictating into a session").
+fn voiceText(ctx: Ctx, cfg: config.Config, a: std.mem.Allocator, req: *std.http.Server.Request) !void {
+    const wav = try readWav(a, req);
+    if (cfg.voice.stt.len == 0) return error.VoiceOff;
+    const words = try voice.transcribe(ctx, a, cfg, wav);
+    if (words.len == 0) return error.BadInput;
+    return ok(req, a, .{ .text = words });
+}
+
+fn readWav(a: std.mem.Allocator, req: *std.http.Server.Request) ![]u8 {
+    const len: usize = @intCast(req.head.content_length orelse 0);
+    if (len > voice.max_wav) return error.TooBig;
+    const wav = try a.alloc(u8, len);
+    const r = try req.readerExpectContinue(&.{});
+    try r.readSliceAll(wav);
+    return wav;
 }
 
 /// GET /api/voice/reply/<since>: the operator's `cl say` if it is newer than

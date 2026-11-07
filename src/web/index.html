@@ -38,6 +38,16 @@
   #keys button.down { background: var(--key-down); }
   #keys .back { font-weight: bold; font-size: 22px; }
   #keys .board svg { width: 20px; height: 20px; }
+  #keys .mic svg { width: 18px; height: 18px; vertical-align: middle; }
+  #keys .mic[hidden] { display: none; }
+  #keys .mic.rec { background: #b91c1c; color: #fff; }
+  #keys .mic.wait { opacity: .6; }
+  /* Dictation's state, over the terminal's top right corner. */
+  #dictate { position: fixed; top: 44px; right: 12px; max-width: min(440px, calc(100vw - 24px)); padding: 8px 12px; border-radius: 8px;
+             background: #1f2937; color: var(--fg); box-shadow: 0 4px 16px rgba(0,0,0,.5); z-index: 5;
+             font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; pointer-events: none; }
+  #dictate[hidden] { display: none; }
+  #dictate.rec { background: #7f1d1d; }
   #overlay { position: fixed; inset: 0; display: none; place-items: center; background: rgba(0,0,0,.6);
              font: 16px ui-monospace, SFMono-Regular, Menlo, monospace; }
   #overlay.show { display: grid; }
@@ -60,12 +70,15 @@
   <button data-send="\n" title="New line in Claude's composer (Ctrl-J)">C-j</button>
   <button data-send="\x03" title="Interrupt (Ctrl-C)">C-c</button>
   <button data-send="\x0c" data-fit title="Refit the terminal to this screen and redraw (Ctrl-L)">C-l</button>
+  <button class="mic" id="mic" hidden title="Dictate into the session: click, speak, click again (or hold or tap Ctrl+Shift+Space); the words land at the prompt" aria-label="Dictate"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5.5" y="1.5" width="5" height="8" rx="2.5"/><path d="M3 7.5a5 5 0 0 0 10 0M8 12.5v2"/></svg></button>
   <a href="/board" class="board" title="Board" aria-label="Board"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><path d="M6 2.5v11M10 2.5v11"/></svg></a>
 </div>
+<div id="dictate" hidden role="status"></div>
 <div id="overlay"><button id="reconnect">Reconnect</button></div>
 <script src="/xterm.js"></script>
 <script src="/addon-fit.js"></script>
 <script src="/addon-web-links.js"></script>
+<script src="/mic.js"></script>
 <script>
   const narrow = window.matchMedia("(max-width: 600px)").matches;
   const openLink = (uri) => { if (/^https?:\/\//i.test(uri)) window.open(uri, "_blank", "noopener"); };
@@ -319,7 +332,7 @@
   // Keys fire on touchstart (phones) or click (mouse). preventDefault on
   // touchstart/mousedown keeps focus, so the on-screen keyboard stays open;
   // on touch it also suppresses the click that would send the key twice.
-  for (const b of document.querySelectorAll("#keys button")) {
+  for (const b of document.querySelectorAll("#keys button[data-send]")) {
     const seq = JSON.parse('"' + b.dataset.send.replace(/\\x/g, "\\u00") + '"');
     const fire = () => {
       if (!ws) { retries = 0; connect(); return; }
@@ -346,6 +359,113 @@
   };
   window.addEventListener("resize", onResize);
   if (window.visualViewport) window.visualViewport.addEventListener("resize", onResize);
+
+  // ---- dictation (voice.stt; README, "Dictating into a session") ----
+  // The mic button, or Ctrl+Shift+Space, records here in the page; cl web
+  // turns it into words with voice.stt (the board's mic does the same for
+  // the operator), and they are pasted into the session, where Claude's
+  // prompt takes them like typing. Enter stays with the human. The key
+  // works both ways: hold it while speaking and let go, or tap it, speak,
+  // and tap again. A browser sees the key go up, so holding works here
+  // whatever tmux does with keys. Esc cancels, while it listens or while
+  // the words are being worked out.
+  // `gen` tells a start whose mic arrives late that it was stopped (and maybe
+  // started again) meanwhile; `abort` stops the request for the words.
+  const dict = { want: false, rec: null, busy: false, pressAt: 0, holding: false, hide: 0, gen: 0, abort: null };
+  const HOLD_MS = 400;
+  const micBtn = document.getElementById("mic");
+  function dictateShow(text, cls, ms) {
+    const el = document.getElementById("dictate");
+    clearTimeout(dict.hide);
+    el.hidden = !text; el.textContent = text || ""; el.className = cls || "";
+    if (ms) dict.hide = setTimeout(() => { el.hidden = true; }, ms);
+  }
+  const micState = (cls) => { micBtn.className = "mic" + (cls ? " " + cls : ""); };
+  async function dictateStart() {
+    if (dict.want || dict.rec || dict.busy || micBtn.hidden) return;
+    if (!micAllowed()) { dictateShow(MIC_NO_HTTPS, "", 5000); return; }
+    dict.want = true;
+    const gen = ++dict.gen;
+    micState("rec");
+    dictateShow("Listening…  let go of Ctrl+Shift+Space, or press it (or the mic) again, to type it in. Esc cancels.", "rec");
+    let rec;
+    try { rec = await micOpen(); }
+    catch (e) {
+      if (gen !== dict.gen) return;
+      dict.want = false; micState(""); dictateShow("No microphone: " + e.message, "", 5000); return;
+    }
+    if (!dict.want || gen !== dict.gen) { micClose(rec); return; } // stopped already
+    dict.rec = rec;
+  }
+  async function dictateStop(cancel) {
+    const wanted = dict.want;
+    dict.want = false;
+    dict.gen++;
+    const r = dict.rec;
+    dict.rec = null;
+    micState("");
+    if (!r) { if (wanted) dictateShow(null); return; }
+    const { chunks, rate, ms } = micClose(r);
+    if (cancel || ms < 300) { dictateShow(null); return; }
+    if (loudest(chunks) < MIC_QUIET) { dictateShow("Didn't hear anything.", "", 3000); return; }
+    dict.busy = true;
+    const abort = dict.abort = new AbortController();
+    micState("wait");
+    dictateShow("Working out what you said…  Esc cancels.");
+    try {
+      const res = await fetch("/api/voice/text", { method: "POST", headers: { "content-type": "audio/wav" }, body: wavOf(chunks, rate, 16000), signal: abort.signal });
+      const j = await res.json().catch(() => ({}));
+      if (abort.signal.aborted) { dictateShow(null); return; }
+      if (!res.ok) throw new Error(j.error || res.statusText);
+      if (!ws || ws.readyState !== WebSocket.OPEN) throw new Error("Not connected, so it wasn't typed in. You said: " + j.text);
+      // A paste, so a program that asked for bracketed paste (Claude Code,
+      // through tmux) takes it as text, newlines and all, without sending it.
+      term.paste(j.text + " ");
+      dictateShow(null);
+    } catch (e) {
+      dictateShow(abort.signal.aborted ? null : e.message, "", 8000);
+    } finally { dict.busy = false; dict.abort = null; micState(""); term.focus(); }
+  }
+  // Ask whether voice is on; without voice.stt there's no mic and the key
+  // goes to the terminal as usual.
+  fetch("/api/voice/on").then((r) => r.ok ? r.json() : null).then((j) => { micBtn.hidden = !j?.on; }).catch(() => {});
+  micBtn.addEventListener("mousedown", (e) => e.preventDefault()); // keep the terminal's focus
+  micBtn.addEventListener("touchstart", (e) => { e.preventDefault(); micBtn.click(); }, { passive: false });
+  micBtn.addEventListener("click", () => (dict.want || dict.rec ? dictateStop(false) : dictateStart()));
+  const isDictateKey = (e) => e.code === "Space" && e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey;
+  // Caught on the way down, before xterm.js, so the session gets neither
+  // the key (Ctrl+Space is NUL) nor the Esc that cancels.
+  window.addEventListener("keydown", (e) => {
+    if (micBtn.hidden) return;
+    if (e.key === "Escape" && (dict.want || dict.rec || dict.abort)) {
+      e.preventDefault(); e.stopImmediatePropagation();
+      if (dict.abort) dict.abort.abort();
+      else dictateStop(true);
+      return;
+    }
+    // Still holding Space after letting go of Ctrl or Shift: its repeats
+    // aren't for the session either.
+    if (dict.holding && e.code === "Space" && !isDictateKey(e)) { e.preventDefault(); e.stopImmediatePropagation(); return; }
+    if (!isDictateKey(e)) return;
+    e.preventDefault(); e.stopImmediatePropagation();
+    if (e.repeat) return;
+    if (dict.want || dict.rec) { dict.holding = false; dictateStop(false); return; }
+    dict.pressAt = Date.now(); dict.holding = true;
+    dictateStart();
+  }, true);
+  // Let go after holding it: send. A quick tap keeps recording until the next.
+  const letGo = () => {
+    if (!dict.holding) return;
+    dict.holding = false;
+    if ((dict.want || dict.rec) && Date.now() - dict.pressAt >= HOLD_MS) dictateStop(false);
+  };
+  window.addEventListener("keyup", (e) => {
+    if (e.code !== "Space" || !dict.holding) return;
+    e.preventDefault(); e.stopImmediatePropagation();
+    letGo();
+  }, true);
+  // The window losing focus mid-hold never sees the key go up.
+  window.addEventListener("blur", letGo);
 
   connect();
 </script>
