@@ -40,7 +40,7 @@ what you lose.
 | [jj](https://jj-vcs.github.io/jj/) (Jujutsu, a recent one: 0.25 or newer) | a change per ticket that cl merges itself (below) | projects stay plain git; see below |
 | [gh](https://cli.github.com/), logged in | parking on a PR (`--pr`), watching CI after Push after merge, and Claude opening PRs (Done → PR) | those checks fail (a park on a PR never passes; the CI watch gives up with a note) |
 | [gutter](https://github.com/jself/gutter) | reviewing a ticket's diff in a browser (Open in gutter, `cl t gutter`) | no gutter buttons and no review guide; review from the summary instead |
-| `timeout` (GNU coreutils) | park checks (`--until`, `--pr`), push timeouts | park checks fail (macOS: see below); pushes run without the 2-minute limit |
+| `timeout` (GNU coreutils; Homebrew's `gtimeout` on macOS) | the 2-minute limit on each call to the remote in Push after merge and the CI watch | those calls run without a limit (git over SSH still has ssh's 30-second connect timeout) |
 | [Tailscale](https://tailscale.com/) | `tailscale` in `web.listen`, the phone app over HTTPS (`tailscale serve`), test-plan links on the phone | serve on `127.0.0.1` or a LAN address; plain http has no phone app, microphone or notifications |
 | systemd (`systemctl`, `systemd-run`, `loginctl`) | `cl web install`: start the web server on boot (Linux) | `web.autostart` runs it in tmux instead |
 | webkitgtk-6.0 (GTK 4) and pkg-config, at build time | `cl-window`, the desktop window behind `cl window` (Linux) | `cl window` opens a Chromium-family browser in app mode, else the default browser |
@@ -83,9 +83,7 @@ curl -fsSL https://claude.ai/install.sh | bash
 ```
 
 On macOS: `cl window` and `cl dictate` are Linux-only for now, `cl web
-install` (systemd) isn't there, and park checks need `timeout`, which
-Homebrew's coreutils installs only as `gtimeout` (`ln -s "$(brew --prefix)/bin/gtimeout"
-~/.local/bin/timeout` until cl looks for it).
+install` (systemd) isn't there.
 
 ## Install
 
