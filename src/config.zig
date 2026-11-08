@@ -16,6 +16,7 @@
 //!   board.dispatch = true                (cl web starts queued tickets)
 //!   board.trust_projects = true          (yes to Claude's folder-trust dialog in project folders and
 //!                                          ticket worktrees; board.trust_worktrees is the old name)
+//!   board.todo_project = me              (the project `cl todo` puts todos in)
 //!
 //!   gutter.path = ~/bin/gutter           (gutter for reviews; "" looks it up on PATH)
 //!   review.model = sonnet                (the automated reviewer's model; default: the profile's)
@@ -114,6 +115,9 @@ pub const Board = struct {
     /// Say yes to Claude's folder-trust dialog when the dispatcher starts a
     /// session in a project's folder or a ticket worktree.
     trust_projects: bool = true,
+    /// The project `cl todo` puts todos in when it isn't given one; "" for
+    /// none (then the only project that isn't a code repo, if there is one).
+    todo_project: []const u8 = "",
 };
 
 pub const Gutter = struct {
@@ -215,6 +219,8 @@ fn loadFile(ctx: Ctx) !Config {
             board.worktrees = try expandHomePerm(ctx, val);
         } else if (std.mem.eql(u8, key, "board.trust_projects") or std.mem.eql(u8, key, "board.trust_worktrees")) {
             board.trust_projects = !(std.mem.eql(u8, val, "false") or std.mem.eql(u8, val, "no") or std.mem.eql(u8, val, "off"));
+        } else if (std.mem.eql(u8, key, "board.todo_project")) {
+            board.todo_project = val;
         } else if (std.mem.eql(u8, key, "board.dispatch")) {
             board.dispatch = !(std.mem.eql(u8, val, "false") or std.mem.eql(u8, val, "no") or std.mem.eql(u8, val, "off"));
         } else if (std.mem.eql(u8, key, "gutter.path")) {

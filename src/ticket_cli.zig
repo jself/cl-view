@@ -25,7 +25,7 @@ pub const ticket_usage =
     \\
     \\  new <project> <title> [-m <body>] [--worktree | --queue] [--target <session>]
     \\      [--plan [--skill <name>]] [--stage <stage>] [--profile <name>] [--parent <key>]
-    \\      [--after <key,...>] [--parallel] [--umbrella] [--onto <branch>]
+    \\      [--after <key,...>] [--parallel] [--umbrella] [--onto <branch>] [--todo] [--link <url>]
     \\                              create a ticket; prints its key. With --parent the
     \\                              project may be left out (it's the parent's). Sub-tickets
     \\                              run in order: each waits for the one ranked before it to
@@ -49,12 +49,21 @@ pub const ticket_usage =
     \\                              project's (project set --onto). The after-merge command and
     \\                              steps run only for merges into trunk; merging the branch
     \\                              itself into trunk is yours to do
+    \\                              --todo: yours, not Claude's work (cl todo for short): the
+    \\                              dispatcher never starts it, it never closes by itself, and
+    \\                              it's only in backlog (to do), running (doing) or done;
+    \\                              waiting on someone is a park. Its sub-tickets are Claude
+    \\                              tasks for it: parallel, they don't wait on it, and each
+    \\                              is told the todo's title, body and link. Never --plan or
+    \\                              --umbrella. --link: where it came from (a Slack message,
+    \\                              an email, a PR); any ticket may have one
     \\  sub <title> [-m <body>] [options of new]
     \\                              in a ticket's session: a sub-ticket of $CL_TICKET
     \\  list [--stage <s>] [--project <p>] [--flag <f>] [--needs] [--search <q>] [--open]
-    \\      [--top] [--parent <key>] [--parked] [--hidden-projects]
+    \\      [--top] [--parent <key>] [--parked] [--hidden-projects] [--todo | --no-todo]
     \\                              tickets, newest first (--needs: oldest ask first;
-    \\                              --top: no sub-tickets; --parent: its sub-tickets)
+    \\                              --top: no sub-tickets; --parent: its sub-tickets;
+    \\                              --todo: only todos, --no-todo: none)
     \\  needs [--hidden] [--hidden-projects]
     \\                              tickets with a flag, oldest first (the inbox); a ticket
     \\                              whose session is working on it is left out until it stops,
@@ -83,12 +92,13 @@ pub const ticket_usage =
     \\  edit <key> [--title <t>] [-m <body>] [--project <p>] [--worktree | --queue]
     \\      [--target <session>] [--plan | --no-plan] [--skill <name>] [--profile <name>]
     \\      [--after <key,...>] [--not-after <key,...>] [--parallel | --in-order]
-    \\      [--umbrella | --no-umbrella] [--onto <branch>]
+    \\      [--umbrella | --no-umbrella] [--onto <branch>] [--todo | --no-todo] [--link <url>]
     \\                              --onto "" goes back to the project's target. --after: the
     \\                              dispatcher doesn't start it until those
     \\                              tickets are done (refused if they wait on it already);
     \\                              --not-after drops the link; --parallel / --in-order: a
-    \\                              sub-ticket doesn't / does wait for the one before it
+    \\                              sub-ticket doesn't / does wait for the one before it;
+    \\                              --todo makes it yours (see new), --link "" drops the link
     \\  move <key> <stage> [--spin-off] [--merge | --pr [--then <steps>] | --tell <text> | --close]
     \\                              backlog planning queued running review testing done
     \\                              (done also closes the ticket's session; it's refused while
@@ -200,6 +210,7 @@ pub const ticket_usage =
     \\                              move --pr takes it); "" drops it. Not a custom close
     \\  done [<key>] [--summary <text>] [--test-plan <markdown> | -]
     \\                              Claude: finished, nothing more needed; moves to review.
+    \\                              Refused for a todo: it's yours (move it to done)
     \\                              --test-plan (- reads stdin): what to try, kept in the ticket
     \\                              (steps; `testplan --format`); without it an
     \\                              earlier round's stays, "" drops it
@@ -370,6 +381,7 @@ fn boardFail(db: board.Db, err: anyerror, what: []const u8) noreturn {
         error.Starting => fail("it is starting right now; try again in a moment", .{}),
         error.NoRepo => fail("its project isn't a code repo (cl project add/set --no-repo): no worktrees, target branches, automated reviews, push or after-merge command there; its tickets run in the queue", .{}),
         error.RepoWork => fail("tickets that aren't done have work in the repo (a worktree, jj change or branch): finish them, or move them to the queue with nothing under way, first", .{}),
+        error.Todo => fail("{s}", .{board.todo_refused}),
         error.Sqlite => fail("board database: {s}", .{db.message()}),
         else => fail("{s}: {s}", .{ what, @errorName(err) }),
     }
@@ -619,6 +631,62 @@ fn checkProfile(cfg: config.Config, name: ?[]const u8) !void {
     if (n.len > 0 and cfg.find(n) == null) fail("no such profile: {s}", .{n});
 }
 
+// ---- todos ----
+
+const todo_usage =
+    \\usage: cl todo <title> [-p <project>] [-m <body>] [--link <url>] [--parent <key>] [--json]
+    \\
+    \\A todo of yours on the board (cl ticket new <project> <title> --todo): the dispatcher
+    \\never starts it and it never closes by itself. Prints its key. The project is -p, else
+    \\board.todo_project in the config, else the only project that isn't a code repo.
+    \\Done: cl ticket move <key> done. Waiting on someone: cl ticket park <key> --reason ...
+    \\Claude's help with it: cl ticket new --parent <key> "<task>".
+    \\
+;
+
+pub fn todoMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void {
+    if (argv.len == 0) return out(todo_usage);
+    var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var expanded: std.ArrayList([]const u8) = .empty;
+    for (argv) |s| try expanded.append(a, if (std.mem.eql(u8, s, "-p")) "--project" else s);
+    const args = try Args.parse(a, expanded.items, &.{ "--body", "--project", "--link", "--parent" }, todo_usage);
+    args.only(&.{ "--body", "--project", "--link", "--parent", "--json" }, todo_usage);
+    if (args.pos.items.len != 1) fail("{s}", .{todo_usage});
+    const db = openBoard(ctx, cfg);
+    defer db.close();
+    const parent = args.get("--parent");
+    const project = args.get("--project") orelse if (parent != null) "" else try todoProject(db, a, cfg);
+    checkLink(args.get("--link"));
+    const key = board.createTicket(ctx, db, a, .{
+        .project = project,
+        .parent = parent,
+        .title = args.pos.items[0],
+        .body = args.get("--body"),
+        .todo = true,
+        .link = args.get("--link"),
+    }) catch |e| boardFail(db, e, if (parent != null) "parent ticket or project" else "project");
+    if (args.has("--json")) return out(try std.fmt.allocPrint(a, "{f}\n", .{std.json.fmt(.{ .key = key }, .{})}));
+    return out(try std.fmt.allocPrint(a, "{s}\n", .{key}));
+}
+
+fn checkLink(link: ?[]const u8) void {
+    if (!board.validLink(link orelse "")) fail("--link is a web page (https://...), a mail (mailto:...) or a Slack link (slack://...)", .{});
+}
+
+/// The project `cl todo` uses when not given one: board.todo_project, else
+/// the only project that isn't a code repo.
+fn todoProject(db: board.Db, a: std.mem.Allocator, cfg: config.Config) ![]const u8 {
+    if (cfg.board.todo_project.len > 0) return cfg.board.todo_project;
+    var only: ?[]const u8 = null;
+    for (board.listProjects(db, a) catch |e| boardFail(db, e, "project")) |p| if (!p.repo) {
+        if (only != null) fail("which project? pass -p <project>, or set board.todo_project in ~/.config/cl/config (more than one project isn't a code repo)", .{});
+        only = p.name;
+    };
+    return only orelse fail("which project? pass -p <project>, or set board.todo_project in ~/.config/cl/config (a project for todos: cl project add me ~/todo --no-repo)", .{});
+}
+
 // ---- tickets ----
 
 pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void {
@@ -629,7 +697,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
     const cmd = argv[0];
     const valued = [_][]const u8{
         "--body", "--target", "--stage", "--profile", "--project", "--flag", "--search", "--title", "--as", "--summary", "--test-plan", "--step", "--parent", "--skill", "--pr-url", "--before", "--after", "--tell", "--then",
-        "--reason", "--until", "--every", "--max", "--at", "--change", "--not-after", "--onto", "--findings",
+        "--reason", "--until", "--every", "--max", "--at", "--change", "--not-after", "--onto", "--findings", "--link",
     };
     // park's --pr names the PR; elsewhere (move, approve) it's a finish.
     const args = try Args.parse(a, argv[1..], if (std.mem.eql(u8, cmd, "park")) &(valued ++ [_][]const u8{"--pr"}) else &valued, ticket_usage);
@@ -639,7 +707,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
     const pos = args.pos.items;
 
     if (std.mem.eql(u8, cmd, "new") or std.mem.eql(u8, cmd, "sub")) {
-        args.only(&.{ "--body", "--worktree", "--queue", "--target", "--plan", "--skill", "--stage", "--profile", "--parent", "--json", "--after", "--parallel", "--umbrella", "--onto" }, ticket_usage);
+        args.only(&.{ "--body", "--worktree", "--queue", "--target", "--plan", "--skill", "--stage", "--profile", "--parent", "--json", "--after", "--parallel", "--umbrella", "--onto", "--todo", "--link" }, ticket_usage);
         const is_sub = std.mem.eql(u8, cmd, "sub");
         const parent = args.get("--parent") orelse if (is_sub) (env_key orelse fail("cl ticket sub runs in a ticket's session ($CL_TICKET); elsewhere use new --parent <key>", .{})) else null;
         // With a parent, the project is optional: new --parent QA-2 "title".
@@ -653,6 +721,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
             const pname = if (project.len > 0) project else (board.getTicket(db, a, parent.?) catch |e| boardFail(db, e, "parent ticket")).project;
             checkProjectOnto(ctx, a, board.getProject(db, a, pname) catch |e| boardFail(db, e, "project"), args.get("--onto"));
         }
+        checkLink(args.get("--link"));
         const key = board.createTicket(ctx, db, a, .{
             .project = project,
             .parent = parent,
@@ -666,13 +735,16 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
             .profile = args.get("--profile"),
             .umbrella = args.has("--umbrella"),
             .onto = args.get("--onto"),
+            .todo = args.has("--todo"),
+            .link = args.get("--link"),
         }) catch |e| boardFail(db, e, if (parent != null) "parent ticket or project" else "project");
         try applyDeps(ctx, db, a, key, args);
         if (args.has("--json")) return out(try std.fmt.allocPrint(a, "{f}\n", .{std.json.fmt(.{ .key = key }, .{})}));
         return out(try std.fmt.allocPrint(a, "{s}\n", .{key}));
     }
     if (std.mem.eql(u8, cmd, "list") or std.mem.eql(u8, cmd, "ls") or std.mem.eql(u8, cmd, "needs")) {
-        args.only(&.{ "--stage", "--project", "--flag", "--needs", "--hidden", "--search", "--open", "--top", "--parent", "--parked", "--hidden-projects", "--json" }, ticket_usage);
+        args.only(&.{ "--stage", "--project", "--flag", "--needs", "--hidden", "--search", "--open", "--top", "--parent", "--parked", "--hidden-projects", "--json", "--todo", "--no-todo" }, ticket_usage);
+        if (args.has("--todo") and args.has("--no-todo")) fail("--todo or --no-todo, not both", .{});
         if (pos.len != 0) fail("{s} takes no arguments\n{s}", .{ cmd, ticket_usage });
         const needs = args.has("--needs") or args.has("--hidden") or std.mem.eql(u8, cmd, "needs");
         // A review whose reviewer died mustn't keep its ticket out of the
@@ -691,6 +763,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
             .top = args.has("--top"),
             .parent = args.get("--parent"),
             .parked = args.has("--parked"),
+            .todo = if (args.has("--todo")) true else if (args.has("--no-todo")) false else null,
             // Hidden projects stay out unless asked for, by name or flag.
             .shown = !args.has("--hidden-projects") and args.get("--project") == null and args.get("--parent") == null,
         }) catch |e| boardFail(db, e, "ticket");
@@ -707,7 +780,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         // alert, from, ticket, raised (unix s), text
         for (als) |al| try aw.writer.print("alert\t{s}\t{s}\t{d}\t{s}\n", .{ al.from, if (al.ticket.len > 0) al.ticket else "-", al.at, al.text });
         // key, stage, project, flags, parent, title
-        for (ts) |t| try aw.writer.print("{s}\t{s}\t{s}\t{s}\t{s}\t{s}{s}{s}\n", .{ t.key, @tagName(t.stage), t.project, try flagList(a, t.flags), if (t.parent.len > 0) t.parent else "-", t.title, if (t.park != null) "\tparked: " else "", if (t.park) |p| p.reason else "" });
+        for (ts) |t| try aw.writer.print("{s}\t{s}\t{s}\t{s}\t{s}\t{s}{s}{s}{s}\n", .{ t.key, @tagName(t.stage), t.project, try flagList(a, t.flags), if (t.parent.len > 0) t.parent else "-", t.title, if (t.todo) "\ttodo" else "", if (t.park != null) "\tparked: " else "", if (t.park) |p| p.reason else "" });
         return out(aw.writer.buffered());
     }
     if (std.mem.eql(u8, cmd, "watch")) {
@@ -746,9 +819,16 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         return out(try showText(ctx, a, t, blocks, subs, cs, evs));
     }
     if (std.mem.eql(u8, cmd, "edit")) {
-        args.only(&.{ "--title", "--body", "--project", "--worktree", "--queue", "--target", "--plan", "--no-plan", "--skill", "--profile", "--after", "--not-after", "--parallel", "--in-order", "--umbrella", "--no-umbrella", "--onto" }, ticket_usage);
+        args.only(&.{ "--title", "--body", "--project", "--worktree", "--queue", "--target", "--plan", "--no-plan", "--skill", "--profile", "--after", "--not-after", "--parallel", "--in-order", "--umbrella", "--no-umbrella", "--onto", "--todo", "--no-todo", "--link" }, ticket_usage);
+        if (args.has("--todo") and args.has("--no-todo")) fail("--todo or --no-todo, not both", .{});
         const key = keyArg(pos, 0, env_key, "cl ticket edit <key> [options]");
         try checkProfile(cfg, args.get("--profile"));
+        checkLink(args.get("--link"));
+        if (args.has("--todo")) {
+            const cur = board.getTicket(db, a, key) catch |e| boardFail(db, e, "ticket");
+            if (!cur.todo and cur.stage != .done and (cur.tmux.len > 0 or cur.worktree.len > 0 or cur.change.len > 0 or cur.branch.len > 0))
+                fail("{s} is Claude's work under way (a session, worktree or jj change), which a todo can't finish; finish or kill it first, or make a new todo", .{cur.key});
+        }
         if (args.get("--onto") != null) {
             const cur = board.getTicket(db, a, key) catch |e| boardFail(db, e, "ticket");
             checkProjectOnto(ctx, a, board.getProject(db, a, args.get("--project") orelse cur.project) catch |e| boardFail(db, e, "project"), args.get("--onto"));
@@ -763,6 +843,8 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
             .skill = args.get("--skill"),
             .umbrella = if (args.has("--umbrella")) true else if (args.has("--no-umbrella")) false else null,
             .onto = args.get("--onto"),
+            .todo = if (args.has("--todo")) true else if (args.has("--no-todo")) false else null,
+            .link = args.get("--link"),
         }) catch |e| boardFail(db, e, "ticket or project");
         try applyDeps(ctx, db, a, key, args);
         if (parseMode(args)) |m| return relocate(ctx, cfg, db, a, key, m);
@@ -857,6 +939,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         args.only(&.{ "--summary", "--test-plan", "--close", "--pr-url", "--plan" }, ticket_usage);
         const key = keyArg(pos, 0, env_key, "cl ticket done [<key>] [--summary <text>] [--test-plan <markdown> | -] [--plan] [--close [--pr-url <url>]]");
         const t0 = board.getTicket(db, a, key) catch |e| boardFail(db, e, "ticket");
+        if (t0.todo) fail("{s} is a todo: it's yours, and it closes when you move it to Done (`cl ticket move {s} done`)", .{ t0.key, t0.key });
         // While finishing, a plain `done` means the merge or PR is done too.
         if (args.has("--close") or t0.finishing.len > 0) {
             if (t0.finishing.len == 0) fail("{s} isn't finishing (--close is for after a merge or PR the board asked for); use done without it", .{t0.key});
@@ -933,6 +1016,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         dispatch.start(ctx, cfg, db, a, t, args.has("--now")) catch |e| switch (e) {
             error.AlreadyStarted => fail("{s} already has a session: {s}", .{ t.key, t.tmux }),
             error.Umbrella => fail("{s} is an umbrella: its sub-tickets run, not it (`cl ticket edit {s} --no-umbrella` makes it a ticket of its own)", .{ t.key, t.key }),
+            error.Todo => fail("{s} is a todo: it's yours, so no session works on it. For Claude's help, add a task under it: `cl ticket new --parent {s} \"<title>\" -m \"<what to do>\"`", .{ t.key, t.key }),
             error.TargetBusy => fail("{s}'s session is busy or has another ticket in progress; it waits in Queued (--now types it in anyway)", .{t.key}),
             error.WorktreeFailed => fail("cannot make the worktree: {s}", .{worktree.lastError()}),
             error.SessionFailed => fail("cannot start the session: {s}", .{dispatch.failureReason(e)}),
@@ -1013,11 +1097,13 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         const t = board.getTicket(db, a, key) catch |e| boardFail(db, e, "ticket");
         var aw: std.Io.Writer.Allocating = .init(a);
         try aw.writer.print("{s} parked: {s}\n", .{ t.key, t.park.?.reason });
+        // A todo has no session: the wait ends, flagged in Needs You.
+        const resumes = if (t.todo) "the wait ends and it shows in Needs You (unparked)" else "its session resumes";
         if (t.park.?.pr.len > 0) {
-            try aw.writer.print("The dispatcher (cl web, or cl ticket dispatch) checks {s} now and every {s} for up to {s}: merged, its session resumes; closed without merging, the park ends with a pr-closed flag.\n", .{ t.park.?.pr, try park.formatDuration(a, every), try park.formatDuration(a, t.park.?.deadline - t.park.?.at) });
+            try aw.writer.print("The dispatcher (cl web, or cl ticket dispatch) checks {s} now and every {s} for up to {s}: merged, {s}; closed without merging, the park ends with a pr-closed flag.\n", .{ t.park.?.pr, try park.formatDuration(a, every), try park.formatDuration(a, t.park.?.deadline - t.park.?.at), resumes });
         } else if (until.len > 0) {
-            try aw.writer.print("The dispatcher (cl web, or cl ticket dispatch) checks it now and every {s} for up to {s}; when the check passes, its session resumes.\n", .{ try park.formatDuration(a, every), try park.formatDuration(a, t.park.?.deadline - t.park.?.at) });
-        } else try aw.writer.print("Nothing checks it: `cl ticket unpark {s}` resumes it.\n", .{t.key});
+            try aw.writer.print("The dispatcher (cl web, or cl ticket dispatch) checks it now and every {s} for up to {s}; when the check passes, {s}.\n", .{ try park.formatDuration(a, every), try park.formatDuration(a, t.park.?.deadline - t.park.?.at), resumes });
+        } else try aw.writer.print("Nothing checks it: `cl ticket unpark {s}` {s}.\n", .{ t.key, if (t.todo) "ends the wait" else "resumes it" });
         if (r.session) |s| {
             try aw.writer.print("Its session {s} closes now{s}.\n", .{ s, if (t.session_id.len == 36) "; its conversation resumes when it wakes" else "" });
             if (r.others.len > 0) try aw.writer.print("It was shared: {s} let go of it too.\n", .{try std.mem.join(a, ", ", r.others)});
@@ -1055,7 +1141,10 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
             .started => try std.fmt.allocPrint(a, "{s} unparked; resumed in {s}\n", .{ t.key, t.tmux }),
             .waiting => try std.fmt.allocPrint(a, "{s} unparked; its session is busy with another ticket, so it waits in Queued and resumes there\n", .{t.key}),
             .running => try std.fmt.allocPrint(a, "{s} unparked; it already has a session ({s})\n", .{ t.key, t.tmux }),
-        } else try std.fmt.allocPrint(a, "{s} unparked; its session stays stopped (`cl ticket start {s}` restarts it)\n", .{ t.key, t.key }));
+        } else if (t.todo)
+            try std.fmt.allocPrint(a, "{s}: done waiting ({s})\n", .{ t.key, if (t.stage == .running) "doing" else "to do" })
+        else
+            try std.fmt.allocPrint(a, "{s} unparked; its session stays stopped (`cl ticket start {s}` restarts it)\n", .{ t.key, t.key }));
     }
     if (std.mem.eql(u8, cmd, "park-check")) {
         // The dispatcher's detached check (park.zig).
@@ -1565,6 +1654,8 @@ fn showText(ctx: Ctx, a: std.mem.Allocator, t: board.Ticket, blocks: []const []c
     if (t.onto.len > 0) try w.print("onto: {s}{s} (starts from it and merges into it, not trunk)\n", .{ t.onto, if (t.onto_own.len == 0) ", the project's" else "" });
     if (t.parent.len > 0) try w.print("sub-ticket of: {s}{s}\n", .{ t.parent, if (t.parallel) " (parallel: doesn't wait for the one before it)" else "" });
     if (t.umbrella) try w.writeAll("umbrella: only a container for its sub-tickets; it never runs\n");
+    if (t.todo) try w.print("todo: yours ({s}){s}\n", .{ todoStageName(t.stage), if (t.stage == .done) "" else "; nothing runs it, and it closes when you move it to done" });
+    if (t.link.len > 0) try w.print("link: {s}\n", .{t.link});
     if (std.mem.trim(u8, t.plan_md, " \t\r\n").len > 0) try w.print("plan: {s}; `cl ticket show {s} --plan` prints it\n", .{ if (t.stage == .planning) "handed in" else "kept from its planning", t.key });
     if (t.children > 0) try w.print("sub-tickets: {d}/{d} done\n", .{ t.children_done, t.children });
     try writeDeps(w, a, t, blocks);
@@ -1587,7 +1678,7 @@ fn showText(ctx: Ctx, a: std.mem.Allocator, t: board.Ticket, blocks: []const []c
     for (t.flags) |f| try w.print("flag: {s} ({s}, {s}){s}{s}\n", .{ f.kind, f.source, try stamp(a, f.at), if (f.detail.len > 0) ": " else "", f.detail });
     if (t.body.len > 0) try w.print("\n{s}\n", .{t.body});
     if (subs.len > 0) {
-        try w.writeAll(if (t.umbrella) "\nsub-tickets, in order (it has no work of its own: it runs as them):\n" else "\nsub-tickets, in order (they wait for it to be done):\n");
+        try w.writeAll(if (t.umbrella) "\nsub-tickets, in order (it has no work of its own: it runs as them):\n" else if (t.todo) "\nsub-tickets (Claude tasks for it; they don't wait on it):\n" else "\nsub-tickets, in order (they wait for it to be done):\n");
         for (subs) |c| try w.print("  {s}\t{s}\t{s}\t{s}{s}\n", .{ c.key, @tagName(c.stage), try flagList(a, c.flags), c.title, try waitNote(a, c) });
     }
     if (autoreview.load(a, t)) |r| try writeAutoreview(w, a, t, r);
@@ -1600,6 +1691,15 @@ fn showText(ctx: Ctx, a: std.mem.Allocator, t: board.Ticket, blocks: []const []c
         for (evs) |e| try w.print("  {s}  {s}{s}{s}\n", .{ try stamp(a, e.at), e.kind, if (e.detail.len > 0) " " else "", e.detail });
     }
     return aw.writer.buffered();
+}
+
+/// Where you are with a todo, by its stage.
+fn todoStageName(s: board.Stage) []const u8 {
+    return switch (s) {
+        .running => "doing",
+        .done => "done",
+        else => "to do",
+    };
 }
 
 /// The automated review, under `show`.

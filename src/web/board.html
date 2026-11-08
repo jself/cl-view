@@ -27,6 +27,7 @@
     --review: #9cc6ff; --review-bg: #11294a; --testing: #7ee6d6; --testing-bg: #0f3330;
     --other: #d6d7da; --other-bg: #2c2e33; --finishing: #b6e3a0; --finishing-bg: #1b3317; --parked: #c4b5fd; --parked-bg: #2a2342;
     --umbrella: #e0692e; /* burnt orange, well apart from parked's lilac */
+    --todo: #2dd4bf; /* teal: yours, apart from Claude's session colors */
     --conflict: #ffb4b4; --conflict-bg: #3d1a1a; --drift: #fdba74; --drift-bg: #3a2410;
     /* One color per board column (stage): a stage badge and its column header's dot. */
     --st-backlog: #8b8e94; --st-backlog-bg: #26282c; --st-planning: #cdb8ff; --st-planning-bg: #2c2440; --st-queued: #93c5fd; --st-queued-bg: #172437;
@@ -173,10 +174,12 @@
   /* Session status colors, the same hues as `cl list`: --sc for the label and dot, --sbg tints a card's title band, stronger on the left and faint on the right. */
   .s-busy { --sc: #facc15; --sbg: var(--sc); } .s-waiting { --sc: #e879f9; --sbg: var(--sc); } .s-blocked { --sc: #f87171; --sbg: var(--sc); }
   .s-idle { --sc: #4ade80; --sbg: var(--sc); } .s-shell { --sc: #22d3ee; --sbg: var(--sc); } .s-starting { --sc: #60a5fa; --sbg: var(--sc); }
-  .s-umbrella { --sc: var(--umbrella); --sbg: var(--sc); } .s-gone, .s-killed { --sc: #8b8e94; --sbg: var(--sc); } .s-parked { --sc: #c4b5fd; --sbg: var(--sc); } .s-paused { --sc: #fb923c; } .s-waits { --sc: #7dd3fc; } .s-unknown, .s-none { --sc: #a0a3a8; }
+  .s-umbrella { --sc: var(--umbrella); --sbg: var(--sc); } .s-todo { --sc: var(--todo); --sbg: var(--sc); } .s-gone, .s-killed { --sc: #8b8e94; --sbg: var(--sc); } .s-parked { --sc: #c4b5fd; --sbg: var(--sc); } .s-paused { --sc: #fb923c; } .s-waits { --sc: #7dd3fc; } .s-unknown, .s-none { --sc: #a0a3a8; }
   .status { display: inline-flex; align-items: center; gap: calc(7 * var(--u)); font-size: calc(12.5 * var(--u)); color: var(--sc, #d6d7da); }
   .status.s-none { color: #d6d7da; }
   .dot { width: calc(8 * var(--u)); height: calc(8 * var(--u)); border-radius: calc(4 * var(--u)); flex: none; display: inline-block; background: var(--sc, #5d6168); }
+  .link-pill { gap: calc(5 * var(--u)); cursor: pointer; border: 1px solid var(--line); background: transparent; color: var(--todo); }
+  .link-pill svg { width: calc(12 * var(--u)); height: calc(12 * var(--u)); }
   .s-none .dot, .s-nosession .dot { background: transparent; border: 1px solid #5d6168; }
   .s-nosession { --sc: #a0a3a8; } .status.s-nosession { color: #d6d7da; }
   /* Stages: a badge naming the board column, a dot in a column header, and the
@@ -534,6 +537,7 @@
   <label class="switch"><input type="checkbox" role="switch" id="subsSw"><span class="track"></span>Sub-tickets</label>
   <label class="switch"><input type="checkbox" role="switch" id="doneSw"><span class="track"></span>Done<span class="n" id="doneN"></span></label>
   <label class="switch" title="Show parked tickets (waiting on something outside cl)"><input type="checkbox" role="switch" id="parkedSw"><span class="track"></span>Parked<span class="n" id="parkedN"></span></label>
+  <label class="switch" title="Show your todos (things you do yourself; nothing runs them)"><input type="checkbox" role="switch" id="todosSw"><span class="track"></span>Todos<span class="n" id="todosN"></span></label>
   <label class="switch" id="hiddenProjWrap" title="Show the tickets of projects you hid (Projects view)" hidden><input type="checkbox" role="switch" id="hiddenProjSw"><span class="track"></span>Hidden projects<span class="n" id="hiddenProjN"></span></label>
   <input id="search" type="search" placeholder="Search tickets" aria-label="Search tickets">
 </nav>
@@ -597,13 +601,15 @@
 <script>
 "use strict";
 const STAGES = ["backlog", "planning", "queued", "running", "review", "testing", "done"];
+// A todo is only ever in Backlog (to do), Running (doing) or Done (board.zig todoStage).
+const TODO_STAGES = ["backlog", "running", "done"];
 const STAGE_NAME = { backlog: "Backlog", planning: "Planning", queued: "Queued", running: "Running", review: "Review", testing: "Testing", done: "Done" };
 const FLAG_NAME = { input: "Needs input", question: "Question", review: "Ready for review", testing: "Needs testing", ended: "Session ended", "start-failed": "Didn't start", conflict: "Conflicts", "after-merge": "After-merge failed", "push-failed": "Push failed", "ci-failed": "CI failed", "merge-failed": "Didn't land", unmerged: "Not merged", unparked: "Woke from park", "park-expired": "Park expired", "pr-closed": "PR closed", "follow-up-failed": "Follow-up failed", idle: "Idle", "ready-to-close": "Ready to close" };
 const STATUS_NAME = { waits: "Waits", paused: "Paused", busy: "Working", waiting: "Waiting on you", blocked: "Waiting on you", idle: "Idle", shell: "Idle · background task", starting: "Starting", gone: "Session ended", nosession: "No session", killed: "Killed · restart it", parked: "Parked", unknown: "Unknown" };
 
 const store = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch { return null; } };
 const state = {
-  data: null, view: store("cl-view") || "board", filter: "all", project: "", subs: store("cl-subs") === "1", done: store("cl-done") === "1", parked: store("cl-parked") !== "0",
+  data: null, view: store("cl-view") || "board", filter: "all", project: "", subs: store("cl-subs") === "1", done: store("cl-done") === "1", parked: store("cl-parked") !== "0", todos: store("cl-todos") !== "0",
   search: "", needsOpen: store("cl-needs") !== "0", needsHidden: store("cl-needs-hidden") === "1", open: null, detail: null, tab: null, picks: {}, other: {}, checks: {},
   sending: false, editing: null, edit: {}, hiddenProjects: store("cl-hidden-projects") === "1",
 };
@@ -787,15 +793,17 @@ const pills = (t) => cardFlags(t).length || t.finishing || t.custom_close || t.p
 // status is its sub-tickets'.
 const waitingOn = (t) => (t.blocked_by || []).filter((d) => d.stage !== "done");
 const holdOf = (t) => waitingOn(t).length ? "waits" : "";
-const statusOf = (row) => row.ticket.umbrella && !row.status ? "umbrella" : row.status || (row.ticket.tmux.startsWith("(") ? "starting" : row.ticket.park ? "parked" : row.ticket.killed ? "killed" : row.ticket.tmux && !["backlog", "queued"].includes(row.ticket.stage) ? "gone"
+const statusOf = (row) => row.ticket.umbrella && !row.status ? "umbrella" : row.ticket.todo && !row.status ? "todo" : row.status || (row.ticket.tmux.startsWith("(") ? "starting" : row.ticket.park ? "parked" : row.ticket.killed ? "killed" : row.ticket.tmux && !["backlog", "queued"].includes(row.ticket.stage) ? "gone"
   : row.ticket.stage === "queued" && projectPaused(row.ticket.project) ? "paused" : ["running", "review", "testing"].includes(row.ticket.stage) ? "nosession" : row.ticket.stage === "queued" && !row.ticket.tmux && holdOf(row.ticket) || "none");
 const waitTitle = (t) => waitingOn(t).map((d) => `${d.key} (${STAGE_NAME[d.stage]}${d.order ? ", the sub-ticket before it" : d.parent ? ", its parent: it runs first" : ""}): ${d.title}`).join("\n");
 // A Done ticket has no status unless its session is still live: "Not started" or "Session ended" says nothing about finished work.
 const umbrellaLabel = (t) => t.stage === "planning" ? "Umbrella · planning its sub-tickets" : t.stage === "backlog" ? "Umbrella"
   : t.stage === "queued" ? "Umbrella · waiting for a sub-ticket to start" : "Umbrella · sub-tickets under way";
+// A todo is yours: it says where you are with it (a park is what it waits on), not what Claude is doing.
+const todoLabel = (t) => t.park ? "Waiting: " + t.park.reason : t.stage === "running" ? "Doing" : "To do";
 const statusHtml = (row) => { const s = statusOf(row); const t = row.ticket; if (t.stage === "done" && (!row.status || row.status === "gone")) return "";
-  const label = s === "umbrella" ? umbrellaLabel(t) : s === "none" ? (t.stage === "queued" ? "Waiting for a slot" : "Not started") : s === "waits" ? "Waits on " + waitingOn(t).map((d) => d.key).join(", ") : (STATUS_NAME[s] || s);
-  const title = s === "waits" ? ` title="${esc("Starts once these are done:\n" + waitTitle(t))}"` : s === "umbrella" ? ` title="It has no work of its own: queueing it queues its sub-tickets, which run in order. It moves to Running when one starts and to Done when they all are"` : "";
+  const label = s === "todo" ? todoLabel(t) : s === "umbrella" ? umbrellaLabel(t) : s === "none" ? (t.stage === "queued" ? "Waiting for a slot" : "Not started") : s === "waits" ? "Waits on " + waitingOn(t).map((d) => d.key).join(", ") : (STATUS_NAME[s] || s);
+  const title = s === "todo" ? ` title="Your todo: nothing runs it, and it closes when you move it to Done. Claude tasks for it go under it (New Claude task)"` : s === "waits" ? ` title="${esc("Starts once these are done:\n" + waitTitle(t))}"` : s === "umbrella" ? ` title="It has no work of its own: queueing it queues its sub-tickets, which run in order. It moves to Running when one starts and to Done when they all are"` : "";
   return `<span class="status s-${esc(s)}"${title}><span class="dot"></span>${esc(label)}</span>`; };
 const stageBadge = (stage) => `<span class="badge st-${esc(stage)}">${esc(STAGE_NAME[stage] || stage)}</span>`;
 // A parent's progress from its sub-tickets' stages: "4/6 done · 1 running · 1 review" over a bar with a
@@ -877,6 +885,7 @@ function visible() {
     if (!state.subs && t.parent) return false;
     if (!state.done && t.stage === "done") return false;
     if (!state.parked && t.park) return false;
+    if (!state.todos && t.todo) return false;
     if (state.project && t.project !== state.project) return false;
     if (!state.project && !projectShown(t.project)) return false;
     if (q && !(t.key + " " + t.title + " " + t.body).toLowerCase().includes(q)) return false;
@@ -1023,7 +1032,8 @@ function renderNeeds() {
 
 function renderFilters() {
   const d = state.data; const mine = d.tickets.filter((r) => (state.subs || !r.ticket.parent) && (state.project ? r.ticket.project === state.project : projectShown(r.ticket.project)));
-  const done = mine.filter((r) => r.ticket.stage === "done").length; const all = mine.filter((r) => (state.done || r.ticket.stage !== "done") && (state.parked || !r.ticket.park));
+  const done = mine.filter((r) => r.ticket.stage === "done").length; const all = mine.filter((r) => (state.done || r.ticket.stage !== "done") && (state.parked || !r.ticket.park) && (state.todos || !r.ticket.todo));
+  const todos = mine.filter((r) => r.ticket.todo && (state.done || r.ticket.stage !== "done")).length;
   const parked = mine.filter((r) => r.ticket.park && (state.done || r.ticket.stage !== "done")).length;
   const n = (f) => all.filter((r) => f === "all" || (f === "me" ? needsMe(r) : f === "working" ? r.status === "busy" : r.ticket.flags.some((x) => x.kind === f))).length;
   const statuses = [["all", "All tickets"], ["me", "Needs me"], ["input", "Needs input"], ["question", "Questions"], ["review", "Review"], ["testing", "Testing"], ["working", "Working"]];
@@ -1043,6 +1053,8 @@ function renderFilters() {
   document.getElementById("doneN").textContent = !state.done && done ? `${done} hidden` : "";
   document.getElementById("parkedSw").checked = state.parked;
   document.getElementById("parkedN").textContent = !state.parked && parked ? `${parked} hidden` : "";
+  document.getElementById("todosSw").checked = state.todos;
+  document.getElementById("todosN").textContent = !state.todos && todos ? `${todos} hidden` : "";
 }
 
 function cardHtml(row, compact) {
@@ -1051,10 +1063,15 @@ function cardHtml(row, compact) {
     <span class="hd"><span class="top"><span>${esc(t.key)}</span><span class="grow"></span>${shellIcon(row)}<span>${ago(t.updated)}</span></span>
     <span class="t">${esc(t.title)}</span></span>
     ${t.parent ? `<span class="sub">sub-ticket of ${esc(t.parent)}${t.parallel ? " · parallel" : ""}</span>` : ""}
-    ${compact ? "" : `<span class="meta">${esc(t.project)} · ${esc(where(t))}</span>`}
+    ${compact ? "" : `<span class="meta">${esc(t.project)} · ${t.todo ? "todo" : esc(where(t))}</span>`}
     ${t.children ? `<span class="meta" title="${t.children_done} of its ${t.children} sub-ticket${t.children > 1 ? "s are" : " is"} done">${t.children_done}/${t.children} sub-ticket${t.children > 1 ? "s" : ""} done</span>` : ""}
-    ${statusHtml(row)}${pills(t)}${t.park ? `<span class="pills"><span class="unpark-ic" data-unpark="${esc(t.key)}" role="button" tabindex="0" title="End the park and resume its session now">Resume</span></span>` : ""}</button>`;
+    ${statusHtml(row)}${linkChip(t)}${pills(t)}${t.park ? `<span class="pills"><span class="unpark-ic" data-unpark="${esc(t.key)}" role="button" tabindex="0" title="${t.todo ? "End the wait: it's back to To do or Doing" : "End the park and resume its session now"}">${t.todo ? "Done waiting" : "Resume"}</span></span>` : ""}</button>`;
 }
+// Where a ticket came from (a Slack message, an email, a PR): opens in a new tab. In a card (a button) it's a span.
+const LINK_SVG = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.5 9.5l3-3M7 4.5l1-1a2.5 2.5 0 013.5 3.5l-1 1M9 11.5l-1 1a2.5 2.5 0 01-3.5-3.5l1-1"/></svg>`;
+const linkHost = (u) => { try { return new URL(u).hostname.replace(/^www\./, ""); } catch { return "link"; } };
+const safeLink = (u) => /^(https?:\/\/|mailto:|slack:\/\/)/i.test(u || "");
+const linkChip = (t) => safeLink(t.link) ? `<span class="pills"><span class="pill link-pill" data-link="${esc(t.link)}" role="link" tabindex="0" title="${esc("Open where it came from: " + t.link)}">${LINK_SVG}${esc(linkHost(t.link))}</span></span>` : "";
 // Done is a column only when it's toggled on.
 const columns = () => state.done ? STAGES : STAGES.filter((s) => s !== "done");
 // A column top to bottom: by priority (drag to reorder), except Done, latest first.
@@ -1365,21 +1382,30 @@ function renderDetailInner() {
   const acts = [];
   // Ran before (killed, or its session ended): a fresh session, resuming its conversation where Claude still has it.
   const ranBefore = t.killed || t.tmux || t.session_id;
-  if (t.park) acts.push(`<button type="button" class="btn primary" data-act="unpark" title="End the park and resume its session now, told you unparked it">Resume now</button>`,
+  // A parked todo has no session to resume: the wait just ends.
+  if (t.park && t.todo) acts.push(`<button type="button" class="btn" data-act="unpark-only" title="End the wait: it's back to To do or Doing">Done waiting</button>`);
+  else if (t.park) acts.push(`<button type="button" class="btn primary" data-act="unpark" title="End the park and resume its session now, told you unparked it">Resume now</button>`,
     `<button type="button" class="btn" data-act="unpark-only" title="End the park; its session stays stopped">Cancel park</button>`);
-  else if (!liveSession && t.stage !== "done" && !t.umbrella) acts.push(`<button type="button" class="btn primary" data-act="start"${ranBefore ? ` title="A fresh session for it${t.session_id ? ", resuming its conversation where Claude still has it" : ""}"` : ""}>${ranBefore ? "Restart" : "Start now"}</button>`);
+  // A todo is yours: what you do with it, and Claude tasks under it, instead of a session of its own.
+  if (t.todo && t.stage !== "done") {
+    if (t.stage === "backlog" && !t.park) acts.push(`<button type="button" class="btn" data-move="running" title="Move it to Running: you're doing it">Doing</button>`);
+    acts.push(`<button type="button" class="btn primary" data-to-done="${esc(t.key)}" title="It's finished: it goes to Done. Its Claude tasks carry on">Done</button>`,
+      `<button type="button" class="btn" data-new-task="${esc(t.key)}" title="A Claude ticket under this todo, told its title, description and link. It doesn't wait on the todo">New Claude task</button>`);
+    if (!t.park) acts.push(`<button type="button" class="btn" data-act="park" title="Park it while you wait on someone or something (a reply, a PR); a check can wake it">Waiting on…</button>`);
+  }
+  else if (!t.park && !liveSession && t.stage !== "done" && !t.umbrella && !t.todo) acts.push(`<button type="button" class="btn primary" data-act="start"${ranBefore ? ` title="A fresh session for it${t.session_id ? ", resuming its conversation where Claude still has it" : ""}"` : ""}>${ranBefore ? "Restart" : "Start now"}</button>`);
   if (d.gutter && liveSession && (d.guide || t.worktree)) acts.push(`<button type="button" class="btn" data-act="gutter">Open in gutter</button>`);
   // Automated review (the Review tab has its findings): out of Needs You while it runs.
   if ((t.stage === "review" || t.stage === "testing") && (t.base || t.change)) acts.push(d.autoreview?.status === "running"
     ? `<button type="button" class="btn" data-act="autoreview-stop" title="A separate Claude is reviewing the changes; the ticket is back in Needs you when it's done. This stops it.">Stop auto review</button>`
     : `<button type="button" class="btn" data-act="autoreview" title="A separate Claude reviews the changes; the ticket leaves Needs you until it's done, then its findings are on the Review tab. Nothing is sent to Claude until you choose.">${d.autoreview ? "Auto review again" : "Auto review"}</button>`);
   if (approve) acts.push(`<button type="button" class="btn" data-act="approve">${approve}</button>`);
-  if (t.stage === "backlog") acts.push(`<button type="button" class="btn" data-move="queued">Queue it</button>`);
+  if (t.stage === "backlog" && !t.todo) acts.push(`<button type="button" class="btn" data-move="queued">Queue it</button>`);
   const item = (attrs, label, note, cls) => `<button type="button" role="menuitem"${cls ? ` class="${cls}"` : ""} ${attrs}><span>${label}</span><small>${note}</small></button>`;
   const more = [];
-  if (!t.park && t.stage !== "done" && !t.umbrella) more.push(item(`data-act="park"`, "Park", "Wait on something outside cl (a PR, a deploy) without a session; a check can wake it"));
+  if (!t.park && t.stage !== "done" && !t.umbrella && !t.todo) more.push(item(`data-act="park"`, "Park", "Wait on something outside cl (a PR, a deploy) without a session; a check can wake it"));
   // Moves it (with its change and conversation, once under way) to a worktree of its own or back.
-  if (t.stage !== "done" && !t.umbrella && (t.repo || t.mode !== "queue")) more.push(t.mode === "queue"
+  if (t.stage !== "done" && !t.umbrella && !t.todo && (t.repo || t.mode !== "queue")) more.push(t.mode === "queue"
     ? item(`data-relocate="worktree"`, "Move to a worktree", "Give it a worktree of its own; Claude goes on there and the queue session is free")
     : item(`data-relocate="queue"`, "Move to the queue", "Go on in the project's main folder, in its session once that is free"));
   if (liveSession) more.push((more.length ? "<hr>" : "") + item(`data-act="kill"`, "Kill", "End its session; it keeps its stage and can be restarted", "danger"));
@@ -1393,15 +1419,16 @@ function renderDetailInner() {
   const own = { ticket: t, status: d.status }; const subs = d.subtickets || [];
   const status = subs.length && (["none", "nosession"].includes(statusOf(own)) || !statusHtml(own)) ? subProgress(subs, true)
     : statusHtml(own) + (subs.length ? subProgress(subs, true) : "");
-  const ws = t.stage === "done" && !t.worktree && !t.branch ? "" : `<span class="mono">${esc(where(t))}</span>`;
+  const ws = t.todo || (t.stage === "done" && !t.worktree && !t.branch) ? "" : `<span class="mono">${esc(where(t))}</span>`;
+  const link = safeLink(t.link) ? `<a class="mono" href="${esc(t.link)}" target="_blank" rel="noopener" title="Where it came from" style="overflow-wrap:anywhere">${esc(t.link)}</a>` : "";
   const parent = t.parent ? `<button type="button" class="btn" data-open="${esc(t.parent)}">Parent ${esc(t.parent)}</button>` : "";
   document.getElementById("ticketBody").innerHTML = `
     <div class="head"><span class="mono muted">${esc(t.key)} · ${esc(t.project)}</span>${pills(t)}
       <span class="hctl"><label class="muted" style="display:flex;gap:calc(6 * var(--u));align-items:center;font-size:calc(13 * var(--u))">Stage
-        <select id="stageSel">${STAGES.map((s) => `<option value="${s}" ${s === t.stage ? "selected" : ""}>${STAGE_NAME[s]}</option>`).join("")}</select></label>
+        <select id="stageSel">${STAGES.filter((s) => !t.todo || TODO_STAGES.includes(s)).map((s) => `<option value="${s}" ${s === t.stage ? "selected" : ""}>${STAGE_NAME[s]}</option>`).join("")}</select></label>
       ${moreMenu}<button type="button" class="xclose" id="closeDlg" title="Close" aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button></span></div>
     <h1>${esc(t.title)}</h1>
-    <div class="facts"><span class="stat">${shell}${status}</span>${ws}${t.onto ? `<span class="mono" title="It starts from this branch and merges into it, not trunk${t.onto_own ? "" : " (the project's target)"}">onto ${esc(t.onto)}</span>` : ""}${t.tmux ? `<span class="mono">${esc(t.tmux)}</span>` : ""}
+    <div class="facts"><span class="stat">${shell}${status}</span>${ws}${link}${t.onto ? `<span class="mono" title="It starts from this branch and merges into it, not trunk${t.onto_own ? "" : " (the project's target)"}">onto ${esc(t.onto)}</span>` : ""}${t.tmux ? `<span class="mono">${esc(t.tmux)}</span>` : ""}
       ${t.round > 1 ? `<span>round ${t.round}</span>` : ""}${planFact(t)}${parent}</div>
     ${acts.length ? `<div class="actions">${acts.join("")}</div>` : ""}${parkBox(t)}${driftBox(t, liveSession)}${depBox(d)}
     <div class="tabs" role="tablist">${tabs.map(([k, l]) => `<button type="button" role="tab" class="${state.tab === k ? "on" : ""}" aria-selected="${state.tab === k}" data-tab="${k}">${esc(l)}</button>`).join("")}</div>
@@ -1789,19 +1816,26 @@ function commentsTab(d) {
       <button type="button" class="btn primary" id="saveSend" ${t.tmux ? "" : "disabled"}>${back ? "Send back to Claude" : "Save and send to Claude"}</button></div>
     ${back ? `<p class="muted" style="margin:0;font-size:calc(12.5 * var(--u))">Sending a comment now starts another round: the ticket goes back to Running.</p>` : ""}</div>`;
 }
+const KIND_TITLE = "An umbrella is only a container for sub-tickets: it never runs. Queued, it moves to Running when a sub-ticket starts and to Done when they all are. A todo is yours: nothing runs it, it's only in Backlog (to do), Running (doing) or Done, and Claude tasks for it go under it";
+// Ticket / Umbrella / Todo: one select, as todos and umbrellas exclude each other.
+const kindOf = (t) => t?.todo ? "todo" : t?.umbrella ? "umbrella" : "ticket";
+const kindOptions = (t) => [["ticket", "Ticket"], ["umbrella", "Umbrella for sub-tickets"], ["todo", "Todo (yours, never runs)"]]
+  .map(([v, l]) => `<option value="${v}" ${kindOf(t) === v ? "selected" : ""}>${l}</option>`).join("");
 function detailsTab(d) {
   const t = d.ticket; const sessions = state.data.sessions;
   return `<form class="form" id="editForm">
     <label>Title<input type="text" name="title" value="${esc(t.title)}"></label>
     <label>Description<textarea name="body" rows="5" placeholder="Paste or drop screenshots here too">${esc(t.body)}</textarea></label>
     <div class="thumbs">${thumbsHtml(t.body)}</div>
+    <label title="Where it came from (a Slack message, an email, a PR); a todo's Claude tasks are told it">Link<input type="url" name="link" value="${esc(t.link || "")}" placeholder="https://..." autocomplete="off"></label>
     <div class="row2"><label>Project<select name="project">${state.data.projects.map((p) => `<option ${p.name === t.project ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select></label>
-      <label ${t.repo || t.mode !== "queue" ? "" : "hidden"}>Runs as<select name="mode"><option value="queue" ${t.mode === "queue" ? "selected" : ""}>Queue in a session</option><option value="worktree" ${t.mode === "worktree" ? "selected" : ""}>Its own worktree</option></select></label>
-      <label>Queue session<select name="target"><option value="">Project default / parent's</option>${sessions.map((s) => `<option value="${esc(s.tmux)}" ${s.tmux === t.target ? "selected" : ""}>${esc(s.name)} (${esc(s.status)})</option>`).join("")}</select></label></div>
-    <div class="row2"><label>Plan first<select name="plan"><option value="0">No</option><option value="1" ${t.plan ? "selected" : ""}>Yes</option></select></label>
-      <label title="An umbrella is only a container for sub-tickets: it never runs. Queued, it moves to Running when a sub-ticket starts and to Done when they all are">Kind<select name="umbrella"><option value="0">Ticket</option><option value="1" ${t.umbrella ? "selected" : ""}>Umbrella for sub-tickets</option></select></label>
+      <label ${t.todo ? "" : "hidden"} title="${esc(KIND_TITLE)}">Kind<select name="kind">${kindOptions(t)}</select></label>
+      <label ${!t.todo && (t.repo || t.mode !== "queue") ? "" : "hidden"}>Runs as<select name="mode"><option value="queue" ${t.mode === "queue" ? "selected" : ""}>Queue in a session</option><option value="worktree" ${t.mode === "worktree" ? "selected" : ""}>Its own worktree</option></select></label>
+      <label ${t.todo ? "hidden" : ""}>Queue session<select name="target"><option value="">Project default / parent's</option>${sessions.map((s) => `<option value="${esc(s.tmux)}" ${s.tmux === t.target ? "selected" : ""}>${esc(s.name)} (${esc(s.status)})</option>`).join("")}</select></label></div>
+    <div class="row2" ${t.todo ? "hidden" : ""}><label>Plan first<select name="plan"><option value="0">No</option><option value="1" ${t.plan ? "selected" : ""}>Yes</option></select></label>
+      <label title="${esc(KIND_TITLE)}">Kind<select name="kind2">${kindOptions(t)}</select></label>
       <label>Planning skill<input type="text" name="skill" value="${esc(t.skill)}" placeholder="grilling, wayfinder"></label></div>
-    <label ${t.repo || t.onto_own ? "" : "hidden"}>Target branch<input type="text" name="onto" class="mono" value="${esc(t.onto_own)}" autocomplete="off" placeholder="${t.onto && !t.onto_own ? "The project's: " + esc(t.onto) : "Trunk"}" title="A jj bookmark or git branch it starts from and merges into instead of trunk, like a long-lived feature branch. Empty: the project's target, else trunk"></label>
+    <label ${!t.todo && (t.repo || t.onto_own) ? "" : "hidden"}>Target branch<input type="text" name="onto" class="mono" value="${esc(t.onto_own)}" autocomplete="off" placeholder="${t.onto && !t.onto_own ? "The project's: " + esc(t.onto) : "Trunk"}" title="A jj bookmark or git branch it starts from and merges into instead of trunk, like a long-lived feature branch. Empty: the project's target, else trunk"></label>
     <div class="actions"><button type="submit" class="btn primary" value="close">Save and close</button>
       <button type="submit" class="btn">Save</button>
       ${t.worktree && t.stage === "done" ? `<button type="button" class="btn" data-act="cleanup">Remove worktree</button>` : ""}</div></form>`;
@@ -1903,17 +1937,18 @@ function openNew(parentKey, pick = {}) {
     <form class="form" id="newForm">
       ${d.projects.length ? `<label>Project<select name="project">${d.projects.map((x) => `<option ${x.name === proj ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select></label>` :
         `<div class="row2"><label>Project name<input type="text" name="pname" required></label><label>Directory<input type="text" name="pdir" placeholder="~/devel/project" required></label></div>`}
+      <label>Kind<select name="kind" title="${esc(KIND_TITLE)}">${kindOptions(null)}</select></label>
       <label>Title<input type="text" name="title" required></label>
       <label>What should happen<textarea name="body" rows="4" placeholder="Paste or drop screenshots here too"></textarea></label>
       <div class="thumbs"></div>
-      <div class="row2"><label>When<select name="when"><option value="queued">Start when there's room</option><option value="backlog">Backlog for now</option><option value="planning">Plan first</option></select></label>
+      <label data-todo-only hidden title="Where it came from (a Slack message, an email, a PR); its Claude tasks are told it">Link<input type="url" name="link" placeholder="https://..." autocomplete="off"></label>
+      <div class="row2" data-claude-only><label>When<select name="when"><option value="queued">Start when there's room</option><option value="backlog">Backlog for now</option><option value="planning">Plan first</option></select></label>
         <label data-repo-only>Runs as<select name="mode"><option value="queue" ${p?.mode !== "worktree" ? "selected" : ""}>Queue in a session</option><option value="worktree" ${p?.mode === "worktree" ? "selected" : ""}>Its own worktree</option></select></label></div>
-      <div class="row2"><label>Queue session<select name="target"><option value="">Project default / parent's</option>${d.sessions.map((s) => `<option value="${esc(s.tmux)}">${esc(s.name)} (${esc(s.status)})</option>`).join("")}</select></label>
+      <div class="row2" data-claude-only><label>Queue session<select name="target"><option value="">Project default / parent's</option>${d.sessions.map((s) => `<option value="${esc(s.tmux)}">${esc(s.name)} (${esc(s.status)})</option>`).join("")}</select></label>
         <label>Planning skill (plan first)<input type="text" name="skill" placeholder="grilling, wayfinder"></label></div>
-      <div class="row2"><label>Profile<select name="profile"><option value="">Project's</option>${d.profiles.map((x) => `<option>${esc(x)}</option>`).join("")}</select></label>
-        <label title="An umbrella is only a container for sub-tickets: it never runs. Queued, it moves to Running when a sub-ticket starts and to Done when they all are">Kind<select name="umbrella"><option value="0">Ticket</option><option value="1">Umbrella for sub-tickets</option></select></label></div>
+      <div class="row2" data-claude-only><label>Profile<select name="profile"><option value="">Project's</option>${d.profiles.map((x) => `<option>${esc(x)}</option>`).join("")}</select></label></div>
       <div class="row2"><label>Sub-ticket of<select name="parent"><option value="">None</option>${d.tickets.filter((r) => r.ticket.stage !== "done").map((r) => `<option value="${esc(r.ticket.key)}" ${r.ticket.key === parentKey ? "selected" : ""}>${esc(r.ticket.key)} ${esc(r.ticket.title)}</option>`).join("")}</select></label>
-        <label data-repo-only>Target branch<input type="text" name="onto" class="mono" autocomplete="off" placeholder="${esc(newOntoHint(d, proj, parentKey))}" title="A jj bookmark or git branch it starts from and merges into instead of trunk, like a long-lived feature branch. Empty: the parent's, else the project's, else trunk"></label></div>
+        <label data-repo-only data-claude-only>Target branch<input type="text" name="onto" class="mono" autocomplete="off" placeholder="${esc(newOntoHint(d, proj, parentKey))}" title="A jj bookmark or git branch it starts from and merges into instead of trunk, like a long-lived feature branch. Empty: the parent's, else the project's, else trunk"></label></div>
       <div class="actions"><button type="submit" class="btn primary" title="Ctrl+Enter">Create</button></div></form>`;
   const form = document.getElementById("newForm");
   for (const k of NEW_KEEP) {
@@ -1925,9 +1960,11 @@ function openNew(parentKey, pick = {}) {
   }
   // Only backlog, planning and queued are choices under When; other columns keep the default.
   if (pick.when && [...form.elements.when.options].some((o) => o.value === pick.when)) form.elements.when.value = pick.when;
+  if (pick.kind) form.elements.kind.value = pick.kind;
   newRepoFields(form, d, proj);
   // The empty Target branch's hint follows the chosen project and parent.
   form.addEventListener("change", (e) => {
+    if (e.target.name === "kind") newRepoFields(form, d, proj);
     if (e.target.name === "project" || e.target.name === "parent") form.elements.onto.placeholder = newOntoHint(d, form.elements.project?.value || proj, form.elements.parent.value);
     if (e.target.name === "project" || e.target.name === "parent") newRepoFields(form, d, proj);
   });
@@ -1939,7 +1976,11 @@ function newRepoFields(form, d, proj) {
   const parent = form.elements.parent.value ? d.tickets.find((r) => r.ticket.key === form.elements.parent.value)?.ticket : null;
   const name = form.elements.project?.value || parent?.project || proj;
   const repo = d.projects.find((x) => x.name === name)?.repo !== false;
+  // A todo is yours: none of what a Claude session takes, but where it came from.
+  const todo = form.elements.kind.value === "todo";
   for (const el of form.querySelectorAll("[data-repo-only]")) el.hidden = !repo;
+  for (const el of form.querySelectorAll("[data-claude-only]")) if (todo) el.hidden = true; else if (!el.matches("[data-repo-only]") || repo) el.hidden = false;
+  for (const el of form.querySelectorAll("[data-todo-only]")) el.hidden = !todo;
   if (!repo) { form.elements.mode.value = "queue"; form.elements.onto.value = ""; }
 }
 // What an empty Target branch means for a new ticket: its parent's target,
@@ -1954,8 +1995,11 @@ async function submitNew(form) {
   const f = Object.fromEntries(new FormData(form));
   try {
     if (f.pname) { await api("project", { name: f.pname, dir: f.pdir, mode: f.mode }); f.project = f.pname; }
-    const r = await api("ticket", { project: f.project, title: f.title, body: f.body, mode: f.mode, target: f.target || undefined,
-      stage: f.when, plan: f.when === "planning", skill: f.skill || undefined, profile: f.profile || undefined, parent: f.parent || undefined, umbrella: f.umbrella === "1", onto: f.onto?.trim() || undefined });
+    const todo = f.kind === "todo";
+    const r = await api("ticket", todo
+      ? { project: f.project, title: f.title, body: f.body, parent: f.parent || undefined, todo: true, link: f.link?.trim() || undefined, stage: "backlog" }
+      : { project: f.project, title: f.title, body: f.body, mode: f.mode, target: f.target || undefined,
+        stage: f.when, plan: f.when === "planning", skill: f.skill || undefined, profile: f.profile || undefined, parent: f.parent || undefined, umbrella: f.kind === "umbrella", onto: f.onto?.trim() || undefined });
     store("cl-new", JSON.stringify({ project: f.project, ...Object.fromEntries(NEW_KEEP.map((k) => [k, f[k] ?? ""])) }));
     document.getElementById("newDlg").close(); toast(`${r.key} created`); await refresh();
   } catch (e) { toast(e.message, true); }
@@ -2238,10 +2282,13 @@ async function doneExtras(key) {
   return { ...extra, finish, ...(finish === "tell" ? { tell: dlg.dataset.tell } : {}), ...(finish === "pr" && document.getElementById("finishThen") ? { then: dlg.dataset.then } : {}) };
 }
 const finishMsg = (key, x) => x.finish === "pr" ? `${key}: Claude is opening a PR${x.then ? "; a follow-up waits on it for the rest" : ""}` : x.finish === "merge" ? `${key}: Claude is merging it` : x.finish === "tell" ? `${key}: Claude got your instructions` : "";
+const todoRefusal = (stage) => `A todo is yours: it's only in Backlog (to do), Running (doing) or Done, not ${STAGE_NAME[stage]}. Waiting on someone is Park`;
 async function moveTo(key, stage, place = {}) {
   const row = state.data.tickets.find((r) => r.ticket.key === key);
   if (!row || row.ticket.stage === stage) return render();
-  const extra = stage === "done" ? await doneExtras(key) : {};
+  if (row.ticket.todo && !TODO_STAGES.includes(stage)) { toast(todoRefusal(stage), true); return render(); }
+  // A todo closes as it is: its Claude tasks carry on, and it has no branch.
+  const extra = stage === "done" && !row.ticket.todo ? await doneExtras(key) : {};
   if (!extra) { render(); if (state.detail) renderDetail(); return; }
   // Merge or PR: it stays put (Finishing) until Claude is done.
   if (finishMsg(key, extra)) { render(); return act(key, "move", { stage, ...extra }, finishMsg(key, extra)).catch(() => refresh()); }
@@ -2251,7 +2298,7 @@ async function moveTo(key, stage, place = {}) {
 }
 document.addEventListener("pointerdown", (e) => {
   const el = e.target.closest("[data-drag]");
-  if (!el || e.target.closest("[data-shell]") || !el.closest("#main") || drag || (e.pointerType === "mouse" && e.button !== 0)) return;
+  if (!el || e.target.closest("[data-shell], [data-link]") || !el.closest("#main") || drag || (e.pointerType === "mouse" && e.button !== 0)) return;
   const row = state.data?.tickets.find((r) => r.ticket.key === el.dataset.drag);
   drag = { el, key: el.dataset.drag, project: row?.ticket.project, id: e.pointerId, touch: e.pointerType !== "mouse", x: e.clientX, y: e.clientY };
   if (drag.touch) drag.hold = setTimeout(() => { if (drag && !drag.ghost) { liftCard(); dragMove(drag.x, drag.y); autoScroll(); } }, 350);
@@ -2273,7 +2320,7 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape" && drag) en
 // A drop ends with a click on the card; don't let it open the ticket.
 document.addEventListener("click", (e) => { if (Date.now() - dragDone < 400 && e.target.closest("[data-drag]")) { e.stopPropagation(); e.preventDefault(); } }, true);
 
-const unparkMsg = (k, how) => how === "started" ? `${k} unparked and resumed` : how === "waiting" ? `${k} unparked; it waits in Queued for its session` : how === "running" ? `${k} unparked` : `${k} unparked; its session stays stopped`;
+const unparkMsg = (k, how) => state.data?.tickets.find((r) => r.ticket.key === k)?.ticket.todo ? `${k}: done waiting` : how === "started" ? `${k} unparked and resumed` : how === "waiting" ? `${k} unparked; it waits in Queued for its session` : how === "running" ? `${k} unparked` : `${k} unparked; its session stays stopped`;
 
 // ---- events ----
 async function onClick(e) {
@@ -2284,6 +2331,8 @@ async function onClick(e) {
   const up = e.target.closest("[data-unpark]");
   if (up) { e.preventDefault(); e.stopPropagation(); const k = up.dataset.unpark;
     try { const r = await act(k, "unpark", {}); toast(unparkMsg(k, r.resumed)); } catch {} return; }
+  const ln = e.target.closest("[data-link]");
+  if (ln) { e.preventDefault(); e.stopPropagation(); if (safeLink(ln.dataset.link)) window.open(ln.dataset.link, "_blank", "noopener"); return; }
   const sh = e.target.closest("[data-shell]");
   if (sh) { e.preventDefault(); if (e.ctrlKey || e.metaKey) window.open(sh.dataset.shell); else location.href = sh.dataset.shell; return; }
   const el = e.target.closest("button, a, tr.row");
@@ -2327,6 +2376,7 @@ async function onClick(e) {
   if (ds.kill !== undefined) { document.getElementById("killDlg").close(ds.kill); return; }
   if (el.id === "needsHiddenBtn") { state.needsHidden = !state.needsHidden; store("cl-needs-hidden", state.needsHidden ? "1" : "0"); renderNeeds(); return; }
   if (ds.toDone) return moveTo(ds.toDone, "done");
+  if (ds.newTask) return openNew(ds.newTask, { kind: "ticket" });
   if (ds.pushAgain) {
     try { await api(`project/${encodeURIComponent(ds.pushAgain)}/push`, {}); toast("Pushing again; the result comes back to the ticket"); } catch (e) { toast(e.message, true); }
     return;
@@ -2469,6 +2519,7 @@ document.addEventListener("change", (e) => {
   if (e.target.id === "doneSw") { state.done = e.target.checked; store("cl-done", state.done ? "1" : "0"); render(); }
   if (e.target.id === "hiddenProjSw") { state.hiddenProjects = e.target.checked; store("cl-hidden-projects", state.hiddenProjects ? "1" : "0"); render(); }
   if (e.target.id === "parkedSw") { state.parked = e.target.checked; store("cl-parked", state.parked ? "1" : "0"); render(); }
+  if (e.target.id === "todosSw") { state.todos = e.target.checked; store("cl-todos", state.todos ? "1" : "0"); render(); }
   if (e.target.id === "subsSw") { state.subs = e.target.checked; store("cl-subs", state.subs ? "1" : "0"); render(); }
   if (e.target.id === "stageSel" && state.open) moveTo(state.open, e.target.value);
   // The project dialog's Code repo box: what only a repo has comes and goes with it.
@@ -2746,7 +2797,11 @@ async function onSubmit(e) {
   if (e.target.id === "editForm") {
     const f = Object.fromEntries(new FormData(e.target));
     const was = state.detail?.ticket?.mode;
-    let r; try { r = await act(state.open, "edit", { title: f.title, body: f.body, project: f.project, mode: f.mode, target: f.target, plan: f.plan === "1", umbrella: f.umbrella === "1", skill: f.skill, onto: f.onto.trim() }); } catch { return; }
+    // A todo's form shows Kind up top (its other fields are hidden); a ticket's, next to Plan first.
+    const kind = state.detail?.ticket.todo ? f.kind : f.kind2;
+    let r; try { r = await act(state.open, "edit", kind === "todo"
+      ? { title: f.title, body: f.body, project: f.project, link: f.link.trim(), todo: true, umbrella: false, plan: false }
+      : { title: f.title, body: f.body, project: f.project, link: f.link.trim(), mode: f.mode, target: f.target, plan: f.plan === "1", umbrella: kind === "umbrella", todo: false, skill: f.skill, onto: f.onto.trim() }); } catch { return; }
     toast(r?.result && was && was !== f.mode ? "Saved. " + relocatedMsg(r.result, f.mode) : "Saved");
     if (e.submitter?.value === "close") document.getElementById("ticketDlg").close();
   }
@@ -3100,7 +3155,7 @@ function palCommands() {
     { label: "Open the voice operator", run: () => { location.href = "/?attach=voice"; } },
     { label: "Search tickets", hint: "/", run: searchFocus },
     view("board", "Board"), view("lanes", "Lanes"), view("list", "List"), view("projects", "Projects"),
-    sw("doneSw", "done tickets"), sw("parkedSw", "parked tickets"), sw("subsSw", "sub-tickets"),
+    sw("doneSw", "done tickets"), sw("parkedSw", "parked tickets"), sw("todosSw", "todos"), sw("subsSw", "sub-tickets"),
     { label: state.needsOpen ? "Collapse Needs you" : "Expand Needs you", run: () => document.getElementById("needsToggle").click() },
     { label: "Notifications", run: () => openPush() },
     { label: "Terminal", run: () => { location.href = "/"; } },
@@ -3126,19 +3181,19 @@ function palActions(key) {
     if (flagTabs.includes(tab) || (tab === "plan" && t.stage === "planning") || (tab === "review" && t.stage === "review") || (tab === "test" && t.stage === "testing")) a(`Open: ${l}`, open(tab));
   for (const [tab, l] of [["session", "Session"], ["comments", "Comments"], ["activity", "Activity"], ["details", "Details"]]) a(`Open: ${l}`, open(tab));
   if (live) a("Open shell", () => { location.href = shellHref(t); }, "the session's terminal");
-  if (t.park) a("Resume now", async () => { try { const r = await act(key, "unpark", {}); toast(unparkMsg(key, r.resumed)); } catch {} }, "end the park");
-  else if (!live && t.stage !== "done" && !t.umbrella) a(t.killed || t.tmux || t.session_id ? "Restart" : "Start now", () => act(key, "start", {}, t.killed || t.session_id ? "Restarted" : "Started").catch(() => {}));
+  if (t.park) a(t.todo ? "Done waiting" : "Resume now", async () => { try { const r = await act(key, "unpark", {}); toast(unparkMsg(key, r.resumed)); } catch {} }, "end the park");
+  else if (!live && t.stage !== "done" && !t.umbrella && !t.todo) a(t.killed || t.tmux || t.session_id ? "Restart" : "Start now", () => act(key, "start", {}, t.killed || t.session_id ? "Restarted" : "Started").catch(() => {}));
   if (approveLabel(t))
     a(approveLabel(t), async () => {
       if (t.stage === "testing") { const extra = await doneExtras(key); if (!extra) return; return act(key, "approve", extra, finishMsg(key, extra) || "Done").catch(() => {}); }
       return act(key, "approve", {}, "Approved").catch(() => {});
     });
-  for (const s of STAGES) if (s !== t.stage) a(`Move to ${STAGE_NAME[s]}`, () => moveTo(key, s));
+  for (const s of STAGES) if (s !== t.stage && (!t.todo || TODO_STAGES.includes(s))) a(`Move to ${STAGE_NAME[s]}`, () => moveTo(key, s));
   if (needsMe(row)) a("Hide from Needs you", () => act(key, "hide", {}, `${key} hidden from Needs you; a new flag brings it back`).catch(() => {}));
   if (!t.park && t.stage !== "done" && !t.umbrella) a("Park…", async () => { await openTicket(key); if (state.detail && state.open === key) openPark(state.detail); });
   if (live) a("Kill…", async () => { await openTicket(key); const d = state.detail; if (!d || state.open !== key || !await confirmKill(d)) return;
     try { await act(key, "kill", {}, `Killed ${d.ticket.tmux}; Restart brings it back`); } catch {} }, "end its session");
-  a("New sub-ticket", () => openNew(key));
+  a(t.todo ? "New Claude task" : "New sub-ticket", () => openNew(key, { kind: "ticket" }));
   a("Copy key", () => navigator.clipboard?.writeText(key).then(() => toast(`Copied ${key}`), () => toast("Couldn't copy", true)));
   return out;
 }

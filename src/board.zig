@@ -262,6 +262,16 @@ pub const Ticket = struct {
     /// never gets a session. Queued, it moves to Running when one of them
     /// starts, and to Done when the last one is done (see `subticketsSettled`).
     umbrella: bool = false,
+    /// The human's own ticket, not Claude's work: nothing about it runs by
+    /// itself. The dispatcher never starts it (`hold`), it never closes when
+    /// its sub-tickets are done, and it lives in Backlog ("to do"), Running
+    /// ("doing") or Done only; waiting on someone is a park. Its sub-tickets
+    /// are Claude tasks for it: parallel by default, and they don't wait on
+    /// it. Never an umbrella or a planning ticket.
+    todo: bool = false,
+    /// Where it came from (a Slack permalink, an email, a PR URL), "" for
+    /// none. Any ticket may have one; a todo's sub-tickets are told it.
+    link: []const u8 = "",
     /// On its way to Done: "merge" or "pr" while Claude merges its branch or
     /// opens a PR (it moves to Done when Claude is finished), else "".
     finishing: []const u8 = "",
@@ -317,6 +327,9 @@ pub const Error = error{
     /// A project can't stop being a code repo while its unfinished tickets
     /// have work in it (a worktree, a jj change or a branch).
     RepoWork,
+    /// Not for a todo (`Ticket.todo`): a stage other than Backlog, Running
+    /// or Done, a plan, being an umbrella, or Claude saying it's done.
+    Todo,
 };
 
 /// Worktree slots a new project gets when none are given.
@@ -383,6 +396,8 @@ const schema =
     \\  asking TEXT NOT NULL DEFAULT '',
     \\  parallel INTEGER NOT NULL DEFAULT 0,
     \\  umbrella INTEGER NOT NULL DEFAULT 0,
+    \\  todo INTEGER NOT NULL DEFAULT 0,
+    \\  link TEXT NOT NULL DEFAULT '',
     \\  onto TEXT NOT NULL DEFAULT '',
     \\  pr_then TEXT NOT NULL DEFAULT '',
     \\  created INTEGER NOT NULL,
@@ -458,7 +473,7 @@ pub fn open(ctx: Ctx, cfg: config.Config) !Db {
     return db;
 }
 
-const version = 11;
+const version = 12;
 
 /// Version 11: parked tickets. Made whatever the version says, as the
 /// columns above are.
@@ -556,6 +571,9 @@ pub fn migrate(db: Db) !void {
         _ = try addColumn(db, "projects", "push_after_merge", "TEXT NOT NULL DEFAULT ''");
         // Projects that aren't code repos.
         _ = try addColumn(db, "projects", "repo", "INTEGER NOT NULL DEFAULT 1");
+        // Version 12: todos, and where a ticket came from.
+        _ = try addColumn(db, "tickets", "todo", "INTEGER NOT NULL DEFAULT 0");
+        _ = try addColumn(db, "tickets", "link", "TEXT NOT NULL DEFAULT ''");
     }
     if (have >= version) return;
     // Version 1 had no sub-tickets, version 2 no planning skill.
@@ -1038,6 +1056,14 @@ pub const TicketInput = struct {
     skill: ?[]const u8 = null,
     /// An umbrella (see `Ticket.umbrella`).
     umbrella: ?bool = null,
+    /// A todo (see `Ticket.todo`).
+    todo: ?bool = null,
+    /// Where it came from (`Ticket.link`).
+    link: ?[]const u8 = null,
+    /// createTicket: a sub-ticket that doesn't wait for the one before it;
+    /// null for the default (parallel under a todo, in order otherwise).
+    /// Changed later with `setParallel`.
+    parallel: ?bool = null,
     /// Target branch (`Ticket.onto_own`); "" for the project's. A new
     /// sub-ticket without one takes its parent's.
     onto: ?[]const u8 = null,
@@ -1065,6 +1091,12 @@ pub fn createTicket(ctx: Ctx, db: Db, a: std.mem.Allocator, in: TicketInput) Err
     if (!p.repo and (in.mode == .worktree or (in.onto orelse @as([]const u8, "")).len > 0)) return error.NoRepo;
     const plan = in.plan orelse false;
     const stage = in.stage orelse (if (plan) Stage.planning else Stage.backlog);
+    const todo = in.todo orelse false;
+    if (todo and (plan or in.umbrella == true or !todoStage(stage))) return error.Todo;
+    if (!validLink(in.link orelse "")) return error.BadInput;
+    // A Claude task for a todo goes on its own: it neither waits on the todo
+    // (see `blockers`) nor on the tasks before it.
+    const parallel = in.parallel orelse if (parent) |pt| pt.todo else false;
     try db.execMulti("BEGIN IMMEDIATE");
     errdefer db.execMulti("ROLLBACK") catch {};
     const num = (try db.int("SELECT next_num FROM projects WHERE name = ?1", .{p.name})) orelse return error.NotFound;
@@ -1076,9 +1108,9 @@ pub fn createTicket(ctx: Ctx, db: Db, a: std.mem.Allocator, in: TicketInput) Err
     };
     const t = now(ctx);
     try db.exec(
-        \\INSERT INTO tickets (key, project, title, body, stage, mode, plan, target, profile, parent, skill, created, updated, rank, umbrella, onto)
-        \\VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, (SELECT coalesce(max(rank), 0) + ?13 FROM tickets), ?14, ?15)
-    , .{ key, p.name, title, body, @tagName(stage), @tagName(in.mode orelse p.mode), plan, in.target orelse "", in.profile orelse p.profile, if (parent) |pt| pt.id else null, in.skill orelse "", t, rank_gap, in.umbrella orelse false, if (!p.repo) @as([]const u8, "") else in.onto orelse if (parent) |pt| pt.onto_own else "" });
+        \\INSERT INTO tickets (key, project, title, body, stage, mode, plan, target, profile, parent, skill, created, updated, rank, umbrella, onto, todo, link, parallel)
+        \\VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, (SELECT coalesce(max(rank), 0) + ?13 FROM tickets), ?14, ?15, ?16, ?17, ?18)
+    , .{ key, p.name, title, body, @tagName(stage), @tagName(in.mode orelse p.mode), plan, in.target orelse "", in.profile orelse p.profile, if (parent) |pt| pt.id else null, in.skill orelse "", t, rank_gap, in.umbrella orelse false, if (!p.repo) @as([]const u8, "") else in.onto orelse if (parent) |pt| pt.onto_own else "", todo, std.mem.trim(u8, in.link orelse "", " \t\r\n"), parallel });
     const id = db.lastId();
     try logEvent(ctx, db, id, "created", @tagName(stage));
     if (parent) |pt| {
@@ -1095,7 +1127,7 @@ const ticket_cols = "t.id, t.key, t.project, t.title, t.body, t.stage, t.mode, t
     "EXISTS (SELECT 1 FROM events e WHERE e.ticket = t.id AND e.kind = 'started'), " ++
     "(SELECT count(*) FROM tickets c WHERE c.parent = t.id AND c.stage = 'done'), t.umbrella, " ++
     "t.onto, coalesce((SELECT p.onto FROM projects p WHERE p.name = t.project), ''), t.autoreview, t.pr_then, " ++
-    "coalesce((SELECT p.repo FROM projects p WHERE p.name = t.project), 1)";
+    "coalesce((SELECT p.repo FROM projects p WHERE p.name = t.project), 1), t.todo, t.link";
 
 fn readTicket(st: sqlite.Stmt, a: std.mem.Allocator) !Ticket {
     return .{
@@ -1140,6 +1172,8 @@ fn readTicket(st: sqlite.Stmt, a: std.mem.Allocator) !Ticket {
         .autoreview = try st.dupe(a, 38),
         .pr_then = try st.dupe(a, 39),
         .repo = st.int(40) != 0,
+        .todo = st.int(41) != 0,
+        .link = try st.dupe(a, 42),
     };
 }
 
@@ -1205,6 +1239,8 @@ pub const Filter = struct {
     parked: bool = false,
     /// Leave out the tickets of hidden projects.
     shown: bool = false,
+    /// Only todos (true), or no todos (false).
+    todo: ?bool = null,
 };
 
 /// Words of `q` as FTS5 prefix terms ("foo" bar → "foo"* "bar"*), so user
@@ -1240,6 +1276,7 @@ pub fn listTickets(db: Db, a: std.mem.Allocator, f: Filter) Error![]Ticket {
     if (f.flag != null) try sql.appendSlice(a, " AND EXISTS (SELECT 1 FROM flags g WHERE g.ticket = t.id AND g.cleared IS NULL AND g.kind = ?3)");
     if (f.parked) try sql.appendSlice(a, " AND EXISTS (SELECT 1 FROM parks k WHERE k.ticket = t.id)");
     if (f.shown) try sql.appendSlice(a, " AND NOT EXISTS (SELECT 1 FROM projects p WHERE p.name = t.project AND p.hidden != 0)");
+    if (f.todo) |v| try sql.appendSlice(a, if (v) " AND t.todo != 0" else " AND t.todo = 0");
     // Parked: it waits on something outside cl, not on you.
     if (f.needs) try sql.appendSlice(a, " AND NOT EXISTS (SELECT 1 FROM parks k WHERE k.ticket = t.id)");
     if (f.needs) try sql.appendSlice(a, if (f.hidden)
@@ -1307,6 +1344,14 @@ pub fn updateTicket(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, in:
     const moving = in.project.len > 0 and !std.mem.eql(u8, in.project, t.project);
     const repo = if (moving) (try getProject(db, a, in.project)).repo else t.repo;
     if (in.title) |v| if (v.len == 0) return error.BadInput;
+    // A todo is the human's: never planned, never an umbrella, never further
+    // along than Running.
+    const todo = in.todo orelse t.todo;
+    if (todo and ((in.plan orelse t.plan) or (in.umbrella orelse t.umbrella) or !todoStage(t.stage))) return error.Todo;
+    // Claude's work under way (a session, a worktree, a change) can't become
+    // yours: nothing would finish it.
+    if (todo and !t.todo and t.stage != .done and (t.tmux.len > 0 or t.worktree.len > 0 or t.change.len > 0 or t.branch.len > 0)) return error.Todo;
+    if (!validLink(in.link orelse "")) return error.BadInput;
     if (!repo) {
         if (in.mode == .worktree or (in.onto orelse @as([]const u8, "")).len > 0) return error.NoRepo;
         // Into a repo-less project: work it has in a repo would be left
@@ -1327,6 +1372,11 @@ pub fn updateTicket(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, in:
     if (in.profile) |v| try db.exec("UPDATE tickets SET profile = ?2 WHERE id = ?1", .{ t.id, v });
     if (in.skill) |v| try db.exec("UPDATE tickets SET skill = ?2 WHERE id = ?1", .{ t.id, v });
     if (in.umbrella) |v| try db.exec("UPDATE tickets SET umbrella = ?2 WHERE id = ?1", .{ t.id, v });
+    if (in.todo) |v| try db.exec("UPDATE tickets SET todo = ?2 WHERE id = ?1", .{ t.id, v });
+    // Made a todo: its unfinished sub-tickets become its tasks, which don't
+    // wait on one another (as new ones under it don't: see createTicket).
+    if (in.todo == true and !t.todo) try db.exec("UPDATE tickets SET parallel = 1 WHERE parent = ?1 AND stage != 'done'", .{t.id});
+    if (in.link) |v| try db.exec("UPDATE tickets SET link = ?2 WHERE id = ?1", .{ t.id, std.mem.trim(u8, v, " \t\r\n") });
     if (in.onto) |v| try db.exec("UPDATE tickets SET onto = ?2 WHERE id = ?1", .{ t.id, v });
     if (in.project.len > 0 and !std.mem.eql(u8, in.project, t.project)) {
         _ = try getProject(db, a, in.project);
@@ -1657,7 +1707,7 @@ pub fn blockers(db: Db, a: std.mem.Allocator, id: i64) Error![]Dep {
     }
     {
         // The parent runs first: split-off work builds on it.
-        var st = try db.query("SELECT p.id, p.key, p.title, p.stage FROM tickets t JOIN tickets p ON p.id = t.parent WHERE t.id = ?1 AND p.umbrella = 0", .{id});
+        var st = try db.query("SELECT p.id, p.key, p.title, p.stage FROM tickets t JOIN tickets p ON p.id = t.parent WHERE t.id = ?1 AND p.umbrella = 0 AND p.todo = 0", .{id});
         defer st.finalize();
         if (try st.step()) {
             var d = try readDep(st, a, false);
@@ -1694,10 +1744,13 @@ pub const Hold = enum {
     blocked,
     /// An umbrella: it has no work of its own, its sub-tickets run.
     subtickets,
+    /// A todo: it's the human's, so nothing starts it by itself.
+    todo,
 };
 
 pub fn hold(t: Ticket) ?Hold {
     if (t.umbrella) return .subtickets;
+    if (t.todo) return .todo;
     for (t.blocked_by) |d| if (d.stage != .done) return .blocked;
     return null;
 }
@@ -1803,7 +1856,7 @@ pub fn dependents(db: Db, a: std.mem.Allocator, id: i64) Error![]const []const u
 fn moveSubtickets(ctx: Ctx, db: Db, id: i64, from: Stage, to: Stage) Error!void {
     if ((try db.int("SELECT 1 FROM tickets WHERE id = ?1 AND umbrella != 0", .{id})) == null) return;
     while (try db.int(
-        \\SELECT id FROM tickets c WHERE c.parent = ?1 AND c.stage = ?2 AND c.tmux = ''
+        \\SELECT id FROM tickets c WHERE c.parent = ?1 AND c.stage = ?2 AND c.tmux = '' AND c.todo = 0
         \\  AND NOT EXISTS (SELECT 1 FROM events e WHERE e.ticket = c.id AND e.kind = 'started') ORDER BY c.rank, c.id LIMIT 1
     , .{ id, @as([]const u8, @tagName(from)) })) |c| {
         try moveId(ctx, db, c, from, to);
@@ -1831,8 +1884,10 @@ fn underWay(stage: Stage) bool {
 ///   its own umbrella; one in Backlog or Planning stays put (more sub-tickets
 ///   may come);
 /// - any other parent gets `ready-to-close`: it may have work of its own
-///   left, so the human decides.
+///   left, so the human decides;
+/// - a todo gets nothing: it is the human's, and closes when they say so.
 fn subticketsSettled(ctx: Ctx, db: Db, pid: i64) Error!void {
+    if ((try db.int("SELECT 1 FROM tickets WHERE id = ?1 AND todo != 0", .{pid})) != null) return;
     if ((try db.int("SELECT 1 FROM tickets WHERE parent = ?1 AND stage != 'done'", .{pid})) != null) return;
     const n = (try db.int("SELECT count(*) FROM tickets WHERE parent = ?1", .{pid})) orelse 0;
     if (n == 0) return;
@@ -1889,6 +1944,7 @@ pub fn move(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, stage: Stag
 }
 
 fn moveId(ctx: Ctx, db: Db, id: i64, from: Stage, to: Stage) Error!void {
+    if (!todoStage(to) and (try db.int("SELECT 1 FROM tickets WHERE id = ?1 AND todo != 0", .{id})) != null) return error.Todo;
     // Queued again, a killed ticket waits for the dispatcher like any other.
     try db.exec("UPDATE tickets SET stage = ?2, finishing = '', killed = killed AND ?2 != 'queued' WHERE id = ?1", .{ id, @as([]const u8, @tagName(to)) });
     var buf: [64]u8 = undefined;
@@ -2114,6 +2170,8 @@ pub fn addComment(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, autho
 /// with `review` (detail "plan") until the plan is approved.
 pub fn done(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, summary: []const u8) Error!void {
     const t = try getTicket(db, a, key);
+    // Yours: it closes when you move it to Done.
+    if (t.todo) return error.Todo;
     if (t.stage == .planning) {
         if (summary.len > 0) try db.exec("INSERT INTO comments (ticket, author, body, sent, at) VALUES (?1, 'claude', ?2, 0, ?3)", .{ t.id, summary, now(ctx) });
         try clearFlagId(ctx, db, t.id, flag_question);
@@ -2191,6 +2249,35 @@ pub fn requeue(ctx: Ctx, db: Db, t: Ticket) Error!void {
 /// The ticket's jj change and its bookmark ("" and "" to forget them).
 pub fn setChange(db: Db, id: i64, change: []const u8, bookmark: []const u8) Error!void {
     try db.exec("UPDATE tickets SET change_id = ?2, branch = ?3 WHERE id = ?1", .{ id, change, bookmark });
+}
+
+/// A ticket's link (`Ticket.link`) is a web page, a mail or a Slack link
+/// ("" for none): the board opens it, so nothing that would run there
+/// (javascript:, data:).
+pub fn validLink(link: []const u8) bool {
+    const l = std.mem.trim(u8, link, " \t\r\n");
+    if (l.len == 0) return true;
+    for ([_][]const u8{ "https://", "http://", "mailto:", "slack://" }) |p| {
+        if (l.len > p.len and std.ascii.startsWithIgnoreCase(l, p)) return true;
+    }
+    return false;
+}
+
+test validLink {
+    try std.testing.expect(validLink(""));
+    try std.testing.expect(validLink("https://slack.com/archives/C1/p2"));
+    try std.testing.expect(validLink("MAILTO:josh@example.com"));
+    try std.testing.expect(!validLink("javascript:alert(1)"));
+    try std.testing.expect(!validLink(" data:text/html,x"));
+    try std.testing.expect(!validLink("https://"));
+}
+
+/// What error.Todo means to the human.
+pub const todo_refused = "it's a todo: it's yours, so it is only ever in Backlog (to do), Running (doing) or Done, never planned, an umbrella or run by Claude; waiting on someone is a park";
+
+/// The stages a todo can be in: Backlog (to do), Running (doing) and Done.
+pub fn todoStage(s: Stage) bool {
+    return s == .backlog or s == .running or s == .done;
 }
 
 /// Space between neighboring ranks: room to put tickets in between.
@@ -3194,4 +3281,134 @@ test "migrate: a board from before umbrellas gets the column, and its parents th
     try updateTicket(ctx, db, a, roadmap, .{ .umbrella = false });
     try migrate(db);
     try testing.expect(!(try getTicket(db, a, roadmap)).umbrella);
+}
+
+test "migrate: a board from before todos gets the todo and link columns" {
+    const ctx = testCtx();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try Db.open(":memory:");
+    defer db.close();
+    try migrate(db);
+    try addProject(db, .{ .name = "qa", .dir = "/x/qa" });
+    const k = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Old" });
+    try db.execMulti("ALTER TABLE tickets DROP COLUMN todo; ALTER TABLE tickets DROP COLUMN link");
+    try migrate(db);
+    const t = try getTicket(db, a, k);
+    try testing.expect(!t.todo);
+    try testing.expectEqualStrings("", t.link);
+}
+
+test "a todo is the human's: only backlog, running or done, never planned, an umbrella or done by Claude, and never held to start" {
+    const ctx = testCtx();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try Db.open(":memory:");
+    defer db.close();
+    try migrate(db);
+    try addProject(db, .{ .name = "me", .dir = "/x/me", .repo = false });
+    const k = try createTicket(ctx, db, a, .{ .project = "me", .title = "Reply to Josh", .todo = true, .link = " https://slack.example/p1 \n" });
+    const t = try getTicket(db, a, k);
+    try testing.expect(t.todo);
+    try testing.expectEqualStrings("https://slack.example/p1", t.link);
+    try testing.expectEqual(Stage.backlog, t.stage);
+    // The dispatcher leaves it alone, in any stage.
+    try testing.expectEqual(Hold.todo, hold(t).?);
+    // Never a plan, an umbrella, or in a stage Claude's work goes through.
+    try testing.expectError(error.Todo, createTicket(ctx, db, a, .{ .project = "me", .title = "x", .todo = true, .plan = true }));
+    try testing.expectError(error.Todo, createTicket(ctx, db, a, .{ .project = "me", .title = "x", .todo = true, .umbrella = true }));
+    try testing.expectError(error.Todo, createTicket(ctx, db, a, .{ .project = "me", .title = "x", .todo = true, .stage = .queued }));
+    try testing.expectError(error.Todo, updateTicket(ctx, db, a, k, .{ .umbrella = true }));
+    try testing.expectError(error.Todo, updateTicket(ctx, db, a, k, .{ .plan = true }));
+    for ([_]Stage{ .planning, .queued, .review, .testing }) |s| try testing.expectError(error.Todo, move(ctx, db, a, k, s));
+    try testing.expectError(error.Todo, done(ctx, db, a, k, "finished"));
+    try move(ctx, db, a, k, .running);
+    try testing.expectEqual(Stage.running, (try getTicket(db, a, k)).stage);
+    // A ticket in Review can't become one; one in Backlog can, and back.
+    const r = try createTicket(ctx, db, a, .{ .project = "me", .title = "R", .stage = .review });
+    try testing.expectError(error.Todo, updateTicket(ctx, db, a, r, .{ .todo = true }));
+    const b = try createTicket(ctx, db, a, .{ .project = "me", .title = "B" });
+    try updateTicket(ctx, db, a, b, .{ .todo = true, .link = "https://mail.example/1" });
+    try testing.expect((try getTicket(db, a, b)).todo);
+    try updateTicket(ctx, db, a, b, .{ .todo = false, .link = "" });
+    try testing.expect(!(try getTicket(db, a, b)).todo);
+    try testing.expectEqualStrings("", (try getTicket(db, a, b)).link);
+    // Listing: only todos, or none.
+    const todos = try listTickets(db, a, .{ .todo = true });
+    try testing.expectEqual(@as(usize, 1), todos.len);
+    try testing.expectEqualStrings(k, todos[0].key);
+    try testing.expectEqual(@as(usize, 2), (try listTickets(db, a, .{ .todo = false })).len);
+}
+
+test "a todo's tasks are parallel and don't wait on it, and it doesn't close or get ready-to-close when they're done" {
+    const ctx = testCtx();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try Db.open(":memory:");
+    defer db.close();
+    try migrate(db);
+    try addProject(db, .{ .name = "qa", .dir = "/x/qa" });
+    const k = try createTicket(ctx, db, a, .{ .project = "qa", .title = "1:1 prep", .todo = true });
+    const c1 = try createTicket(ctx, db, a, .{ .parent = k, .title = "Notes", .stage = .queued });
+    const c2 = try createTicket(ctx, db, a, .{ .parent = k, .title = "Agenda", .stage = .queued });
+    for ([_][]const u8{ c1, c2 }) |c| {
+        const t = try getTicket(db, a, c);
+        try testing.expect(t.parallel);
+        // Not the todo, not the task before it: nothing holds it.
+        try testing.expectEqual(@as(usize, 0), t.blocked_by.len);
+        try testing.expect(hold(t) == null);
+    }
+    // Told otherwise, a task waits for the one before it.
+    const c3 = try createTicket(ctx, db, a, .{ .parent = k, .title = "After agenda", .parallel = false });
+    const t3 = try getTicket(db, a, c3);
+    try testing.expectEqual(@as(usize, 2), t3.blocked_by.len);
+    try testing.expectEqualStrings(c2, t3.blocked_by[1].key);
+    try move(ctx, db, a, c1, .done);
+    try move(ctx, db, a, c2, .done);
+    try move(ctx, db, a, c3, .done);
+    const after = try getTicket(db, a, k);
+    try testing.expectEqual(Stage.backlog, after.stage);
+    try testing.expectEqual(@as(usize, 0), after.flags.len);
+    // An umbrella still closes by itself (and a plain parent is flagged).
+    const u = try createTicket(ctx, db, a, .{ .project = "qa", .title = "U", .umbrella = true, .stage = .queued });
+    const uc = try createTicket(ctx, db, a, .{ .parent = u, .title = "Only", .stage = .queued });
+    try move(ctx, db, a, uc, .done);
+    try testing.expectEqual(Stage.done, (try getTicket(db, a, u)).stage);
+    // A todo under an umbrella isn't queued with it: it's still the human's.
+    const ub = try createTicket(ctx, db, a, .{ .project = "qa", .title = "U2", .umbrella = true });
+    const ut = try createTicket(ctx, db, a, .{ .parent = ub, .title = "Mine", .todo = true });
+    const uw = try createTicket(ctx, db, a, .{ .parent = ub, .title = "Claude's" });
+    try move(ctx, db, a, ub, .queued);
+    try testing.expectEqual(Stage.backlog, (try getTicket(db, a, ut)).stage);
+    try testing.expectEqual(Stage.queued, (try getTicket(db, a, uw)).stage);
+}
+
+test "a ticket made a todo: its tasks stop waiting on one another; Claude's work under way can't become one; links are checked" {
+    const ctx = testCtx();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try Db.open(":memory:");
+    defer db.close();
+    try migrate(db);
+    try addProject(db, .{ .name = "qa", .dir = "/x/qa" });
+    const p = try createTicket(ctx, db, a, .{ .project = "qa", .title = "P" });
+    _ = try createTicket(ctx, db, a, .{ .parent = p, .title = "One" });
+    const two = try createTicket(ctx, db, a, .{ .parent = p, .title = "Two" });
+    try testing.expectEqual(@as(usize, 2), (try getTicket(db, a, two)).blocked_by.len);
+    try updateTicket(ctx, db, a, p, .{ .todo = true });
+    const t2 = try getTicket(db, a, two);
+    try testing.expect(t2.parallel);
+    try testing.expectEqual(@as(usize, 0), t2.blocked_by.len);
+    // Running with a session (or a change): refused.
+    const r = try createTicket(ctx, db, a, .{ .project = "qa", .title = "R", .stage = .running });
+    try db.exec("UPDATE tickets SET tmux = 'cl_qa_9' WHERE key = ?1", .{r});
+    try testing.expectError(error.Todo, updateTicket(ctx, db, a, r, .{ .todo = true }));
+    // Links the board would run rather than open.
+    try testing.expectError(error.BadInput, createTicket(ctx, db, a, .{ .project = "qa", .title = "x", .link = "javascript:alert(1)" }));
+    try testing.expectError(error.BadInput, updateTicket(ctx, db, a, p, .{ .link = "javascript:alert(1)" }));
+    try updateTicket(ctx, db, a, p, .{ .link = "mailto:josh@example.com" });
 }

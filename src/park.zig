@@ -273,7 +273,8 @@ pub fn park(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, o: Op
     try board.clearFlagId(ctx, db, t.id, board.flag_pr_closed);
     const live = actions.liveSession(ctx, t) orelse {
         // No session: it still waits for the park, not for the dispatcher.
-        try db.exec("UPDATE tickets SET killed = 1 WHERE id = ?1", .{t.id});
+        // (A todo never has one, and the dispatcher leaves it alone anyway.)
+        if (!t.todo) try db.exec("UPDATE tickets SET killed = 1 WHERE id = ?1", .{t.id});
         return .{};
     };
     var others: std.ArrayList([]const u8) = .empty;
@@ -306,12 +307,12 @@ pub const Unparked = struct {
 };
 
 /// End the park by hand; unless `resume` is false, its session resumes,
-/// told so.
+/// told so. A todo has no session to resume: its park just ends.
 pub fn unpark(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, key: []const u8, @"resume": bool) !Unparked {
     const t = try board.getTicket(db, a, key);
     const p = try board.takePark(ctx, db, a, t.id, null) orelse return error.NotParked;
     try board.logEvent(ctx, db, t.id, "unparked", "by you");
-    if (!@"resume") return .{ .reason = p.reason, .resumed = null };
+    if (!@"resume" or t.todo) return .{ .reason = p.reason, .resumed = null };
     const r = try resumeWith(ctx, cfg, db, a, t.key, try std.fmt.allocPrint(a, "Unparked by you: {s}. Continue.", .{p.reason}));
     return .{ .reason = p.reason, .resumed = r };
 }
@@ -557,6 +558,8 @@ fn wake(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: boa
     if (took == null) return; // Unparked (or parked again) meanwhile.
     board.logEvent(ctx, db, t.id, "park condition met", p.reason) catch {};
     board.setFlagId(ctx, db, t.id, board.flag_unparked, "auto", (if (p.pr.len > 0) std.fmt.allocPrint(a, "PR merged: {s}", .{p.pr}) else std.fmt.allocPrint(a, "Parked condition met: {s}", .{p.reason})) catch p.reason) catch {};
+    // A todo is yours: the flag tells you, and there is no session to resume.
+    if (t.todo) return;
     const note = metNote(a, t, p) catch return;
     // Shelved in Backlog: it isn't to start now. The note waits for whenever
     // it is queued again.
@@ -912,4 +915,43 @@ test "Done ends a park without resuming, also when an umbrella closes; Backlog k
     const kn = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "New", .stage = .review });
     try testing.expectEqual(id, (try board.getTicket(db, a, kn)).id);
     try testing.expect((try board.getTicket(db, a, kn)).park == null);
+}
+
+test "a parked todo isn't killed; waking or unparking it only ends the wait, flagged when a check passed" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const ctx: Ctx = .{ .io = testing.io, .gpa = testing.allocator, .perm = a, .env = undefined, .home = "/tmp", .tmux_blocked = true };
+    const cfg: config.Config = .{ .profiles = &.{}, .default = "", .operator = "" };
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "me", .dir = "/x/me", .repo = false });
+    // Doing, waiting on Josh; his reply (the check) comes.
+    const k = try board.createTicket(ctx, db, a, .{ .project = "me", .title = "Reply to Josh", .todo = true, .stage = .running });
+    _ = try park(ctx, db, a, k, .{ .reason = "waiting on Josh", .until = "true" });
+    var t = try board.getTicket(db, a, k);
+    try testing.expect(!t.killed);
+    wake(ctx, cfg, db, a, t, t.park.?);
+    t = try board.getTicket(db, a, k);
+    try testing.expect(t.park == null);
+    try testing.expectEqual(board.Stage.running, t.stage);
+    try testing.expectEqual(@as(usize, 1), t.flags.len);
+    try testing.expectEqualStrings(board.flag_unparked, t.flags[0].kind);
+    try testing.expectEqual(@as(usize, 0), (try board.unsentNotes(db, a, t.id)).len);
+    // In a paused project the same: never queued.
+    try board.setProjectPaused(db, "me", true);
+    _ = try park(ctx, db, a, k, .{ .reason = "again", .until = "true" });
+    t = try board.getTicket(db, a, k);
+    wake(ctx, cfg, db, a, t, t.park.?);
+    try testing.expectEqual(board.Stage.running, (try board.getTicket(db, a, k)).stage);
+    // Unparked by hand ("Resume now"): it ends, with nothing started or said.
+    _ = try park(ctx, db, a, k, .{ .reason = "waiting on Sam" });
+    const r = try unpark(ctx, cfg, db, a, k, true);
+    try testing.expect(r.resumed == null);
+    t = try board.getTicket(db, a, k);
+    try testing.expect(t.park == null);
+    try testing.expect(!t.killed);
+    try testing.expectEqualStrings("", t.tmux);
+    try testing.expectEqual(@as(usize, 0), (try board.unsentNotes(db, a, t.id)).len);
 }

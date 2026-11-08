@@ -777,6 +777,7 @@ board.dir = ~/.local/state/cl
 board.worktrees = ~/.local/share/cl/worktrees
 board.dispatch = true            # cl web starts queued tickets
 board.trust_projects = true      # say yes to Claude's folder-trust dialog in project folders and worktrees
+board.todo_project = me          # where `cl todo` puts todos (see Todos)
 ```
 
 Every ticket belongs to a project, which gives it a key prefix:
@@ -1088,6 +1089,67 @@ ends the park at its next check with a `pr-closed` flag in Needs You,
 rather than being checked until `--max`; the session stays stopped. Merged,
 its session resumes told "The PR it waited on has merged: <url>.". The
 board's Park form has a PR field that does the same.
+
+### Todos
+
+A todo is a ticket that is yours rather than Claude's: a reply to write, a
+decision, a 1:1 to prepare, something you're waiting on. It lives on the
+board with everything else, in any project, but nothing about it runs by
+itself.
+
+```
+cl todo "Reply to Josh about the offsite" --link https://slack.com/archives/... -m "dates?"
+cl todo "Prep 1:1 with Sam" -p me              # -p: the project (else board.todo_project)
+cl t new me "Review Q3 plan" --todo            # the same, the long way
+cl t edit ME-4 --todo | --no-todo              # make a ticket in Backlog or Running one, or not
+cl t list --todo | --no-todo                   # only todos, or none
+cl t new --parent ME-1 "Draft a reply to Josh's thread"   # a Claude task for it
+cl t move ME-1 running | done                  # doing it, finished
+cl t park ME-1 --reason "waiting on Josh"      # waiting on someone
+```
+
+- `cl todo` prints the key. Its project is `-p`, else `board.todo_project`,
+  else the only project that isn't a code repo (`cl project add me ~/todo
+  --no-repo`, see Repo-less projects); with none of those it says so.
+- Its stages are Backlog (its card says To do), Running (Doing) and Done.
+  Planning, Queued, Review and Testing are refused (`cl t move`, and a drag on
+  the board says so). Waiting on someone or something is a park, with
+  `--until` or `--pr` to wake it like any park; its card says "Waiting:
+  <reason>". There is no session to resume: a check that passes ends the wait
+  with the `unparked` flag in Needs You, and `cl t unpark` (the board's Done
+  waiting) just ends it.
+- The dispatcher never starts it, whatever its stage, and Start is refused
+  (Claude's help goes in a task under it). It never gets `review`, never
+  closes when its sub-tickets are done and never gets `ready-to-close`. It
+  closes when you move it to Done; `cl t done` on it is refused, so a Claude
+  that is asked to finish it runs `cl t move <key> done`. Moving it to Done
+  leaves its sub-tickets as they are.
+- Its sub-tickets are Claude tasks for it: parallel (they don't wait for one
+  another) and they don't wait on the todo either, unlike a parent with work
+  of its own. They start like any ticket (Queued, or Start). Each one's first
+  message says it is for the todo and gives the todo's title, description and
+  link, to read with Claude's connectors (Slack, Gmail, Calendar, Drive,
+  GitHub); in a repo-less project it also says the result is a summary,
+  comment or draft, not code. A task may be in another project (`--project`).
+- It can't be an umbrella or have a plan. `edit --todo` makes its unfinished
+  sub-tickets parallel, and is refused for Claude's work under way (a
+  session, worktree or jj change).
+- `--link` is where it came from: a Slack permalink, an email, a PR. Any
+  ticket may have one (`new`/`edit --link`, `--link ""` drops it); its own
+  session is told it too. It must be `https://`, `http://`, `mailto:` or
+  `slack://`, since the board opens it. `show` prints it, and `--json` has `todo` and `link`.
+
+On the board, New ticket's Kind has Todo (yours, never runs): it asks for a
+Link and hides what only a Claude session takes (when, runs as, queue
+session, skill, profile, target branch). A todo's card says To do, Doing or
+Waiting, in teal, with a chip for its link that opens it in a new tab. Its
+popup has Doing, Done (no merge or PR question), New Claude task (a new
+ticket under it, Kind Ticket, in its project; all of it editable) and
+Waiting on… (Park; parked, Done waiting), and its Stage list has only its three stages. The Todos
+switch over the board, next to Parked, shows or hides them. In `cl board` a
+todo's status is "to do" or "doing", `a` says there's nothing to approve,
+and `m d` moves it to Done (its open tasks stay under it, with no spin-off
+question).
 
 ### What needs you
 
@@ -1582,7 +1644,8 @@ Reload banner while you are typing.
 `/board` shows Board, Lanes (a row per project) and List views, with "Needs
 you" across the top: every ask, with quick answers, and the sessions' alerts
 (`cl alert`, see Alerts). Filters pick what needs
-you, a project, and whether sub-tickets show. A ticket opens in a popup:
+you, a project, and whether sub-tickets, done and parked tickets and todos
+(see Todos) show. A ticket opens in a popup:
 answer its questions, comment or send it back, watch its session or open it
 in the terminal (`/?attach=<session>`), open gutter, launch and test, see
 its sub-tickets and activity, and edit it. On a phone the columns swipe and
@@ -1613,6 +1676,8 @@ needs no permission). Deleting the ticket deletes its images.
   in queue and worktree projects alike. `--parallel` (on `new` or `edit`)
   lets one run without waiting; `--in-order` puts it back. A sub-ticket after
   a parallel one waits for it too, back to the first one in order.
+- A todo (`--todo`, or Kind on the board) is yours, not Claude's: see Todos.
+  Its sub-tickets don't wait on it or on each other.
 - An umbrella (`cl t new --umbrella`, `edit --umbrella`, or Kind on the
   board) is only a container for sub-tickets: it never gets a session, and
   the dispatcher and Start leave it alone. Queueing it queues its sub-tickets

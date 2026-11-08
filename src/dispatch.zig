@@ -71,11 +71,25 @@ pub fn failureReason(err: anyerror) []const u8 {
 /// project that isn't a code repo gets neither, nor anything about merging
 /// or a target branch (`Project.repo`), whatever the caller passes.
 pub fn prompt(a: std.mem.Allocator, t: board.Ticket, notes: []const board.Comment, gutter_rev_in: ?[]const u8) ![]const u8 {
+    return promptFor(a, t, null, notes, gutter_rev_in);
+}
+
+/// `prompt` for a ticket whose parent is `todo` (null when its parent isn't
+/// a todo): the todo's title, body and link come first, as what the task is
+/// for, and in a project that isn't a code repo, where its result goes.
+pub fn promptFor(a: std.mem.Allocator, t: board.Ticket, todo: ?board.Ticket, notes: []const board.Comment, gutter_rev_in: ?[]const u8) ![]const u8 {
     const gutter_rev = if (t.repo) gutter_rev_in else null;
     var aw: std.Io.Writer.Allocating = .init(a);
     const w = &aw.writer;
     try w.print("Ticket {s}: {s}\n", .{ t.key, t.title });
     if (t.parent.len > 0) try w.print("(a sub-ticket of {s}; `cl ticket show {s}` has the bigger picture)\n", .{ t.parent, t.parent });
+    if (todo) |td| {
+        try w.print("It is for {s}, a todo of mine (something I do myself; you help with this part): {s}\n", .{ td.key, td.title });
+        if (td.body.len > 0) try w.print("{s}\n", .{std.mem.trimEnd(u8, td.body, "\n")});
+        if (td.link.len > 0) try w.print("Source: {s} (read it with your connectors: Slack, Gmail, Calendar, Drive, GitHub)\n", .{td.link});
+    }
+    if (t.link.len > 0 and (todo == null or !std.mem.eql(u8, t.link, todo.?.link))) try w.print("Source: {s} (read it with your connectors)\n", .{t.link});
+    if (!t.repo and todo != null) try w.writeAll("There is no code here to commit: the result is your summary or a comment on the ticket, or a draft left where I will see it.\n");
     if (t.body.len > 0) try w.print("\n{s}\n", .{t.body});
     try images.writeNote(w, a, t.body);
     if (notes.len > 0) {
@@ -420,11 +434,20 @@ fn queueTarget(db: board.Db, a: std.mem.Allocator, t: board.Ticket, view: View, 
 fn parentSession(db: board.Db, a: std.mem.Allocator, t: board.Ticket, view: View) !?[]const u8 {
     if (t.parent.len == 0) return null;
     const parent = board.getTicket(db, a, t.parent) catch |err| return if (err == error.NotFound) null else err;
+    // A todo's tasks go on their own, never in a session it has.
+    if (parent.todo) return null;
     if (parent.tmux.len == 0 or parent.tmux[0] == '(' or !view.alive(parent.tmux)) return null;
     return switch (parent.stage) {
         .running, .review, .testing => parent.tmux,
         else => null,
     };
+}
+
+/// `t`'s parent when that is a todo (what `promptFor` tells it about).
+fn todoParent(db: board.Db, a: std.mem.Allocator, t: board.Ticket) !?board.Ticket {
+    if (t.parent.len == 0) return null;
+    const parent = board.getTicket(db, a, t.parent) catch |err| return if (err == error.NotFound) null else err;
+    return if (parent.todo) parent else null;
 }
 
 /// `t`'s parent is still being planned: the sub-ticket waits for the plan.
@@ -709,6 +732,8 @@ fn startIn(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: 
     }
     if (t.stage == .planning) return startPlanning(ctx, cfg, db, a, t);
     if (t.umbrella) return error.Umbrella;
+    // Yours: nothing starts it (see `board.hold`).
+    if (t.todo) return error.Todo;
     if (try parentPlanning(db, a, t)) return error.TargetBusy;
     const p = try board.getProject(db, a, t.project);
     const target = if (t.mode == .queue) try queueTarget(db, a, t, view, p) else "";
@@ -783,7 +808,7 @@ fn startIn(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: 
         },
     }
     const notes = try board.unsentNotes(db, a, t.id);
-    const body = if (resume_id != null) try resumePrompt(a, tc, notes) else try prompt(a, tc, notes, if (p.repo and review.findGutter(ctx, a, cfg) != null)
+    const body = if (resume_id != null) try resumePrompt(a, tc, notes) else try promptFor(a, tc, try todoParent(db, a, t), notes, if (p.repo and review.findGutter(ctx, a, cfg) != null)
         try worktree.reviewRev(ctx, a, if (wt.path.len > 0) wt.path else p.dir, base, tc.change)
     else
         null);
@@ -834,6 +859,8 @@ pub const AttachError = error{
     Finished,
     Planning,
     Umbrella,
+    /// A todo is the human's: no session works on it.
+    Todo,
     /// The dispatcher (or a start) is starting it right now.
     Starting,
     /// It has a live session of its own already, another one.
@@ -897,6 +924,7 @@ fn attachCheck(db: board.Db, a: std.mem.Allocator, t: board.Ticket, view: View, 
     if (t.stage == .done) return error.Finished;
     if (t.stage == .planning) return error.Planning;
     if (t.umbrella) return error.Umbrella;
+    if (t.todo) return error.Todo;
     if (s.pane_dead) return error.PaneDead;
     if (!in_project) return error.OtherProject;
     if (t.tmux.len > 0 and t.tmux[0] == '(') return error.Starting;
@@ -1031,7 +1059,7 @@ fn attachTo(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t:
             try worktree.reviewRev(ctx, a, if (tc.worktree.len > 0) tc.worktree else p.dir, tc.base, tc.change)
         else
             null;
-        const text = try std.mem.concat(a, u8, &.{ try attachNote(a, t.key), try prompt(a, tc, notes, gutter_rev) });
+        const text = try std.mem.concat(a, u8, &.{ try attachNote(a, t.key), try promptFor(a, tc, try todoParent(db, a, t), notes, gutter_rev) });
         try freshConversation(ctx, cfg, db, a, t, s, text, &sid, plan.resume_id);
         try board.setSession(ctx, db, t.id, s.tmux_name, &sid, tc.worktree, tc.branch);
         try board.markNotesSent(db, t.id);
@@ -2456,4 +2484,51 @@ test attachNote {
     const text = try attachNote(std.testing.allocator, "QA-6");
     defer std.testing.allocator.free(text);
     try std.testing.expect(std.mem.startsWith(u8, text, "cl attached this session to ticket QA-6"));
+}
+
+test "a todo is never started, in any stage; its queued tasks are, while it sits in Backlog" {
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp" };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "qa", .dir = "/x/qa-tool" });
+    const kt = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Reply to Josh", .todo = true });
+    const kc = try board.createTicket(ctx, db, a, .{ .parent = kt, .title = "Draft it", .stage = .queued });
+    const w = try waitingToStart(db, a);
+    try std.testing.expectEqual(@as(usize, 1), w.len);
+    try std.testing.expectEqualStrings(kc, w[0].key);
+    // Even put in Queued behind cl's back, the dispatcher passes it by.
+    try db.exec("UPDATE tickets SET stage = 'queued' WHERE key = ?1", .{kt});
+    for (try waitingToStart(db, a)) |t| try std.testing.expect(!std.mem.eql(u8, t.key, kt));
+    try std.testing.expectError(error.Todo, startIn(ctx, undefined, db, a, try board.getTicket(db, a, kt), false, View{ .sessions = &.{}, .statuses = .empty }, false));
+}
+
+test "a todo's task is told the todo's title, body and link; other tickets aren't" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const todo: board.Ticket = .{ .id = 1, .key = "ME-1", .project = "me", .title = "Reply to Josh", .body = "About the offsite dates.\n", .stage = .backlog, .mode = .queue, .plan = false, .skill = "", .target = "", .worktree = "", .branch = "", .profile = "", .tmux = "", .session_id = "", .summary = "", .round = 1, .created = 0, .updated = 0, .parent = "", .children = 1, .todo = true, .link = "https://slack.example/p1" };
+    var t = todo;
+    t.id = 2;
+    t.key = "ME-2";
+    t.title = "Draft a reply";
+    t.body = "Short and friendly.";
+    t.parent = "ME-1";
+    t.todo = false;
+    t.link = "";
+    t.children = 0;
+    t.repo = false;
+    const text = try promptFor(a, t, todo, &.{}, null);
+    for ([_][]const u8{ "It is for ME-1, a todo of mine", "Reply to Josh", "About the offsite dates.", "Source: https://slack.example/p1", "There is no code here to commit" }) |want|
+        if (std.mem.indexOf(u8, text, want) == null) {
+            std.debug.print("missing {s} in:\n{s}\n", .{ want, text });
+            return error.TestUnexpectedResult;
+        };
+    // Not a todo's: none of that.
+    const plain = try promptFor(a, t, null, &.{}, null);
+    try std.testing.expect(std.mem.indexOf(u8, plain, "a todo of mine") == null);
+    try std.testing.expect(std.mem.indexOf(u8, plain, "There is no code here") == null);
 }

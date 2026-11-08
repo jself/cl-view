@@ -131,6 +131,10 @@ pub const CardStatus = enum {
     done,
     /// An umbrella under way: its sub-tickets are, it never has a session.
     umbrella,
+    /// A todo (yours) in Backlog: to do.
+    todo,
+    /// A todo in Running: you're doing it.
+    doing,
 
     pub fn label(s: CardStatus) []const u8 {
         return switch (s) {
@@ -148,6 +152,8 @@ pub const CardStatus = enum {
             .not_started => "not started",
             .done => "done",
             .umbrella => "umbrella",
+            .todo => "to do",
+            .doing => "doing",
         };
     }
 
@@ -161,6 +167,7 @@ pub const CardStatus = enum {
             .paused => .{ .index = 6 },
             .blocked => .{ .index = 6 },
             .umbrella => .{ .index = 166 }, // burnt orange, apart from parked's magenta
+            .todo, .doing => .{ .index = 37 }, // teal: yours, apart from Claude's statuses
             .gone, .killed => .{ .index = 8 },
             else => .default,
         };
@@ -188,6 +195,8 @@ pub fn cardStatus(t: board.Ticket, live: ?claude.Status, paused: bool) CardStatu
     };
     if (t.tmux.len > 0 and t.tmux[0] == '(') return .starting;
     if (t.park != null) return .parked;
+    // Yours: where you are with it, whatever an old kill left behind.
+    if (t.todo and t.stage != .done) return if (t.stage == .running) .doing else .todo;
     if (t.killed) return .killed;
     if (t.stage == .done) return .done;
     if (t.umbrella) return .umbrella;
@@ -197,6 +206,7 @@ pub fn cardStatus(t: board.Ticket, live: ?claude.Status, paused: bool) CardStatu
     return switch (board.hold(t) orelse return .waiting_slot) {
         .blocked => .blocked,
         .subtickets => .umbrella, // caught above
+        .todo => .todo, // caught above
     };
 }
 
@@ -1028,6 +1038,10 @@ pub const View = struct {
     }
 
     fn approve(self: *View, env: Env, t: board.Ticket) !Outcome {
+        if (t.todo) {
+            self.setMsg(true, "{s} is a todo: it's yours, nothing to approve (m d moves it to Done)", .{t.key});
+            return .none;
+        }
         const to = board.approvedStage(t.stage) orelse {
             self.setMsg(true, "nothing to approve in {s} (planning, review and testing are)", .{stageName(t.stage)});
             return .none;
@@ -1053,7 +1067,8 @@ pub const View = struct {
     fn startDone(self: *View, env: Env, t: board.Ticket, approving: bool) !Outcome {
         self.pending = .{ .approve = approving };
         self.pending.key.set(t.key);
-        const open = board.openSubtickets(env.db, env.a, t.key) catch |e| return self.fail(e);
+        // A todo's open tasks carry on under it (actions.readyForDone): nothing to spin off.
+        const open: []const board.Ticket = if (t.todo) &.{} else board.openSubtickets(env.db, env.a, t.key) catch |e| return self.fail(e);
         if (open.len > 0) {
             self.choice = .spin_off;
             return .none;
@@ -1411,6 +1426,7 @@ pub fn errText(err: anyerror) []const u8 {
         error.BadAnswer => "one answer per question, separated by |: an option number or your own words (\"1,3\" for a multi-select one)",
         error.NotDelivered => "Claude didn't take the answer; it's still waiting. Check the session (o)",
         error.Umbrella => "it's an umbrella: its sub-tickets run, not it",
+        error.Todo => board.todo_refused,
         error.NoSubtickets => actions.no_subtickets,
         error.OpenSubtickets => "it has sub-tickets that aren't done yet; finish them or spin them off",
         error.CustomClose => "Claude asked to close it its own way; tell Claude, or just close it",
@@ -1633,6 +1649,17 @@ test cardStatus {
     t.umbrella = true;
     try testing.expectEqual(CardStatus.umbrella, cardStatus(t, null, false));
     t.umbrella = false;
+    // A todo says where you are with it, not what Claude is doing.
+    t.todo = true;
+    t.stage = .backlog;
+    try testing.expectEqual(CardStatus.todo, cardStatus(t, null, false));
+    t.stage = .running;
+    try testing.expectEqual(CardStatus.doing, cardStatus(t, null, false));
+    // An old kill doesn't hide where you are with it.
+    t.killed = true;
+    try testing.expectEqual(CardStatus.doing, cardStatus(t, null, false));
+    t.killed = false;
+    t.todo = false;
     t.stage = .done;
     t.tmux = "cl_qa_1";
     try testing.expectEqual(CardStatus.done, cardStatus(t, null, false));

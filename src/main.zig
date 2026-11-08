@@ -44,6 +44,9 @@ const usage =
     \\  cl window [install]       the web UI in its own desktop window (install: app launcher entry)
     \\  cl board                  the ticket board in the terminal (b in the chooser)
     \\  cl ticket | t <command>   the ticket board (cl ticket for the commands)
+    \\  cl todo <title> [-p <project>] [-m <body>] [--link <url>] [--parent <key>]
+    \\                            a todo of yours on the board (board.todo_project, else -p);
+    \\                            prints its key. Short for cl ticket new <project> <title> --todo
     \\  cl project <command>      projects tickets belong to (cl project for the commands)
     \\
     \\options for launch:
@@ -83,7 +86,7 @@ pub fn main(init: std.process.Init) !void {
     // In a sandbox with no tmux socket, only the board's commands (which
     // mostly don't need tmux; those that do fail at tmux.run) and help run.
     const cmd0 = if (argv.len > 0) argv[0] else "";
-    const tmux_free = for ([_][]const u8{ "ticket", "t", "project", "help", "-h", "--help" }) |c| {
+    const tmux_free = for ([_][]const u8{ "ticket", "t", "todo", "project", "help", "-h", "--help" }) |c| {
         if (std.mem.eql(u8, cmd0, c)) break true;
     } else false;
     if (!tmux_free) tmux.requireServer(ctx);
@@ -108,6 +111,7 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, cmd, "window")) return window.main(ctx, cfg, argv[1..]);
         if (std.mem.eql(u8, cmd, "ticket") or std.mem.eql(u8, cmd, "t")) return ticket_cli.ticketMain(ctx, cfg, argv[1..]);
         if (std.mem.eql(u8, cmd, "project")) return ticket_cli.projectMain(ctx, cfg, argv[1..]);
+        if (std.mem.eql(u8, cmd, "todo")) return ticket_cli.todoMain(ctx, cfg, argv[1..]);
         if (std.mem.eql(u8, cmd, "help") or std.mem.eql(u8, cmd, "-h") or std.mem.eql(u8, cmd, "--help")) return out(usage);
     }
     const opts = parseLaunch(argv) catch {

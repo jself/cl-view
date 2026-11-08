@@ -78,7 +78,10 @@ pub fn comment(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, au
 
 /// Before a ticket goes to Done: refuse while it has unfinished sub-tickets,
 /// unless `spin_off` makes them tickets of their own.
+/// A todo's sub-tickets are Claude tasks for it, not part of it: it closes
+/// whatever they are doing, and they carry on.
 fn readyForDone(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, spin_off: bool) !void {
+    if ((try board.getTicket(db, a, key)).todo) return;
     if ((try board.openSubtickets(db, a, key)).len == 0) return;
     if (!spin_off) return error.OpenSubtickets;
     try board.spinOff(ctx, db, a, key);
@@ -1443,4 +1446,25 @@ test "finished with a PR and steps for after it: done, plus a follow-up parked o
     try board.setFinishing(ctx, db, (try board.getTicket(db, a, k2)).id, "pr");
     try finished(ctx, db, a, k2, "", "https://github.com/o/r/pull/32");
     try std.testing.expectEqual(@as(i64, 0), (try board.getTicket(db, a, k2)).children);
+}
+
+test "a todo goes to Done as it is, its open tasks carry on" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env: std.process.Environ.Map = .init(a);
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = a, .env = &env, .home = "/tmp", .tmux_blocked = true };
+    const cfg: config.Config = .{ .profiles = &.{}, .default = "", .operator = "" };
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "me", .dir = "/x/me", .repo = false });
+    const k = try board.createTicket(ctx, db, a, .{ .project = "me", .title = "Reply to Josh", .todo = true });
+    const c = try board.createTicket(ctx, db, a, .{ .parent = k, .title = "Draft it", .stage = .queued });
+    try std.testing.expectError(error.Todo, move(ctx, cfg, db, a, k, .queued, false, .close));
+    try move(ctx, cfg, db, a, k, .done, false, .close);
+    try std.testing.expectEqual(board.Stage.done, (try board.getTicket(db, a, k)).stage);
+    const task = try board.getTicket(db, a, c);
+    try std.testing.expectEqual(board.Stage.queued, task.stage);
+    try std.testing.expectEqualStrings(k, task.parent);
 }
