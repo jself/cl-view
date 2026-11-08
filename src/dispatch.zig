@@ -424,7 +424,17 @@ const in_progress = board.in_progress;
 fn queueTarget(db: board.Db, a: std.mem.Allocator, t: board.Ticket, view: View, p: board.Project) ![]const u8 {
     if (t.target.len > 0) return t.target;
     if (try parentSession(db, a, t, view)) |s| return s;
-    return if (homeSession(view, p)) |s| s.tmux_name else "";
+    return if (homeSession(view, p, try todoSessions(db, a))) |s| s.tmux_name else "";
+}
+
+/// The sessions todos talk in (see `startTodo`): they run in the project's
+/// directory but are never its session, so no ticket is typed into one.
+fn todoSessions(db: board.Db, a: std.mem.Allocator) ![]const []const u8 {
+    var st = try db.query("SELECT tmux FROM tickets WHERE todo != 0 AND tmux != '' AND stage != 'done'", .{});
+    defer st.finalize();
+    var out: std.ArrayList([]const u8) = .empty;
+    while (try st.step()) try out.append(a, try st.dupe(a, 0));
+    return out.items;
 }
 
 /// The live session of `t`'s parent while the parent is in progress: a
@@ -531,11 +541,13 @@ fn endPlanning(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator,
 }
 
 /// The project's session in the cl list: a live session in its directory,
-/// preferably the one named after it, else the oldest.
-fn homeSession(view: View, p: board.Project) ?tmux.Session {
+/// preferably the one named after it, else the oldest. Not one of `skip`
+/// (a todo's: `todoSessions`).
+fn homeSession(view: View, p: board.Project, skip: []const []const u8) ?tmux.Session {
     var best: ?tmux.Session = null;
-    for (view.sessions) |s| {
+    sessions: for (view.sessions) |s| {
         if (!std.mem.eql(u8, s.dir, p.dir)) continue;
+        for (skip) |k| if (std.mem.eql(u8, k, s.tmux_name)) continue :sessions;
         if (std.mem.eql(u8, s.name, p.name) or std.mem.eql(u8, s.name, std.fs.path.basename(p.dir))) return s;
         if (best == null or s.created < best.?.created) best = s;
     }
@@ -543,9 +555,10 @@ fn homeSession(view: View, p: board.Project) ?tmux.Session {
 }
 
 /// Another queue ticket of the project is in progress with a session: one
-/// Claude works on a queue project at a time.
+/// Claude works on a queue project at a time. A todo's talk session isn't
+/// the project's work (`startTodo`).
 fn projectBusy(db: board.Db, a: std.mem.Allocator, view: View, t: board.Ticket) !bool {
-    var st = try db.query("SELECT tmux FROM tickets WHERE project = ?1 AND id != ?2 AND mode = 'queue' AND tmux != '' AND stage IN " ++ in_progress, .{ t.project, t.id });
+    var st = try db.query("SELECT tmux FROM tickets WHERE project = ?1 AND id != ?2 AND mode = 'queue' AND todo = 0 AND tmux != '' AND stage IN " ++ in_progress, .{ t.project, t.id });
     defer st.finalize();
     while (try st.step()) {
         const name = st.text(0);
@@ -732,8 +745,9 @@ fn startIn(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: 
     }
     if (t.stage == .planning) return startPlanning(ctx, cfg, db, a, t);
     if (t.umbrella) return error.Umbrella;
-    // Yours: nothing starts it (see `board.hold`).
-    if (t.todo) return error.Todo;
+    // Yours: the dispatcher never starts it (`board.hold`); started by
+    // hand, it gets a session to talk about it in.
+    if (t.todo) return startTodo(ctx, cfg, db, a, t);
     if (try parentPlanning(db, a, t)) return error.TargetBusy;
     const p = try board.getProject(db, a, t.project);
     const target = if (t.mode == .queue) try queueTarget(db, a, t, view, p) else "";
@@ -847,6 +861,71 @@ fn startIn(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: 
     if (!(keep_stage and (t.stage == .review or t.stage == .testing))) try board.moveTicket(ctx, db, t, .running);
     const now_t = try board.getTicket(db, a, t.key);
     try board.logEvent(ctx, db, t.id, "started", now_t.tmux);
+}
+
+/// Talk to Claude about a todo: a session of its own in the project's
+/// directory, told it is the human's todo (`todoPrompt`), or picking its
+/// earlier conversation back up. Never the project's queue session or a
+/// parent's, and nothing else of a start: no jj, change, base or worktree,
+/// so the project's checkout is left alone, and the todo stays in its stage.
+fn startTodo(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: board.Ticket) !void {
+    // Done, nothing would follow its session or keep the queue out of it.
+    if (t.stage == .done) return error.TodoDone;
+    const p = try board.getProject(db, a, t.project);
+    if (!try board.claimStart(db, t.id)) return error.AlreadyStarted;
+    errdefer board.releaseStart(db, t.id) catch {};
+    const resume_id = resumeId(ctx, cfg, a, t, p.dir, t.profile);
+    const notes = try board.unsentNotes(db, a, t.id);
+    const text = if (resume_id != null) try todoResumePrompt(a, t, notes) else try todoPrompt(a, t, notes);
+    var sid: [36]u8 = undefined;
+    const name = try newSession(ctx, cfg, a, t, p.dir, try std.ascii.allocLowerString(a, t.key), text, &sid, resume_id);
+    // Not `board.setSession`: talking about it doesn't end its wait (a park).
+    try db.exec("UPDATE tickets SET tmux = ?2, session_id = ?3, killed = 0 WHERE id = ?1", .{ t.id, name, @as([]const u8, &sid) });
+    try board.markNotesSent(db, t.id);
+    try board.clearFlagId(ctx, db, t.id, "start-failed");
+    try board.clearFlagId(ctx, db, t.id, "ended");
+    try board.logEvent(ctx, db, t.id, "talk started", name);
+}
+
+/// The first message of a todo's talk session (`startTodo`): it is the
+/// human's own todo, not a task to finish, with what to do and not do.
+pub fn todoPrompt(a: std.mem.Allocator, t: board.Ticket, notes: []const board.Comment) ![]const u8 {
+    var aw: std.Io.Writer.Allocating = .init(a);
+    const w = &aw.writer;
+    try w.print("Todo {s}: {s}\n", .{ t.key, t.title });
+    try w.writeAll("This is a todo of mine: something I do myself, not a task for you to finish. I opened this session to talk about it with you.\n");
+    if (t.body.len > 0) try w.print("\n{s}\n", .{std.mem.trimEnd(u8, t.body, "\n")});
+    try images.writeNote(w, a, t.body);
+    if (t.link.len > 0) try w.print("\nWhere it came from: {s}\nRead it with your connectors (Slack, Gmail, Calendar, Drive, GitHub) when it helps.\n", .{t.link});
+    if (notes.len > 0) {
+        try w.writeAll("\nNotes on it:\n");
+        for (notes) |n| try w.print("- {s}\n", .{n.body});
+    }
+    try w.print(
+        \\
+        \\Help with whatever I ask about it: look things up, draft a reply, think it through with me.
+        \\- This folder is the project's own checkout, where other tickets' work may be under way: don't edit files or run jj or git here. A change to code or files is a Claude task under this todo (below).
+        \\- For a piece of work that should be a ticket of its own (when I ask for one), create it under this todo: `cl ticket new --parent {s} "<title>" -m "<details>"`. It doesn't start by itself; I start it from the board.
+        \\- Don't run `cl ticket done` on it: it is mine, not a ticket you finish.
+        \\- When I say it is finished, run `cl ticket move {s} done`. When I say it waits on someone or something, run `cl ticket park {s} --reason "<what it waits on>"`.
+        \\
+        \\Start by reading what it links to, if anything, and tell me in a few lines what it's about; then wait for me.
+        \\
+    , .{ t.key, t.key, t.key });
+    return aw.written();
+}
+
+/// A todo's talk session resumed: its conversation already has the todo.
+fn todoResumePrompt(a: std.mem.Allocator, t: board.Ticket, notes: []const board.Comment) ![]const u8 {
+    var aw: std.Io.Writer.Allocating = .init(a);
+    const w = &aw.writer;
+    try w.print("I'm back to talk about todo {s}: {s}\n", .{ t.key, t.title });
+    if (notes.len > 0) {
+        try w.writeAll("\nNotes on it since:\n");
+        for (notes) |n| try w.print("- {s}\n", .{n.body});
+    }
+    try w.writeAll("\nPick up where we left off, and wait for me.\n");
+    return aw.written();
 }
 
 pub const AttachError = error{
@@ -1179,6 +1258,26 @@ fn finishingGone(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket) 
     try board.setFlagId(ctx, db, t.id, stoppedFlag(t.finishing), "auto", try std.fmt.allocPrint(a, "its session ({s}) ended while Claude was {s}, before it reached Done\nNothing more was merged or opened. Try again (Merge, PR or Tell Claude), or close it.", .{ t.tmux, actions.finishingWhat(t.finishing) }));
 }
 
+/// The dispatcher keeps the flags of `t`'s session in step: a ticket in
+/// progress in Running or Planning, and a todo's talk session in whatever
+/// stage it is (Backlog or Running: `startTodo`).
+fn followed(t: board.Ticket) bool {
+    return t.stage == .running or t.stage == .planning or (t.todo and t.stage == .backlog);
+}
+
+/// `t`'s session went away. A ticket in progress is flagged `ended`; a
+/// todo's talk session ending is nothing to flag (the todo is the human's,
+/// and Talk to Claude starts another), so it just lets go of it, with what
+/// it was waiting on.
+fn sessionGone(ctx: Ctx, db: board.Db, t: board.Ticket) !void {
+    if (!t.todo) return board.setFlagId(ctx, db, t.id, "ended", "auto", "its session is gone; start it again or resume it");
+    try db.exec("UPDATE tickets SET tmux = '' WHERE id = ?1 AND tmux = ?2", .{ t.id, t.tmux });
+    for ([_][]const u8{ board.flag_question, board.flag_input, "ended" }) |k| try board.clearFlagId(ctx, db, t.id, k);
+    try board.setIdle(ctx, db, t.id, false);
+    if (t.asking.len > 0) try board.setAsking(db, t.id, "");
+    try board.logEvent(ctx, db, t.id, "talk ended", t.tmux);
+}
+
 /// One dispatcher pass: start what can start, and flag tickets whose session
 /// went away. Returns how many tickets it started.
 pub fn tick(ctx: Ctx, cfg: config.Config, db: board.Db) !usize {
@@ -1200,10 +1299,10 @@ pub fn tick(ctx: Ctx, cfg: config.Config, db: board.Db) !usize {
             finishingGone(ctx, db, a, t) catch {};
             continue;
         }
-        if (t.stage != .running and t.stage != .planning) continue;
+        if (!followed(t)) continue;
         if (t.tmux.len == 0 or t.tmux[0] == '(') continue;
         if (!view.alive(t.tmux)) {
-            board.setFlagId(ctx, db, t.id, "ended", "auto", "its session is gone; start it again or resume it") catch {};
+            sessionGone(ctx, db, t) catch {};
             continue;
         }
         const prev = current.get(t.tmux);
@@ -1679,7 +1778,7 @@ test "queue tickets run one at a time in the project's session" {
     var sessions = [_]tmux.Session{ mk("cl_x_1", "x", "/x/other", 1), mk("cl_qa-1_2", "qa-1", "/x/qa-tool", 2), mk("cl_qa-tool_3", "qa-tool", "/x/qa-tool", 3) };
     const view: View = .{ .sessions = &sessions, .statuses = .empty };
     try std.testing.expectEqualStrings("cl_qa-tool_3", try queueTarget(db, a, t2, view, p));
-    try std.testing.expectEqualStrings("cl_qa-1_2", (homeSession(.{ .sessions = sessions[0..2], .statuses = .empty }, p)).?.tmux_name);
+    try std.testing.expectEqualStrings("cl_qa-1_2", (homeSession(.{ .sessions = sessions[0..2], .statuses = .empty }, p, &.{})).?.tmux_name);
 
     // The first one is being tested in some session: the second waits.
     try std.testing.expect(!try projectBusy(db, a, view, t2));
@@ -2503,7 +2602,136 @@ test "a todo is never started, in any stage; its queued tasks are, while it sits
     // Even put in Queued behind cl's back, the dispatcher passes it by.
     try db.exec("UPDATE tickets SET stage = 'queued' WHERE key = ?1", .{kt});
     for (try waitingToStart(db, a)) |t| try std.testing.expect(!std.mem.eql(u8, t.key, kt));
-    try std.testing.expectError(error.Todo, startIn(ctx, undefined, db, a, try board.getTicket(db, a, kt), false, View{ .sessions = &.{}, .statuses = .empty }, false));
+}
+
+test "starting a todo makes a talk session of its own, or nothing: no stage change, no claim left behind" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = a, .env = undefined, .home = "/tmp", .tmux_blocked = true };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // The hooks file goes in the board's directory: a temporary one, never the real board's.
+    var profiles = [_]config.Profile{.{ .name = "default", .config_dir = null }};
+    const cfg: config.Config = .{ .profiles = &profiles, .default = "default", .operator = "", .board = .{ .dir = try tmp.dir.realPathFileAlloc(ctx.io, ".", a) } };
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    // A directory that isn't there: the session can't start.
+    try board.addProject(db, .{ .name = "qa", .dir = "/x/qa-tool-not-there" });
+    const kt = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Reply to Josh", .todo = true });
+    try std.testing.expectError(error.SessionFailed, startTodo(ctx, cfg, db, a, try board.getTicket(db, a, kt)));
+    const t = try board.getTicket(db, a, kt);
+    try std.testing.expectEqualStrings("", t.tmux);
+    try std.testing.expectEqual(board.Stage.backlog, t.stage);
+    // Starting in Running: it stays Running, never Queued (no TargetBusy wait).
+    try db.exec("UPDATE tickets SET stage = 'running' WHERE key = ?1", .{kt});
+    try std.testing.expectError(error.SessionFailed, startTodo(ctx, cfg, db, a, try board.getTicket(db, a, kt)));
+    try std.testing.expectEqual(board.Stage.running, (try board.getTicket(db, a, kt)).stage);
+    // Being started already: it says so.
+    try db.exec("UPDATE tickets SET tmux = '(starting)' WHERE key = ?1", .{kt});
+    try std.testing.expectError(error.AlreadyStarted, startTodo(ctx, cfg, db, a, try board.getTicket(db, a, kt)));
+    // Done: refused, before anything is claimed (nothing would follow it).
+    try db.exec("UPDATE tickets SET tmux = '', stage = 'done' WHERE key = ?1", .{kt});
+    try std.testing.expectError(error.TodoDone, startTodo(ctx, cfg, db, a, try board.getTicket(db, a, kt)));
+    try std.testing.expectEqualStrings("", (try board.getTicket(db, a, kt)).tmux);
+}
+
+test "a todo's talk session never holds the project's queue" {
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp" };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "qa", .dir = "/x/qa-tool" });
+    const p = try board.getProject(db, a, "qa");
+    const kt = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Reply to Josh", .todo = true, .stage = .running });
+    const kc = try board.createTicket(ctx, db, a, .{ .parent = kt, .title = "Draft it", .stage = .queued });
+    const kq = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Fix the build", .stage = .queued });
+    try db.exec("UPDATE tickets SET tmux = 'cl_qa-1_1' WHERE key = ?1", .{kt});
+    const mk = struct {
+        fn s(tmux_name: []const u8, name: []const u8, created: i64) tmux.Session {
+            return .{ .tmux_name = tmux_name, .name = name, .dir = "/x/qa-tool", .profile = "", .created = created, .pane_title = "", .pane_dead = false, .activity = 0, .role = "", .alert = "" };
+        }
+    }.s;
+    const tq = try board.getTicket(db, a, kq);
+    const tc = try board.getTicket(db, a, kc);
+    // Only the todo's session is open in the project's directory: it isn't
+    // the project's, so the queued ticket starts one of its own.
+    var only = [_]tmux.Session{mk("cl_qa-1_1", "qa-1", 1)};
+    const v1: View = .{ .sessions = &only, .statuses = .empty };
+    try std.testing.expectEqualStrings("", try queueTarget(db, a, tq, v1, p));
+    try std.testing.expectEqualStrings("", try queueTarget(db, a, tc, v1, p));
+    // The oldest other session there is, even though the todo's is older.
+    var more = [_]tmux.Session{ mk("cl_qa-1_1", "qa-1", 1), mk("cl_x_2", "x", 2) };
+    const v2: View = .{ .sessions = &more, .statuses = .empty };
+    try std.testing.expectEqualStrings("cl_x_2", try queueTarget(db, a, tq, v2, p));
+    // Its live session (Running or Backlog) is no ticket in progress there.
+    try std.testing.expect(!try projectBusy(db, a, v2, tq));
+    try std.testing.expect(!try targetHasTicket(db, "cl_qa-1_1", tq.id));
+    try std.testing.expect(try parentSession(db, a, tc, v2) == null);
+    // Done, its session isn't skipped any more (it was closed with it).
+    try db.exec("UPDATE tickets SET stage = 'done' WHERE key = ?1", .{kt});
+    try std.testing.expectEqualStrings("cl_qa-1_1", try queueTarget(db, a, tq, v2, p));
+    // A ticket in progress there would hold it (regression).
+    try db.exec("UPDATE tickets SET stage = 'running', todo = 0 WHERE key = ?1", .{kt});
+    try std.testing.expect(try projectBusy(db, a, v2, tq));
+}
+
+test "a todo's talk session is followed in Backlog and Running; gone, it is let go without `ended`" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = a, .env = undefined, .home = "/tmp", .tmux_blocked = true };
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "me", .dir = "/x/me", .repo = false });
+    const kt = try board.createTicket(ctx, db, a, .{ .project = "me", .title = "Reply to Josh", .todo = true });
+    const kr = try board.createTicket(ctx, db, a, .{ .project = "me", .title = "Look it up", .stage = .running });
+    try db.exec("UPDATE tickets SET tmux = 'cl_me-1_1' WHERE key = ?1", .{kt});
+    try db.exec("UPDATE tickets SET tmux = 'cl_me_2' WHERE key = ?1", .{kr});
+    var t = try board.getTicket(db, a, kt);
+    try std.testing.expect(followed(t));
+    t.stage = .running;
+    try std.testing.expect(followed(t));
+    t.stage = .done;
+    try std.testing.expect(!followed(t));
+    t.stage = .backlog;
+    t.todo = false;
+    try std.testing.expect(!followed(t));
+
+    // It asked something, then its session went away.
+    try board.setFlag(ctx, db, a, kt, board.flag_question, "auto", "Which dates?");
+    try sessionGone(ctx, db, try board.getTicket(db, a, kt));
+    t = try board.getTicket(db, a, kt);
+    try std.testing.expectEqualStrings("", t.tmux);
+    try std.testing.expectEqual(@as(usize, 0), t.flags.len);
+    try std.testing.expectEqual(board.Stage.backlog, t.stage);
+    // A ticket's is flagged, as before.
+    try sessionGone(ctx, db, try board.getTicket(db, a, kr));
+    const r = try board.getTicket(db, a, kr);
+    try std.testing.expectEqualStrings("cl_me_2", r.tmux);
+    try std.testing.expectEqualStrings("ended", r.flags[0].kind);
+}
+
+test todoPrompt {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const t: board.Ticket = .{ .id = 1, .key = "ME-1", .project = "me", .title = "Reply to Josh", .body = "About the offsite dates.\n", .stage = .backlog, .mode = .queue, .plan = false, .skill = "", .target = "", .worktree = "", .branch = "", .profile = "", .tmux = "", .session_id = "", .summary = "", .round = 1, .created = 0, .updated = 0, .parent = "", .children = 0, .todo = true, .link = "https://slack.example/p1" };
+    const text = try todoPrompt(a, t, &.{.{ .author = "you", .body = "he prefers Tuesday", .sent = false, .at = 0 }});
+    for ([_][]const u8{ "Todo ME-1: Reply to Josh", "a todo of mine", "not a task for you to finish", "About the offsite dates.", "https://slack.example/p1", "- he prefers Tuesday", "`cl ticket new --parent ME-1 ", "Don't run `cl ticket done`", "`cl ticket move ME-1 done`", "`cl ticket park ME-1 --reason " }) |want|
+        if (std.mem.indexOf(u8, text, want) == null) {
+            std.debug.print("missing {s} in:\n{s}\n", .{ want, text });
+            return error.TestUnexpectedResult;
+        };
+    // Resumed: the conversation has it all already.
+    const back = try todoResumePrompt(a, t, &.{});
+    try std.testing.expect(std.mem.indexOf(u8, back, "todo ME-1: Reply to Josh") != null);
+    try std.testing.expect(std.mem.indexOf(u8, back, "cl ticket done") == null);
 }
 
 test "a todo's task is told the todo's title, body and link; other tickets aren't" {

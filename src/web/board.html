@@ -796,7 +796,8 @@ const pills = (t) => cardFlags(t).length || t.finishing || t.custom_close || t.p
 // status is its sub-tickets'.
 const waitingOn = (t) => (t.blocked_by || []).filter((d) => d.stage !== "done");
 const holdOf = (t) => waitingOn(t).length ? "waits" : "";
-const statusOf = (row) => row.ticket.umbrella && !row.status ? "umbrella" : row.ticket.todo && !row.status ? "todo" : row.status || (row.ticket.tmux.startsWith("(") ? "starting" : row.ticket.park ? "parked" : row.ticket.killed ? "killed" : row.ticket.tmux && !["backlog", "queued"].includes(row.ticket.stage) ? "gone"
+// A todo with a live talk session shows the session's status, as any ticket does.
+const statusOf = (row) => row.ticket.umbrella && !row.status ? "umbrella" : row.ticket.todo && (!row.status || row.status === "gone") ? "todo" : row.status || (row.ticket.tmux.startsWith("(") ? "starting" : row.ticket.park ? "parked" : row.ticket.killed ? "killed" : row.ticket.tmux && !["backlog", "queued"].includes(row.ticket.stage) ? "gone"
   : row.ticket.stage === "queued" && projectPaused(row.ticket.project) ? "paused" : ["running", "review", "testing"].includes(row.ticket.stage) ? "nosession" : row.ticket.stage === "queued" && !row.ticket.tmux && holdOf(row.ticket) || "none");
 const waitTitle = (t) => waitingOn(t).map((d) => `${d.key} (${STAGE_NAME[d.stage]}${d.order ? ", the sub-ticket before it" : d.parent ? ", its parent: it runs first" : ""}): ${d.title}`).join("\n");
 // A Done ticket has no status unless its session is still live: "Not started" or "Session ended" says nothing about finished work.
@@ -1430,8 +1431,11 @@ function renderDetailInner() {
     `<button type="button" class="btn" data-act="unpark-only" title="End the park; its session stays stopped">Cancel park</button>`);
   // A todo is yours: what you do with it, and Claude tasks under it, instead of a session of its own.
   if (t.todo && t.stage !== "done") {
+    // A session of its own to talk about it in (dispatch.zig startTodo); it doesn't change its stage.
+    acts.push(liveSession ? `<a class="btn primary" href="${shellHref(t)}" title="Its talk session's terminal">Open terminal</a>`
+      : `<button type="button" class="btn primary" data-act="start" title="A Claude session of its own to talk about it in${t.session_id ? ", picking the last conversation back up" : ""}: it reads the link and helps. It stays ${t.stage === "running" ? "Doing" : "To do"}">Talk to Claude</button>`);
     if (t.stage === "backlog" && !t.park) acts.push(`<button type="button" class="btn" data-move="running" title="Move it to Running: you're doing it">Doing</button>`);
-    acts.push(`<button type="button" class="btn primary" data-to-done="${esc(t.key)}" title="It's finished: it goes to Done. Its Claude tasks carry on">Done</button>`,
+    acts.push(`<button type="button" class="btn" data-to-done="${esc(t.key)}" title="It's finished: it goes to Done. Its Claude tasks carry on">Done</button>`,
       `<button type="button" class="btn" data-new-task="${esc(t.key)}" title="A Claude ticket under this todo, told its title, description and link. It doesn't wait on the todo">New Claude task</button>`);
     if (!t.park) acts.push(`<button type="button" class="btn" data-act="park" title="Park it while you wait on someone or something (a reply, a PR); a check can wake it">Waiting on…</button>`);
   }
@@ -2501,6 +2505,7 @@ async function onClick(e) {
     return;
   }
   if (ds.act === "rebase") return act(key, "rebase", {}, "Asked Claude to rebase and settle the conflicts").catch(() => {});
+  if (ds.act === "start" && state.detail?.ticket.todo) return act(key, "start", {}, "Talking to Claude");
   if (ds.act === "start") return act(key, "start", {}, state.detail?.ticket.killed || state.detail?.ticket.session_id ? "Restarted" : "Started");
   if (ds.act === "kill") {
     const d = state.detail; if (!d || !await confirmKill(d)) return;
@@ -3223,7 +3228,9 @@ function palActions(key) {
   for (const [tab, l] of [["needs", "Needs you"], ["plan", "Plan"], ["review", "Review"], ["test", "Test"], ["landing", "Not merged"], ["after-merge", "After merge"]])
     if (flagTabs.includes(tab) || (tab === "plan" && t.stage === "planning") || (tab === "review" && t.stage === "review") || (tab === "test" && t.stage === "testing")) a(`Open: ${l}`, open(tab));
   for (const [tab, l] of [["session", "Session"], ["comments", "Comments"], ["activity", "Activity"], ["details", "Details"]]) a(`Open: ${l}`, open(tab));
-  if (live) a("Open shell", () => { location.href = shellHref(t); }, "the session's terminal");
+  if (live) a(t.todo ? "Open terminal" : "Open shell", () => { location.href = shellHref(t); }, "the session's terminal");
+  // A todo's talk session doesn't care about its park: offered either way, as in the popup.
+  if (!live && t.stage !== "done" && t.todo) a("Talk to Claude", () => act(key, "start", {}, "Talking to Claude").catch(() => {}), "a session of its own about it");
   if (t.park) a(t.todo ? "Done waiting" : "Resume now", async () => { try { const r = await act(key, "unpark", {}); toast(unparkMsg(key, r.resumed)); } catch {} }, "end the park");
   else if (!live && t.stage !== "done" && !t.umbrella && !t.todo) a(t.killed || t.tmux || t.session_id ? "Restart" : "Start now", () => act(key, "start", {}, t.killed || t.session_id ? "Restarted" : "Started").catch(() => {}));
   if (approveLabel(t))

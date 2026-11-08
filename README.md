@@ -1106,6 +1106,7 @@ cl t list --todo | --no-todo                   # only todos, or none
 cl t new --parent ME-1 "Draft a reply to Josh's thread"   # a Claude task for it
 cl t move ME-1 running | done                  # doing it, finished
 cl t park ME-1 --reason "waiting on Josh"      # waiting on someone
+cl t start ME-1                                # talk to Claude about it, in a session of its own
 ```
 
 - `cl todo` prints the key. Its project is `-p`, else `board.todo_project`,
@@ -1118,8 +1119,7 @@ cl t park ME-1 --reason "waiting on Josh"      # waiting on someone
   <reason>". There is no session to resume: a check that passes ends the wait
   with the `unparked` flag in Needs You, and `cl t unpark` (the board's Done
   waiting) just ends it.
-- The dispatcher never starts it, whatever its stage, and Start is refused
-  (Claude's help goes in a task under it). It never gets `review`, never
+- The dispatcher never starts it, whatever its stage. It never gets `review`, never
   closes when its sub-tickets are done and never gets `ready-to-close`. It
   closes when you move it to Done; `cl t done` on it is refused, so a Claude
   that is asked to finish it runs `cl t move <key> done`. Moving it to Done
@@ -1131,6 +1131,30 @@ cl t park ME-1 --reason "waiting on Josh"      # waiting on someone
   link, to read with Claude's connectors (Slack, Gmail, Calendar, Drive,
   GitHub); in a repo-less project it also says the result is a summary,
   comment or draft, not code. A task may be in another project (`--project`).
+- **Talk to Claude** (`cl t start <key>`) gives it a Claude session of its
+  own to talk about it in: a new tmux session named after the key, in the
+  project's directory. It stays in its stage (To do or Doing), and nothing
+  else of a start happens: no jj change, base or worktree, so the project's
+  checkout is left alone. Claude's first message says it is your todo, not a
+  task to finish, with its title, description, link (to read with the
+  connectors) and notes. It helps with what you ask; it makes a Claude task
+  under the todo when you ask for one (`cl t new --parent`), runs `cl t move
+  <key> done` when you say it is finished and `cl t park` when you say it
+  waits on someone, and never `cl t done`. Started again later, it picks its
+  conversation back up where Claude still has it.
+- That session is never the project's: queued tickets don't go into it, it
+  doesn't hold the project's queue (a ticket queued there starts in the
+  project's own session while you talk), and a todo's tasks don't go into it
+  either. Its flags work like any ticket's, in Backlog or Running: a question,
+  a permission prompt, or Claude idle at its prompt put the todo in Needs You.
+  When the session goes away (you exit Claude, or kill it) the todo just lets
+  go of it, with no `ended` flag. Moving it between To do and Doing leaves the
+  session open; Done closes it, and a Done todo has none (start is refused
+  until you move it back). Parking it (Waiting on…, or Claude running `cl t
+  park` when you say it waits on someone) leaves the session open, and
+  starting a session doesn't end the park. Claude is told not to edit
+  files or run jj or git in the project's checkout: a change goes in a task
+  under the todo.
 - It can't be an umbrella or have a plan. `edit --todo` makes its unfinished
   sub-tickets parallel, and is refused for Claude's work under way (a
   session, worktree or jj change).
@@ -1143,7 +1167,8 @@ On the board, New ticket's Kind has Todo (yours, never runs): it asks for a
 Link and hides what only a Claude session takes (when, runs as, queue
 session, skill, profile, target branch). A todo's card says To do, Doing or
 Waiting, in teal, with a chip for its link that opens it in a new tab. Its
-popup has Doing, Done (no merge or PR question), New Claude task (a new
+popup has Talk to Claude (Open terminal once its session is live; its card
+then shows the session's status, like any ticket's), Doing, Done (no merge or PR question), New Claude task (a new
 ticket under it, Kind Ticket, in its project; all of it editable) and
 Waiting on… (Park; parked, Done waiting), and its Stage list has only its three stages. The Todos
 switch over the board, next to Parked, shows or hides them. In `cl board` a

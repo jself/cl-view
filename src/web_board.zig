@@ -177,6 +177,7 @@ pub fn handle(ctx: Ctx, cfg: config.Config, req: *std.http.Server.Request, path:
             error.AlreadyStarted => .{ .conflict, "it already has a session" },
             error.Umbrella => .{ .conflict, "it's an umbrella: its sub-tickets run, not it" },
             error.Todo => .{ .conflict, board.todo_refused },
+            error.TodoDone => .{ .conflict, "it's a done todo: move it back to To do or Doing to talk about it" },
             error.NoSubtickets => .{ .conflict, actions.no_subtickets },
             error.TargetBusy => .{ .conflict, "its session is busy or has another ticket in progress; it waits in Queued and starts there when the session is free" },
             error.WorktreeFailed => .{ .internal_server_error, worktree.lastError() },

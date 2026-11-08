@@ -271,10 +271,13 @@ pub fn park(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, o: Op
     try board.clearFlagId(ctx, db, t.id, board.flag_unparked);
     try board.clearFlagId(ctx, db, t.id, board.flag_park_expired);
     try board.clearFlagId(ctx, db, t.id, board.flag_pr_closed);
+    // A todo's wait is yours: its talk session (if any) is no work to stop,
+    // so it stays open (Claude may be the one parking it, from inside), and
+    // the dispatcher leaves a todo alone anyway.
+    if (t.todo) return .{};
     const live = actions.liveSession(ctx, t) orelse {
         // No session: it still waits for the park, not for the dispatcher.
-        // (A todo never has one, and the dispatcher leaves it alone anyway.)
-        if (!t.todo) try db.exec("UPDATE tickets SET killed = 1 WHERE id = ?1", .{t.id});
+        try db.exec("UPDATE tickets SET killed = 1 WHERE id = ?1", .{t.id});
         return .{};
     };
     var others: std.ArrayList([]const u8) = .empty;
@@ -284,8 +287,10 @@ pub fn park(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, o: Op
     return .{ .session = live, .others = others.items };
 }
 
-/// Kill the parked ticket's session, as `cl ticket kill` does.
+/// Kill the parked ticket's session, as `cl ticket kill` does. Not a
+/// todo's talk session: see `park`.
 pub fn stopSession(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, key: []const u8) !void {
+    if ((try board.getTicket(db, a, key)).todo) return;
     _ = actions.kill(ctx, cfg, db, a, key) catch |e| switch (e) {
         error.NoSession => {},
         else => return e,
@@ -954,4 +959,45 @@ test "a parked todo isn't killed; waking or unparking it only ends the wait, fla
     try testing.expect(!t.killed);
     try testing.expectEqualStrings("", t.tmux);
     try testing.expectEqual(@as(usize, 0), (try board.unsentNotes(db, a, t.id)).len);
+}
+
+test "parking a todo leaves its talk session open, from the board or from inside it" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const probe = std.process.run(gpa, io, .{ .argv = &.{ "tmux", "-V" } }) catch return error.SkipZigTest;
+    gpa.free(probe.stdout);
+    gpa.free(probe.stderr);
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    // A tmux server of the test's own, named on every call; never the real one.
+    var rnd: [8]u8 = undefined;
+    io.random(&rnd);
+    const sock = try std.fmt.allocPrint(a, "/tmp/cl-test-tmux-{x}", .{rnd});
+    defer std.Io.Dir.deleteFileAbsolute(io, sock) catch {};
+    defer if (std.process.run(gpa, io, .{ .argv = &.{ "tmux", "-S", sock, "kill-server" } })) |r| {
+        gpa.free(r.stdout);
+        gpa.free(r.stderr);
+    } else |_| {};
+    var env: std.process.Environ.Map = .init(gpa);
+    defer env.deinit();
+    const ctx: Ctx = .{ .io = io, .gpa = gpa, .perm = a, .env = &env, .home = "/tmp", .tmux_socket = sock };
+    const tmux = @import("tmux.zig");
+    gpa.free(try tmux.run(ctx, &.{ "new-session", "-d", "-s", "cl_me-1", "sleep", "600" }));
+    const cfg: config.Config = .{ .profiles = &.{}, .default = "", .operator = "" };
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "me", .dir = "/x/me", .repo = false });
+    const k = try board.createTicket(ctx, db, a, .{ .project = "me", .title = "Reply to Josh", .todo = true });
+    try db.exec("UPDATE tickets SET tmux = 'cl_me-1' WHERE key = ?1", .{k});
+    const r = try park(ctx, db, a, k, .{ .reason = "waiting on Josh" });
+    try testing.expect(r.session == null);
+    // What the CLI and the board do after parking: nothing, for a todo.
+    try stopSession(ctx, cfg, db, a, k);
+    const t = try board.getTicket(db, a, k);
+    try testing.expect(t.park != null);
+    try testing.expectEqualStrings("cl_me-1", t.tmux);
+    try testing.expect(!t.killed);
+    try testing.expect(actions.liveSession(ctx, t) != null);
 }

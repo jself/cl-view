@@ -2125,9 +2125,10 @@ pub fn sessionKilled(ctx: Ctx, db: Db, a: std.mem.Allocator, tmux_name: []const 
 /// runs in one of its own; see `dispatch.in_progress`).
 pub const in_progress = "('running', 'review', 'testing')";
 
-/// A ticket other than `id` is in progress in `tmux_name`.
+/// A ticket other than `id` is in progress in `tmux_name`. A todo isn't
+/// (its talk session is no ticket's work: `dispatch.startTodo`).
 pub fn sessionHasTicket(db: Db, tmux_name: []const u8, id: i64) Error!bool {
-    return (try db.int("SELECT 1 FROM tickets WHERE tmux = ?1 AND id != ?2 AND stage IN " ++ in_progress, .{ tmux_name, id })) != null;
+    return (try db.int("SELECT 1 FROM tickets WHERE tmux = ?1 AND id != ?2 AND todo = 0 AND stage IN " ++ in_progress, .{ tmux_name, id })) != null;
 }
 
 /// Keep the ticket's conversation id current (/clear starts a new one).

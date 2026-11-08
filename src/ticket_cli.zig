@@ -126,7 +126,9 @@ pub const ticket_usage =
     \\  start <key> [--now]         start it now: a worktree and session, or typed into its
     \\                              queue session (--now even if that session is busy); a ticket
     \\                              that ran before (killed, or its session ended) restarts,
-    \\                              resuming its conversation where Claude still has it
+    \\                              resuming its conversation where Claude still has it. A
+    \\                              todo gets a session of its own to talk about it in (Talk
+    \\                              to Claude), and stays in its stage
     \\  kill <key>                  end its session, as cl kill does; it keeps its stage, raises
     \\                              no flag, and waits for start to restart it. A queue
     \\                              project's session is shared: other tickets on it let go too
@@ -640,7 +642,8 @@ const todo_usage =
     \\never starts it and it never closes by itself. Prints its key. The project is -p, else
     \\board.todo_project in the config, else the only project that isn't a code repo.
     \\Done: cl ticket move <key> done. Waiting on someone: cl ticket park <key> --reason ...
-    \\Claude's help with it: cl ticket new --parent <key> "<task>".
+    \\Talk to Claude about it: cl ticket start <key> (a session of its own; it keeps its stage).
+    \\A Claude task for it: cl ticket new --parent <key> "<task>".
     \\
 ;
 
@@ -1016,13 +1019,14 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         dispatch.start(ctx, cfg, db, a, t, args.has("--now")) catch |e| switch (e) {
             error.AlreadyStarted => fail("{s} already has a session: {s}", .{ t.key, t.tmux }),
             error.Umbrella => fail("{s} is an umbrella: its sub-tickets run, not it (`cl ticket edit {s} --no-umbrella` makes it a ticket of its own)", .{ t.key, t.key }),
-            error.Todo => fail("{s} is a todo: it's yours, so no session works on it. For Claude's help, add a task under it: `cl ticket new --parent {s} \"<title>\" -m \"<what to do>\"`", .{ t.key, t.key }),
+            error.TodoDone => fail("{s} is a done todo: move it back to backlog (to do) or running (doing) to talk about it", .{t.key}),
             error.TargetBusy => fail("{s}'s session is busy or has another ticket in progress; it waits in Queued (--now types it in anyway)", .{t.key}),
             error.WorktreeFailed => fail("cannot make the worktree: {s}", .{worktree.lastError()}),
             error.SessionFailed => fail("cannot start the session: {s}", .{dispatch.failureReason(e)}),
             else => boardFail(db, e, "ticket"),
         };
         const after = board.getTicket(db, a, t.key) catch |e| boardFail(db, e, "ticket");
+        if (after.todo) return out(try std.fmt.allocPrint(a, "{s}: talking to Claude about it in {s} (still {s})\n", .{ after.key, after.tmux, todoStageName(after.stage) }));
         return out(try std.fmt.allocPrint(a, "{s} started in {s}{s}{s}\n", .{
             after.key, after.tmux, if (after.worktree.len > 0) " at " else "", try ctx.shortenHomeIn(a, after.worktree),
         }));
@@ -1104,6 +1108,8 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         } else if (until.len > 0) {
             try aw.writer.print("The dispatcher (cl web, or cl ticket dispatch) checks it now and every {s} for up to {s}; when the check passes, {s}.\n", .{ try park.formatDuration(a, every), try park.formatDuration(a, t.park.?.deadline - t.park.?.at), resumes });
         } else try aw.writer.print("Nothing checks it: `cl ticket unpark {s}` {s}.\n", .{ t.key, if (t.todo) "ends the wait" else "resumes it" });
+        // A todo's talk session isn't stopped (park.park).
+        if (t.todo and t.tmux.len > 0 and t.tmux[0] != '(') try aw.writer.print("Its talk session {s} stays open.\n", .{t.tmux});
         if (r.session) |s| {
             try aw.writer.print("Its session {s} closes now{s}.\n", .{ s, if (t.session_id.len == 36) "; its conversation resumes when it wakes" else "" });
             if (r.others.len > 0) try aw.writer.print("It was shared: {s} let go of it too.\n", .{try std.mem.join(a, ", ", r.others)});

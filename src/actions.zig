@@ -166,6 +166,8 @@ pub fn checkLanded(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8
 /// True when it moved; false when there was no session of its own to end.
 fn stopFor(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, key: []const u8, stage: board.Stage) !bool {
     const t = try board.getTicket(db, a, key);
+    // A todo's talk session isn't work on it: back to To do, it stays open.
+    if (t.todo) return false;
     const s = try sessionToStop(db, t, if (liveSession(ctx, t)) |_| true else false) orelse return false;
     review.stopGutter(ctx, a, key) catch {};
     autoreview.stop(ctx, db, a, key) catch {};
