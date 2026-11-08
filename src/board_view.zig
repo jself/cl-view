@@ -1494,7 +1494,7 @@ test "columns: by stage in rank order; Done, sub-tickets and hidden projects onl
 }
 
 test "Needs you lists what cl ticket needs does, and actions go to its row" {
-    const ctx: Ctx = .{ .io = testing.io, .gpa = testing.allocator, .perm = testing.allocator, .env = undefined, .home = "/tmp" };
+    const ctx: Ctx = .{ .io = testing.io, .gpa = testing.allocator, .perm = testing.allocator, .env = Ctx.testEnv(), .home = "/tmp" };
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -1701,7 +1701,7 @@ test "details show what a question asks, with its options" {
 }
 
 test "n makes a ticket in the cursor's column, asking project, title and description" {
-    const ctx: Ctx = .{ .io = testing.io, .gpa = testing.allocator, .perm = testing.allocator, .env = undefined, .home = "/tmp" };
+    const ctx: Ctx = .{ .io = testing.io, .gpa = testing.allocator, .perm = testing.allocator, .env = Ctx.testEnv(), .home = "/tmp" };
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();

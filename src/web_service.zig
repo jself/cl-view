@@ -165,11 +165,20 @@ test quoted {
 /// own PATH has no ~/.local/bin, and the tmux server cl web may start at boot
 /// (and so every session) inherits this one.
 pub fn unitPathVar(alloc: std.mem.Allocator, home: []const u8, exe: []const u8, shell_path: []const u8) ![]const u8 {
+    const local_bin = try std.fmt.allocPrint(alloc, "{s}/.local/bin", .{home});
+    return pathVar(alloc, &.{ local_bin, std.fs.path.dirname(exe) orelse "" }, shell_path, &.{});
+}
+
+/// A PATH of `front`, then `shell_path`, then `back`, then /usr/local/bin,
+/// /usr/bin and /bin: absolute directories only, each once (where it first
+/// comes), without a trailing slash. `unitPathVar` and `tmux.sessionPath`
+/// build theirs with it.
+pub fn pathVar(alloc: std.mem.Allocator, front: []const []const u8, shell_path: []const u8, back: []const []const u8) ![]const u8 {
     var dirs: std.ArrayList([]const u8) = .empty;
-    try addDir(alloc, &dirs, try std.fmt.allocPrint(alloc, "{s}/.local/bin", .{home}));
-    if (std.fs.path.dirname(exe)) |d| try addDir(alloc, &dirs, d);
+    for (front) |d| try addDir(alloc, &dirs, d);
     var it = std.mem.splitScalar(u8, shell_path, ':');
     while (it.next()) |d| try addDir(alloc, &dirs, d);
+    for (back) |d| try addDir(alloc, &dirs, d);
     for ([_][]const u8{ "/usr/local/bin", "/usr/bin", "/bin" }) |d| try addDir(alloc, &dirs, d);
     return std.mem.join(alloc, ":", dirs.items);
 }

@@ -16,6 +16,15 @@ tmux_socket: ?[]const u8 = null,
 /// tmux at all, as it could reach the real server. Set by `tmux.configure`.
 tmux_blocked: bool = false,
 
+var test_env: ?std.process.Environ.Map = null;
+
+/// The test process's environment, for a test's Ctx: cl hands `env` to the
+/// tmux it runs (`tmux.clientEnv`), and tmux needs its locale. Don't change it.
+pub fn testEnv() *std.process.Environ.Map {
+    if (test_env == null) test_env = std.testing.environ.createMap(std.heap.page_allocator) catch @panic("OOM");
+    return &test_env.?;
+}
+
 pub fn init(i: std.process.Init) Ctx {
     return .{
         .io = i.io,
@@ -122,7 +131,7 @@ test detach {
     const dir = buf[0..try tmp.dir.realPath(std.testing.io, &buf)];
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const out = try std.fmt.bufPrint(&path_buf, "{s}/out", .{dir});
-    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp" };
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = Ctx.testEnv(), .home = "/tmp" };
     // It returns before the command has run; the command still runs, in a
     // process group of its own (its pgid is its own pid's group, not ours).
     try ctx.detachArgv(&.{ "sh", "-c", "sleep 0.2; ps -o pgid= -p $$ > \"$1\"", "sh", out });

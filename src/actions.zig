@@ -1066,7 +1066,7 @@ pub fn testResults(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8
 }
 
 test "gutterSubmitted: an empty review sends nothing and leaves the ticket alone" {
-    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp" };
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = Ctx.testEnv(), .home = "/tmp" };
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
@@ -1111,7 +1111,7 @@ fn inNeeds(db: board.Db, a: std.mem.Allocator, key: []const u8) !bool {
 
 test "work that doesn't land is flagged in Needs You until it does: conflicts, closed unmerged" {
     // tmux blocked: no session is live, and nothing reaches a real server.
-    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp", .tmux_blocked = true };
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = Ctx.testEnv(), .home = "/tmp", .tmux_blocked = true };
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
@@ -1192,7 +1192,7 @@ test "work that doesn't land is flagged in Needs You until it does: conflicts, c
 
 test "a ticket with a target branch merges into it, runs no after-merge, and isn't flagged for missing trunk" {
     // tmux blocked: no session is live, and nothing reaches a real server.
-    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp", .tmux_blocked = true };
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = Ctx.testEnv(), .home = "/tmp", .tmux_blocked = true };
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
@@ -1255,7 +1255,7 @@ test "a ticket with a target branch merges into it, runs no after-merge, and isn
 }
 
 test "git: a ticket closed with its branch merged into its target isn't flagged; one that isn't names the target" {
-    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp", .tmux_blocked = true };
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = Ctx.testEnv(), .home = "/tmp", .tmux_blocked = true };
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();

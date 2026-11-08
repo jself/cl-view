@@ -210,7 +210,7 @@ test "save, adopt, remove" {
     defer arena_state.deinit();
     const a = arena_state.allocator();
     const dir = try tmp.dir.realPathFileAlloc(testing.io, ".", a);
-    const ctx: Ctx = .{ .io = testing.io, .gpa = testing.allocator, .perm = testing.allocator, .env = undefined, .home = "/nonexistent" };
+    const ctx: Ctx = .{ .io = testing.io, .gpa = testing.allocator, .perm = testing.allocator, .env = Ctx.testEnv(), .home = "/nonexistent" };
     var cfg: config.Config = .{ .profiles = &.{}, .default = "", .operator = "" };
     cfg.board.dir = dir;
     const png = "\x89PNG\r\n\x1a\nfake";

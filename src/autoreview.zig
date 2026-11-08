@@ -455,6 +455,7 @@ fn startAs(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: 
     // Not the ticket's session: cl's hooks (if the profile has any) leave it alone.
     try argv.appendSlice(a, &.{ "-e", "CL_TICKET=", "-e", try std.fmt.allocPrint(a, "CL_AUTOREVIEW={s}", .{t.key}) });
     if (ctx.tmux_socket) |s| try argv.appendSlice(a, &.{ "-e", try std.fmt.allocPrint(a, "{s}={s}", .{ tmux.socket_env, s }) });
+    try argv.appendSlice(a, &.{ "-e", try tmux.sessionPathEnv(ctx, a) });
     try argv.appendSlice(a, &.{ "--", "claude" });
     // Each tool list takes every argument up to the next option, so the
     // first message comes after --session-id's one value.
@@ -602,7 +603,7 @@ test "submit leaves a ticket out of Needs You when cl sends the findings itself"
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = a, .env = undefined, .home = "/tmp" };
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = a, .env = Ctx.testEnv(), .home = "/tmp" };
     const db = try board.Db.open(":memory:");
     defer db.close();
     try board.migrate(db);
@@ -623,7 +624,7 @@ test sendsItself {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = a, .env = undefined, .home = "/tmp" };
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = a, .env = Ctx.testEnv(), .home = "/tmp" };
     const db = try board.Db.open(":memory:");
     defer db.close();
     try board.migrate(db);
@@ -1264,7 +1265,7 @@ test "answered: sent findings are handled when Claude finishes the round, once" 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = a, .env = undefined, .home = "/tmp" };
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = a, .env = Ctx.testEnv(), .home = "/tmp" };
     const db = try board.Db.open(":memory:");
     defer db.close();
     try board.migrate(db);
@@ -1374,7 +1375,7 @@ test edit {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = a, .env = undefined, .home = "/tmp" };
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = a, .env = Ctx.testEnv(), .home = "/tmp" };
     const db = try board.Db.open(":memory:");
     defer db.close();
     try board.migrate(db);

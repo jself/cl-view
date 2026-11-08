@@ -327,7 +327,7 @@ pub fn run(ctx: Ctx, cfg: config.Config, db: board.Db, json: bool, filter: Filte
 const testing = std.testing;
 
 fn testCtx() Ctx {
-    return .{ .io = testing.io, .gpa = testing.allocator, .perm = testing.allocator, .env = undefined, .home = "/tmp" };
+    return .{ .io = testing.io, .gpa = testing.allocator, .perm = testing.allocator, .env = Ctx.testEnv(), .home = "/tmp" };
 }
 
 fn lines(a: std.mem.Allocator, cs: []const Change) ![]const u8 {

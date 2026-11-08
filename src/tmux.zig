@@ -167,7 +167,9 @@ fn setError(msg: []const u8) void {
 pub fn run(ctx: Ctx, argv: []const []const u8) ![]u8 {
     const full = try fullArgv(ctx, argv);
     defer ctx.gpa.free(full);
-    const res = std.process.run(ctx.gpa, ctx.io, .{ .argv = full }) catch |err| {
+    var env = try clientEnv(ctx);
+    defer env.deinit();
+    const res = std.process.run(ctx.gpa, ctx.io, .{ .argv = full, .environ_map = &env }) catch |err| {
         setError(@errorName(err));
         return err;
     };
@@ -211,7 +213,9 @@ pub fn startServerScoped(ctx: Ctx) !bool {
     defer ctx.gpa.free(full);
     @memcpy(full[0..pre.len], &pre);
     @memcpy(full[pre.len..], tmux_argv);
-    const res = std.process.run(ctx.gpa, ctx.io, .{ .argv = full }) catch |err| {
+    var env = try clientEnv(ctx);
+    defer env.deinit();
+    const res = std.process.run(ctx.gpa, ctx.io, .{ .argv = full, .environ_map = &env }) catch |err| {
         setError(@errorName(err));
         return err;
     };
@@ -362,6 +366,9 @@ pub fn newSession(ctx: Ctx, opts: NewOptions) ![]const u8 {
         sock_env = try std.fmt.allocPrint(ctx.gpa, "{s}={s}", .{ socket_env, p });
         try argv.appendSlice(ctx.gpa, &.{ "-e", sock_env.? });
     }
+    const path_env = try sessionPathEnv(ctx, ctx.gpa);
+    defer ctx.gpa.free(path_env);
+    try argv.appendSlice(ctx.gpa, &.{ "-e", path_env });
     for (opts.env) |e| try argv.appendSlice(ctx.gpa, &.{ "-e", e });
     try argv.append(ctx.gpa, "--");
     try argv.appendSlice(ctx.gpa, opts.command);
@@ -389,6 +396,46 @@ pub fn newSession(ctx: Ctx, opts: NewOptions) ![]const u8 {
     try ensureTerminalFeatures(ctx);
     try ensureDetachBinding(ctx);
     return tmux_name;
+}
+
+/// The PATH of the panes cl's sessions run: cl's own PATH as it is, then
+/// ~/.local/bin and the directory this cl runs from, where PATH lacks them.
+/// A cl started from the desktop launcher or the systemd user manager has
+/// no ~/.local/bin on its PATH, and Claude's Bash tool pins the PATH claude
+/// started with, so without this it couldn't run the `cl` commands its
+/// prompt asks for. Nothing moves ahead of what the user put first, and a
+/// branch's test server (zig-out/bin/cl, run from a shell with ~/.local/bin
+/// on PATH) leaves its sessions on the installed cl, not its own build. In `a`.
+fn sessionPath(ctx: Ctx, a: std.mem.Allocator) ![]const u8 {
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const exe = ctx.exePath(&exe_buf) catch "";
+    const local_bin = try std.fmt.allocPrint(a, "{s}/.local/bin", .{ctx.home});
+    defer a.free(local_bin);
+    var arena_state = std.heap.ArenaAllocator.init(a);
+    defer arena_state.deinit();
+    return a.dupe(u8, try web_service.pathVar(arena_state.allocator(), &.{}, ctx.env.get("PATH") orelse "", &.{ local_bin, std.fs.path.dirname(exe) orelse "" }));
+}
+
+/// "PATH=..." (`sessionPath`) for `new-session -e`, so windows opened from a
+/// client attached to the session get it too. Caller frees.
+pub fn sessionPathEnv(ctx: Ctx, a: std.mem.Allocator) ![]u8 {
+    const path = try sessionPath(ctx, a);
+    defer a.free(path);
+    return std.fmt.allocPrint(a, "PATH={s}", .{path});
+}
+
+/// cl's environment with PATH set to `sessionPath`, for the tmux client cl
+/// runs. A pane started by a command from a client outside any session
+/// (new-session, respawn-pane, new-window from cl) takes that client's PATH
+/// over the session's, and a server takes its global environment from the
+/// client that started it. Caller deinits.
+fn clientEnv(ctx: Ctx) !std.process.Environ.Map {
+    var env = try ctx.env.clone(ctx.gpa);
+    errdefer env.deinit();
+    const path = try sessionPath(ctx, ctx.gpa);
+    defer ctx.gpa.free(path);
+    try env.put("PATH", path);
+    return env;
 }
 
 /// The terminal-features entry cl adds to the server: hyperlinks and
@@ -812,7 +859,89 @@ test "decide: a sandbox HOME without a socket is blocked" {
 }
 
 fn testCtx(socket: ?[]const u8, blocked: bool) Ctx {
-    return .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp", .tmux_socket = socket, .tmux_blocked = blocked };
+    return .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = Ctx.testEnv(), .home = "/tmp", .tmux_socket = socket, .tmux_blocked = blocked };
+}
+
+test "sessionPath keeps cl's PATH in order and adds ~/.local/bin and cl's directory only where missing" {
+    const a = std.testing.allocator;
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var ctx = testCtx(null, false);
+    const dir = std.fs.path.dirname(try ctx.exePath(&exe_buf)).?;
+    ctx.home = "/home/u";
+    var env = try Ctx.testEnv().clone(a);
+    defer env.deinit();
+    ctx.env = &env;
+
+    // Both there already, after the user's own: nothing moves.
+    const shell = try std.fmt.allocPrint(a, "/home/u/.pyenv/shims:/usr/bin:{s}/:/home/u/.local/bin:rel", .{dir});
+    defer a.free(shell);
+    try env.put("PATH", shell);
+    const kept = try sessionPath(ctx, a);
+    defer a.free(kept);
+    const want_kept = try std.fmt.allocPrint(a, "/home/u/.pyenv/shims:/usr/bin:{s}:/home/u/.local/bin:/usr/local/bin:/bin", .{dir});
+    defer a.free(want_kept);
+    try std.testing.expectEqualStrings(want_kept, kept);
+
+    // Missing (a cl from the desktop launcher): added after the user's own.
+    try env.put("PATH", "/usr/local/sbin:/usr/bin");
+    const added = try sessionPath(ctx, a);
+    defer a.free(added);
+    const want_added = try std.fmt.allocPrint(a, "/usr/local/sbin:/usr/bin:/home/u/.local/bin:{s}:/usr/local/bin:/bin", .{dir});
+    defer a.free(want_added);
+    try std.testing.expectEqualStrings(want_added, added);
+}
+
+test "a session can run this cl even when the server's and cl's PATH lack its directory" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    const probe = std.process.run(a, io, .{ .argv = &.{ "tmux", "-V" } }) catch return error.SkipZigTest;
+    a.free(probe.stdout);
+    a.free(probe.stderr);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = dir_buf[0..try tmp.dir.realPath(io, &dir_buf)];
+    // In /tmp for the same reason as above; stopped with an explicit -S.
+    var rnd: [8]u8 = undefined;
+    io.random(&rnd);
+    const sock = try std.fmt.allocPrint(a, "/tmp/cl-test-tmux-{x}", .{rnd});
+    defer a.free(sock);
+    defer std.Io.Dir.deleteFileAbsolute(io, sock) catch {};
+    defer if (std.process.run(a, io, .{ .argv = &.{ "tmux", "-S", sock, "kill-server" } })) |r| {
+        a.free(r.stdout);
+        a.free(r.stderr);
+    } else |_| {};
+
+    var arena_state = std.heap.ArenaAllocator.init(a);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var ctx = testCtx(sock, false);
+    ctx.perm = arena;
+    ctx.home = "/home/u";
+    var env = try Ctx.testEnv().clone(a);
+    defer env.deinit();
+    try env.put("PATH", "/usr/bin:/bin");
+    ctx.env = &env;
+
+    // This test binary stands in for cl: the session finds it by name.
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const exe = try ctx.exePath(&exe_buf);
+    // By hand, not `command -v`: the test binary is called "test", a builtin
+    // and /usr/bin/test, which come first; what matters is that PATH reaches it.
+    const script = try std.fmt.allocPrint(arena, "IFS=:; for d in $PATH; do [ \"$d/{s}\" -ef '{s}' ] && {{ echo \"$d/{s}\" > found.txt; break; }}; done; printf %s \"$PATH\" > path.txt; sleep 60", .{ std.fs.path.basename(exe), exe, std.fs.path.basename(exe) });
+    _ = try newSession(ctx, .{ .name = "path-test", .dir = dir, .profile = "", .config_dir = null, .command = &.{ "sh", "-c", script } });
+    var found: []u8 = &.{};
+    var path: []u8 = &.{};
+    for (0..100) |_| {
+        found = tmp.dir.readFileAlloc(io, "found.txt", arena, .unlimited) catch &.{};
+        path = tmp.dir.readFileAlloc(io, "path.txt", arena, .unlimited) catch &.{};
+        if (path.len > 0 and found.len > 0) break;
+        io.sleep(.fromMilliseconds(50), .awake) catch {};
+    }
+    const want = try std.fmt.allocPrint(arena, "/usr/bin:/bin:/home/u/.local/bin:{s}:/usr/local/bin", .{std.fs.path.dirname(exe).?});
+    try std.testing.expectEqualStrings(want, path);
+    try std.testing.expectEqualStrings(exe, std.mem.trimEnd(u8, found, "\n"));
 }
 
 test "every tmux argv names the socket when one is set" {

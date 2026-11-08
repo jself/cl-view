@@ -532,7 +532,8 @@ pub fn launch(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, n: 
     const cmd = plan.steps[i - 1].run;
     const name = try runName(a, t.key, i);
     try killExact(ctx, a, name);
-    try tmux.runQuiet(ctx, &.{ "new-session", "-d", "-s", name, "-x", "200", "-y", "50", "-c", dir, "--", "sh", "-c", cmd });
+    // `cl ...` steps run this cl, as the session's own would.
+    try tmux.runQuiet(ctx, &.{ "new-session", "-d", "-s", name, "-x", "200", "-y", "50", "-c", dir, "-e", try tmux.sessionPathEnv(ctx, a), "--", "sh", "-c", cmd });
     tmux.runQuiet(ctx, &.{ "set-option", "-t", try std.fmt.allocPrint(a, "={s}:", .{name}), "remain-on-exit", "on" }) catch {};
     try board.logEvent(ctx, db, t.id, "launched", cmd);
     return i;
@@ -878,7 +879,7 @@ test recordResults {
 }
 
 test "done: each ticket keeps the test plan its own done gave" {
-    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp" };
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = Ctx.testEnv(), .home = "/tmp" };
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
@@ -917,7 +918,7 @@ test "done: each ticket keeps the test plan its own done gave" {
 }
 
 test "done: a planning session's plan is kept and shown; elsewhere it is refused" {
-    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp" };
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = Ctx.testEnv(), .home = "/tmp" };
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
@@ -939,7 +940,7 @@ test "done: a planning session's plan is kept and shown; elsewhere it is refused
 }
 
 test "done: each ticket keeps the review guide its own session wrote" {
-    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/tmp" };
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = Ctx.testEnv(), .home = "/tmp" };
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();

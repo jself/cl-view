@@ -161,6 +161,15 @@ Then every tmux call cl makes, `cl web`'s and the dispatcher's included, is
 `tmux -S <socket>`, and the sessions cl starts get `CL_TMUX_SOCKET` too, so a
 `cl` run inside one stays on that server.
 
+The sessions cl starts (and a server it starts) get cl's own PATH, whatever
+PATH the server has, with `~/.local/bin` and the directory `cl` runs from
+added at the end where it lacks them. So `cl` works in a session even when
+that cl came from the desktop launcher or a systemd unit, whose PATH has no
+`~/.local/bin` (Claude's Bash tool keeps the PATH Claude started with, so
+your shell's startup files can't add it). Nothing moves ahead of what you
+put first, and a branch's test server (`zig-out/bin/cl web`, from a shell
+with `~/.local/bin` on PATH) leaves its sessions running the installed `cl`.
+
 A sandbox (a `cl` whose `HOME` isn't your home directory from the passwd
 database) without a socket runs no tmux at all: `cl web`, `cl ticket
 dispatch` and the session commands refuse to start and say why, and the

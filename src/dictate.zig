@@ -374,7 +374,7 @@ test startTime {
     // /proc is Linux's, as is pw-record: dictating from a terminal is Linux only.
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     // The real thing: this test's own process.
-    try std.testing.expect(startTime(.{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = undefined, .home = "/" }, @intCast(std.os.linux.getpid())) != null);
+    try std.testing.expect(startTime(.{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = Ctx.testEnv(), .home = "/" }, @intCast(std.os.linux.getpid())) != null);
 }
 
 test latestClientSession {

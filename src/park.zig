@@ -623,7 +623,7 @@ fn holdForPause(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, n
 const testing = std.testing;
 
 fn testCtx() Ctx {
-    return .{ .io = testing.io, .gpa = testing.allocator, .perm = testing.allocator, .env = undefined, .home = "/tmp" };
+    return .{ .io = testing.io, .gpa = testing.allocator, .perm = testing.allocator, .env = Ctx.testEnv(), .home = "/tmp" };
 }
 
 test "park: out of Needs You, checks due at once then each interval, expiry flags it" {
@@ -926,7 +926,7 @@ test "a parked todo isn't killed; waking or unparking it only ends the wait, fla
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    const ctx: Ctx = .{ .io = testing.io, .gpa = testing.allocator, .perm = a, .env = undefined, .home = "/tmp", .tmux_blocked = true };
+    const ctx: Ctx = .{ .io = testing.io, .gpa = testing.allocator, .perm = a, .env = Ctx.testEnv(), .home = "/tmp", .tmux_blocked = true };
     const cfg: config.Config = .{ .profiles = &.{}, .default = "", .operator = "" };
     const db = try board.Db.open(":memory:");
     defer db.close();
