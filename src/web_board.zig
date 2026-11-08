@@ -758,7 +758,70 @@ const TicketRow = struct {
     working: bool = false,
     /// Where its automated review stands (`autoreview.standing`).
     autoreview: autoreview.Standing = .none,
+    /// It has a plan (`listTicket` leaves the plan's text out).
+    has_plan: bool = false,
 };
+
+/// A ticket as the board's columns show it: the long texts only its popup
+/// shows (GET /api/ticket sends them in full) are left out. The board asks
+/// for every ticket, Done ones too, every few seconds: with them, that was
+/// a megabyte each time on a board with 160 tickets.
+fn listTicket(a: std.mem.Allocator, t: board.Ticket, ar: ?autoreview.Review) !board.Ticket {
+    var out = t;
+    out.review_guide = "";
+    out.test_plan = "";
+    out.test_progress = "";
+    out.plan_md = "";
+    // A card shows the summary only as what its review flag asks.
+    const asks_review = for (t.flags) |f| {
+        if (std.mem.eql(u8, f.kind, "review")) break true;
+    } else false;
+    if (!asks_review) out.summary = "";
+    out.autoreview = if (ar) |r| try listReview(a, r) else "";
+    return out;
+}
+
+/// What a card's review pill reads of `Ticket.autoreview`: where it stands,
+/// how many findings and what became of them, not their text.
+fn listReview(a: std.mem.Allocator, r: autoreview.Review) ![]const u8 {
+    var out = r;
+    out.summary = "";
+    out.reply = "";
+    out.previous = null;
+    // The pill only asks whether there is an edit.
+    if (r.edited.len > 0) out.edited = "1";
+    const findings = try a.alloc(autoreview.Finding, r.findings.len);
+    for (findings, r.findings) |*f, g| f.* = .{ .severity = g.severity };
+    out.findings = findings;
+    return std.fmt.allocPrint(a, "{f}", .{std.json.fmt(out, .{})});
+}
+
+test "listTicket leaves out the popup's texts, not what a card shows" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var review_flag = [_]board.Flag{.{ .kind = "review", .source = "auto", .detail = "", .at = 0 }};
+    var t = std.mem.zeroInit(board.Ticket, .{ .key = "CL-1", .title = "t", .body = "searchable", .summary = "did it", .plan_md = "# plan", .review_guide = "guide", .test_plan = "plan", .test_progress = "{}" });
+    const r: autoreview.Review = .{ .status = "done", .summary = "long", .edited = "my edit", .findings = &.{ .{ .title = "a", .body = "why" }, .{ .title = "b", .body = "why" } } };
+    t.autoreview = try std.fmt.allocPrint(a, "{f}", .{std.json.fmt(r, .{})});
+
+    const l = try listTicket(a, t, autoreview.load(a, t));
+    try std.testing.expectEqualStrings("searchable", l.body);
+    try std.testing.expectEqualStrings("", l.summary);
+    try std.testing.expectEqualStrings("", l.plan_md);
+    try std.testing.expectEqualStrings("", l.review_guide);
+    try std.testing.expectEqualStrings("", l.test_plan);
+    try std.testing.expectEqualStrings("", l.test_progress);
+    const back = autoreview.load(a, l).?;
+    try std.testing.expectEqualStrings("done", back.status);
+    try std.testing.expectEqual(@as(usize, 2), back.findings.len);
+    try std.testing.expectEqualStrings("", back.findings[0].body);
+    try std.testing.expectEqualStrings("", back.summary);
+    try std.testing.expect(back.edited.len > 0);
+
+    t.flags = &review_flag;
+    try std.testing.expectEqualStrings("did it", (try listTicket(a, t, null)).summary);
+}
 
 fn sessionStatuses(ctx: Ctx, cfg: config.Config, a: std.mem.Allocator) !struct { rows: []SessionRow, map: std.StringHashMapUnmanaged([]const u8), busy: []const []const u8 } {
     const sessions = try tmux.list(ctx, a);
@@ -779,17 +842,25 @@ fn getBoard(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, re
     const ss = try sessionStatuses(ctx, cfg, a);
     const tickets = try board.listTickets(db, a, .{});
     var rows: std.ArrayList(TicketRow) = .empty;
-    for (tickets) |t| try rows.append(a, .{ .ticket = t, .status = ss.map.get(t.tmux) orelse "", .working = try board.isWorking(db, t, ss.busy), .autoreview = autoreview.standing(autoreview.load(a, t), t) });
+    for (tickets) |t| {
+        const ar = autoreview.load(a, t);
+        try rows.append(a, .{
+            .ticket = try listTicket(a, t, ar),
+            .status = ss.map.get(t.tmux) orelse "",
+            .working = try board.isWorking(db, t, ss.busy),
+            .autoreview = autoreview.standing(ar, t),
+            .has_plan = std.mem.trim(u8, t.plan_md, " \t\r\n").len > 0,
+        });
+    }
     var profiles: std.ArrayList([]const u8) = .empty;
     for (cfg.profiles) |p| try profiles.append(a, p.name);
-    try ok(req, a, .{
+    const b: Board = .{
         .projects = try board.listProjects(db, a),
         .tickets = rows.items,
         .sessions = ss.rows,
         // Hidden projects' too: the page leaves them out as it does their tickets.
         .alerts = try alerts.list(ctx, db, a, true),
         .profiles = profiles.items,
-        .now = ctx.nowSeconds(),
         .build = try buildId(a),
         // Descriptions refer to pasted images by their path under here.
         .images_dir = try images.root(ctx, a, cfg),
@@ -797,7 +868,75 @@ fn getBoard(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, re
         // `split`: a resident TTS server (voice.tts is a URL) is quick per
         // request, so the board asks for each sentence and starts on the first.
         .voice = .{ .on = cfg.voice.stt.len > 0, .tts = cfg.voice.tts.len > 0, .split = voice.ttsIsUrl(cfg.voice.tts), .speed = cfg.voice.tts_speed, .pitch = cfg.voice.tts_pitch },
-    });
+    };
+    try okCached(req, try cached(a, b), ctx.nowSeconds());
+}
+
+/// What GET /api/board sends. No clock in it: the time goes in a header
+/// (x-now), so the body only changes when the board does, and the page's
+/// refreshes get 304 while nothing moved (`okCached`), which is most of them.
+const Board = struct {
+    projects: []const board.Project,
+    tickets: []const TicketRow,
+    sessions: []const SessionRow,
+    /// Hidden projects' too: the page leaves them out as it does their tickets.
+    alerts: []const alerts.Alert,
+    profiles: []const []const u8,
+    build: []const u8,
+    /// Descriptions refer to pasted images by their path under here.
+    images_dir: []const u8,
+    /// The mic button shows only with voice.stt; voice.tts picks who speaks.
+    /// `split`: a resident TTS server (voice.tts is a URL) is quick per
+    /// request, so the board asks for each sentence and starts on the first.
+    voice: struct { on: bool, tts: bool, split: bool, speed: f32, pitch: f32 },
+};
+
+/// A JSON response and its etag: a hash of the body, so it only changes
+/// when the body does.
+const Cached = struct { body: []const u8, etag: []const u8 };
+
+fn cached(a: std.mem.Allocator, value: anytype) !Cached {
+    const body = try std.fmt.allocPrint(a, "{f}", .{std.json.fmt(value, .{})});
+    return .{ .body = body, .etag = try std.fmt.allocPrint(a, "\"{x:0>16}\"", .{std.hash.Wyhash.hash(0, body)}) };
+}
+
+/// The page already has this response: it sent back its etag.
+fn unchanged(if_none_match: ?[]const u8, etag: []const u8) bool {
+    return std.mem.eql(u8, if_none_match orelse return false, etag);
+}
+
+/// Send `c`, or 304 with no body when the page has it already. `now`, when
+/// given, goes in x-now: the page's "5m ago" without a clock in the body.
+fn okCached(req: *std.http.Server.Request, c: Cached, now: ?i64) !void {
+    var now_buf: [24]u8 = undefined;
+    const now_s = if (now) |n| std.fmt.bufPrint(&now_buf, "{d}", .{n}) catch unreachable else "";
+    const with_now = json_headers ++ [_]std.http.Header{ .{ .name = "etag", .value = c.etag }, .{ .name = "x-now", .value = now_s } };
+    const headers: []const std.http.Header = if (now != null) &with_now else with_now[0 .. with_now.len - 1];
+    if (unchanged(web.header(req, "if-none-match"), c.etag))
+        return req.respond("", .{ .status = .not_modified, .extra_headers = headers });
+    try req.respond(c.body, .{ .extra_headers = headers });
+}
+
+test "the board's etag: the same while nothing changed, new when something did" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var rows = [_]TicketRow{.{ .ticket = std.mem.zeroInit(board.Ticket, .{ .key = "CL-1", .title = "t", .stage = .running }), .status = "busy" }};
+    const b: Board = .{ .projects = &.{}, .tickets = &rows, .sessions = &.{}, .alerts = &.{}, .profiles = &.{"work"}, .build = "abc", .images_dir = "/i", .voice = .{ .on = false, .tts = false, .split = false, .speed = 1, .pitch = 1 } };
+
+    const first = try cached(a, b);
+    const again = try cached(a, b);
+    try std.testing.expectEqualStrings(first.etag, again.etag);
+    // Nothing time-based: a clock in the body would make every refresh a 200.
+    try std.testing.expect(std.mem.indexOf(u8, first.body, "\"now\"") == null);
+    try std.testing.expect(unchanged(first.etag, again.etag));
+
+    rows[0].ticket.stage = .review;
+    const moved = try cached(a, b);
+    try std.testing.expect(!std.mem.eql(u8, first.etag, moved.etag));
+    // The page's old etag no longer matches: it gets the new board.
+    try std.testing.expect(!unchanged(first.etag, moved.etag));
+    try std.testing.expect(!unchanged(null, moved.etag));
 }
 
 /// What is in Needs You, one id per thing asking: `f<flag id>` for each
@@ -1098,7 +1237,9 @@ fn getTicket(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, r
     const relay_ip = if (relays.items.len > 0) web.relayIp(ctx, &ip_buf) orelse "" else "";
     var subs: std.ArrayList(TicketRow) = .empty;
     for (try board.listTickets(db, a, .{ .parent = t.key })) |c| try subs.append(a, .{ .ticket = c, .status = ss.map.get(c.tmux) orelse "" });
-    try ok(req, a, .{
+    // Opened, the page asks for it every few seconds: 304 while nothing in
+    // it (its session's screen included) changed.
+    try okCached(req, try cached(a, .{
         .ticket = t,
         .status = ss.map.get(t.tmux) orelse "",
         .subtickets = subs.items,
@@ -1129,5 +1270,5 @@ fn getTicket(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, r
         // gutter is installed: the board offers it for review.
         .gutter = t.repo and review.findGutter(ctx, a, cfg) != null,
         .main_branch = if (t.branch.len > 0 or t.change.len > 0) worktree.mergeBranch(ctx, a, (try board.getProject(db, a, t.project)).dir, t.onto) else "",
-    });
+    }), null);
 }

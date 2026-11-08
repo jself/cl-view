@@ -431,6 +431,8 @@
   #reloadBar { display: flex; align-items: center; gap: calc(10 * var(--u)); margin: calc(10 * var(--u)) calc(20 * var(--u)) 0; padding: calc(8 * var(--u)) calc(12 * var(--u));
                border: 1px solid var(--line, #3a3d44); border-radius: calc(10 * var(--u)); flex-wrap: wrap; }
   #reloadBar[hidden] { display: none; }
+  #offBar { margin: calc(10 * var(--u)) calc(20 * var(--u)) 0; padding: calc(8 * var(--u)) calc(12 * var(--u)); border-radius: calc(8 * var(--u)); color: var(--muted); border: 1px dashed var(--line); }
+  #offBar[hidden] { display: none; }
   /* A paused project: the dispatcher starts nothing new there (cl project pause). */
   #pauseBar { display: flex; align-items: center; gap: calc(8 * var(--u)) calc(10 * var(--u)); margin: calc(10 * var(--u)) calc(20 * var(--u)) 0; padding: calc(8 * var(--u)) calc(12 * var(--u));
               border: 1px solid #7c3f12; background: #2a1708; border-radius: calc(10 * var(--u)); flex-wrap: wrap; }
@@ -521,6 +523,7 @@
 </header>
 
 <div id="pauseBar" role="status" hidden></div>
+<div id="offBar" role="status" hidden>Can't reach cl web (it restarts after a merge); trying again…</div>
 <div id="reloadBar" role="status" hidden><span>cl was updated. It reloads by itself once you stop typing, or now:</span><button type="button" class="btn primary" id="reloadBtn">Reload</button></div>
 
 <section id="needs" aria-label="Needs you">
@@ -852,9 +855,35 @@ function setHtml(el, html) {
   keepScroll(el, () => { el.innerHTML = html; });
   el.drawn = html;
 }
-async function refresh() {
-  try { state.data = await api("board"); } catch (e) { if (e.message !== "log in") toast(e.message, true); return; }
-  for (const row of state.data.tickets) row.ticket.ar = row.autoreview;
+// One at a time: on a slow link (the phone) a refresh that outlasts the
+// 3-second tick would otherwise have the next start behind it, and they pile
+// up. A tick while one runs is skipped; any other refresh (after an action)
+// runs again once it finishes, so it sees what the action did.
+let refreshing = null, refreshAgain = false;
+function refresh(tick) {
+  if (refreshing) { if (!tick) refreshAgain = true; return refreshing; }
+  refreshing = (async () => { do { refreshAgain = false; await loadBoard(); } while (refreshAgain); })().finally(() => { refreshing = null; });
+  return refreshing;
+}
+// The board answers 304 while nothing on it changed (it sends an etag; the
+// time comes in x-now, outside the body), which is most refreshes. A 304
+// keeps state.data as it is, so whatever changes state.data itself (a move
+// shown before the server answers) calls editedLocally: if the server then
+// refuses it, the next refresh brings back the server's board.
+async function loadBoard() {
+  let r;
+  try { r = await fetch("/api/board", { cache: "no-store", headers: state.etag ? { "if-none-match": state.etag } : {} }); }
+  catch { offline(true); return; } // cl web is restarting (after a merge): the bar says so, and the next tick tries again
+  offline(false);
+  if (r.status === 401) { location.href = "/"; return; }
+  if (r.status !== 304) {
+    const j = await r.json().catch(() => null);
+    if (!r.ok || !j) { toast(j?.error || r.statusText, true); return; }
+    state.data = j; state.etag = r.headers.get("etag");
+    for (const row of j.tickets) { row.ticket.ar = row.autoreview; row.ticket.has_plan = row.has_plan; }
+  }
+  if (!state.data) return;
+  state.data.now = Number(r.headers.get("x-now")) || Date.now() / 1000;
   checkBuild(state.data.build);
   document.getElementById("micBtn").hidden = !state.data.voice?.on;
   if (hint.on) return; // S's labels point at what is drawn now
@@ -862,6 +891,8 @@ async function refresh() {
   if (state.open) loadDetail(state.open, true);
   if (!document.hidden) pushTidy();
 }
+function editedLocally() { state.etag = null; }
+function offline(on) { document.getElementById("offBar").hidden = !on; }
 // cl was rebuilt and restarted (an after-merge command, say): the page is
 // from the old build. Reload, which keeps your place (see "where you were"),
 // unless that would lose something being typed; then offer it until it won't.
@@ -1213,11 +1244,20 @@ async function openTicket(key, tab, focus) {
   await loadDetail(key);
 }
 async function loadDetail(key, quiet) {
-  let d;
-  try { d = await api("ticket/" + encodeURIComponent(key) + (remoteView ? "?relay=1" : "")); }
-  catch (e) { if (!quiet) toast(e.message, true); return; }
+  let d, etag;
+  // A refresh of the ticket shown: 304 while nothing in it (its session's screen included) changed.
+  const have = quiet && state.detail?.ticket.key === key ? state.detailEtag : null;
+  try {
+    const r = await fetch("/api/ticket/" + encodeURIComponent(key) + (remoteView ? "?relay=1" : ""), { cache: "no-store", headers: have ? { "if-none-match": have } : {} });
+    if (r.status === 304) return;
+    if (r.status === 401) { location.href = "/"; return; }
+    d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || r.statusText);
+    etag = r.headers.get("etag");
+  } catch (e) { if (!quiet) toast(e.message, true); return; }
   // Another ticket was opened while this one loaded: never show this one there.
   if (state.open !== key) return;
+  state.detailEtag = etag;
   d.ticket.ar = d.autoreview_standing;
   if (state.detail?.ticket.key !== key || state.detail?.autoreview_standing !== d.autoreview_standing) state.arShow = state.arPrevShow = false;
   state.detail = d;
@@ -1312,21 +1352,23 @@ function drawTail() {
 // A ticket that plans first (board.planState): "plan first" until it is planned, then "planned", or for
 // one whose plan became its sub-tickets "planned · now an umbrella" (its plan stays under the Plan tab).
 // Moved out of Planning without a plan, it says neither.
+// The board's rows leave the plan's text out (has_plan says there is one); the popup's ticket has it.
+const hasPlan = (t) => t.has_plan || !!(t.plan_md || "").trim();
 const planFact = (t) => {
   if (!t.plan) return "";
-  if (t.stage !== "planning" && (t.plan_md || "").trim()) return t.umbrella ? `<span title="Its planning session filed the plan's sub-tickets; it runs as them. The plan is under the Plan tab">planned · now an umbrella</span>` : `<span>planned</span>`;
+  if (t.stage !== "planning" && hasPlan(t)) return t.umbrella ? `<span title="Its planning session filed the plan's sub-tickets; it runs as them. The plan is under the Plan tab">planned · now an umbrella</span>` : `<span>planned</span>`;
   if (t.stage !== "planning" && t.stage !== "backlog") return "";
   return `<span>plan first${t.skill ? " · " + esc(t.skill) : ""}</span>`;
 };
 // An umbrella's plan with nothing filed under it yet: approving is refused (it would wait in Queued for nothing).
 const emptyUmbrella = (t) => t.umbrella && !t.children;
-const planReady = (t) => t.stage === "planning" && ((t.plan_md || "").trim() || t.flags.some((f) => f.kind === "review"));
+const planReady = (t) => t.stage === "planning" && (hasPlan(t) || t.flags.some((f) => f.kind === "review"));
 // The ticket's approve button (the ticket view's bar, Ctrl+K's actions): its label, or "" for none.
 const approveLabel = (t) => planReady(t) ? (emptyUmbrella(t) ? "" : "Approve plan") : t.stage === "review" ? "Approve, to testing" : t.stage === "testing" && !t.finishing ? "Tested, done" : "";
 function tabsFor(d) {
   const t = d.ticket; const tabs = [];
   if (t.flags.some((f) => f.kind === "question" || f.kind === "input")) tabs.push(["needs", "Needs you"]);
-  if ((t.plan_md || "").trim() || planReady(t)) tabs.push(["plan", "Plan"]);
+  if (hasPlan(t) || planReady(t)) tabs.push(["plan", "Plan"]);
   if (t.flags.some((f) => f.kind === "after-merge")) tabs.push(["after-merge", "After merge"]);
   if (t.flags.some((f) => f.kind === "merge-failed" || f.kind === "unmerged")) tabs.push(["landing", "Not merged"]);
   if (t.stage === "review" || d.guide || d.review || d.autoreview) tabs.push(["review", "Review"]);
@@ -2127,6 +2169,7 @@ function endDrag(drop) {
 function placeLocally(key, place) {
   const rank = (k) => state.data.tickets.find((r) => r.ticket.key === k)?.ticket.rank;
   const t = state.data.tickets.find((r) => r.ticket.key === key)?.ticket; if (!t) return;
+  editedLocally();
   if (place.after) t.rank = rank(place.after) + 0.5; else if (place.before) t.rank = rank(place.before) - 0.5;
 }
 
@@ -2292,7 +2335,7 @@ async function moveTo(key, stage, place = {}) {
   if (!extra) { render(); if (state.detail) renderDetail(); return; }
   // Merge or PR: it stays put (Finishing) until Claude is done.
   if (finishMsg(key, extra)) { render(); return act(key, "move", { stage, ...extra }, finishMsg(key, extra)).catch(() => refresh()); }
-  row.ticket.stage = stage; placeLocally(key, place); render();
+  editedLocally(); row.ticket.stage = stage; placeLocally(key, place); render();
   const n = extra.spin_off ? openSubs(key).length : 0;
   act(key, "move", { stage, ...extra, ...place }, `${key} to ${STAGE_NAME[stage]}${n ? ` · ${n} spun off` : ""}`).catch(() => refresh());
 }
@@ -3327,7 +3370,7 @@ if (deepLink.get("open")) {
 pushInit();
 // In a background tab, every 30 s: enough to keep the title's count current.
 let ticks = 0;
-setInterval(() => { if (!document.hidden || ++ticks % 10 === 0) refresh(); }, 3000);
+setInterval(() => { if (!document.hidden || ++ticks % 10 === 0) refresh(true); }, 3000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
 </script>
 </body>

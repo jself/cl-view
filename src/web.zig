@@ -1018,7 +1018,7 @@ fn loginPage(comptime err: []const u8) []const u8 {
     return login_html[0..at] ++ err ++ login_html[at + marker.len ..];
 }
 
-fn header(req: *const std.http.Server.Request, name: []const u8) ?[]const u8 {
+pub fn header(req: *const std.http.Server.Request, name: []const u8) ?[]const u8 {
     var it = req.iterateHeaders();
     while (it.next()) |h| if (std.ascii.eqlIgnoreCase(h.name, name)) return h.value;
     return null;
