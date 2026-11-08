@@ -8,6 +8,7 @@ const config = @import("config.zig");
 const tmux = @import("tmux.zig");
 const pty = @import("pty.zig");
 const dispatch = @import("dispatch.zig");
+const reminders = @import("reminders.zig");
 const review = @import("review.zig");
 const autoreview = @import("autoreview.zig");
 const actions = @import("actions.zig");
@@ -110,8 +111,10 @@ fn serve(ctx: Ctx, cfg: config.Config) !void {
     if (cfg.board.dispatch) {
         (try std.Thread.spawn(.{}, dispatch.loop, .{ ctx, cfg, &logLine })).detach();
         (try std.Thread.spawn(.{}, sweepLoop, .{ ctx, cfg })).detach();
-    } else if (cfg.web.port) |p| {
-        logf("port {d} overrides web.listen: a second server, so the board's dispatcher stays with the main one", .{p});
+    } else {
+        // Todos' reminders and due dates come up without the dispatcher too.
+        (try std.Thread.spawn(.{}, reminders.loop, .{ ctx, cfg })).detach();
+        if (cfg.web.port) |p| logf("port {d} overrides web.listen: a second server, so the board's dispatcher stays with the main one", .{p});
     }
     for (threads.items) |t| t.join();
 }

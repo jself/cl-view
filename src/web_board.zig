@@ -13,7 +13,7 @@
 //!                                       start answer key kill hide unhide rm cleanup gutter
 //!                                       gutter-stop launch launch-stop test-progress
 //!                                       test-results relocate park unpark autoreview
-//!                                       autoreview-stop autoreview-send autoreview-gutter
+//!                                       autoreview-stop autoreview-send autoreview-gutter snooze
 //!                                       autoreview-edit plan
 //!   POST /api/flags/dismiss             dismiss one kind of flag on several tickets
 //!   POST /api/needs/act                 a notification's button: {item, action} (push.act)
@@ -44,6 +44,7 @@ const alerts = @import("alerts.zig");
 const voice = @import("voice.zig");
 const ticket_watch = @import("ticket_watch.zig");
 const push = @import("push.zig");
+const when = @import("when.zig");
 
 const board_html = @embedFile("web/board.html");
 
@@ -153,6 +154,7 @@ pub fn handle(ctx: Ctx, cfg: config.Config, req: *std.http.Server.Request, path:
             error.Exists => .{ .conflict, "already exists, or still in use" },
             error.Cycle => .{ .conflict, "that would make tickets wait on each other in a circle (or on itself), so none would start" },
             error.BadInput => .{ .bad_request, "invalid input" },
+            error.BadWhen => .{ .bad_request, "not a date I know: " ++ when.forms },
             error.NoSuchDir => .{ .bad_request, "no such directory" },
             error.NoSession => .{ .conflict, "the ticket has no live session" },
             error.CustomClose => .{ .conflict, "Claude asked to close it its own way; tell Claude, or just close it" },
@@ -223,6 +225,11 @@ const Body = struct {
     umbrella: ?bool = null,
     todo: ?bool = null,
     link: ?[]const u8 = null,
+    /// A todo's due date and reminder (when.parse: the board's pickers send
+    /// 2026-11-10 or 2026-11-10T15:00); "" clears. snooze: `when`.
+    due: ?[]const u8 = null,
+    remind: ?[]const u8 = null,
+    when: ?[]const u8 = null,
     skill: ?[]const u8 = null,
     parent: ?[]const u8 = null,
     profile: ?[]const u8 = null,
@@ -379,6 +386,8 @@ fn route(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: 
                 .umbrella = b.umbrella,
                 .todo = b.todo,
                 .link = b.link,
+                .due = try webWhen(ctx, cfg, db, b.due),
+                .remind = if (try webWhen(ctx, cfg, db, b.remind)) |w| w.at else null,
                 .skill = nonEmpty(b.skill),
                 .target = b.target,
                 .profile = b.profile,
@@ -589,6 +598,12 @@ fn checkOnto(ctx: Ctx, a: std.mem.Allocator, dir: []const u8, onto: []const u8) 
     if (!worktree.branchExists(ctx, a, dir, onto)) return error.NoSuchBranch;
 }
 
+/// A date from the board (when.parse); null when not sent.
+fn webWhen(ctx: Ctx, cfg: config.Config, db: board.Db, text: ?[]const u8) !?when.When {
+    const t = text orelse return null;
+    return try when.parse(db, ctx.nowSeconds(), cfg.board.morning, t);
+}
+
 fn ticketAction(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: *std.http.Server.Request, key: []const u8, action: []const u8, b: Body) !void {
     const eql = std.mem.eql;
     if (eql(u8, action, "edit")) {
@@ -611,6 +626,8 @@ fn ticketAction(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator
             .umbrella = b.umbrella,
             .todo = b.todo,
             .link = b.link,
+            .due = try webWhen(ctx, cfg, db, b.due),
+            .remind = if (try webWhen(ctx, cfg, db, b.remind)) |w| w.at else null,
             .skill = b.skill,
             .target = b.target,
             .profile = b.profile,
@@ -680,6 +697,12 @@ fn ticketAction(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator
         return ok(req, a, .{ .resumed = if (r.resumed) |x| @tagName(x) else "" });
     } else if (eql(u8, action, "hide") or eql(u8, action, "unhide")) {
         _ = try board.hideNeeds(ctx, db, a, key, eql(u8, action, "hide"));
+    } else if (eql(u8, action, "snooze")) {
+        const w = (try webWhen(ctx, cfg, db, b.when)) orelse return error.BadWhen;
+        if (w.at == 0) return error.BadWhen;
+        const said = try when.label(db, a, ctx.nowSeconds(), .{ .at = w.at, .has_time = true });
+        try board.snooze(ctx, db, a, key, w.at, try when.format(db, a, ctx.nowSeconds(), .{ .at = w.at, .has_time = true }));
+        return ok(req, a, .{ .until = said });
     } else if (eql(u8, action, "key")) {
         try actions.press(ctx, db, a, key, std.meta.stringToEnum(actions.Key, b.key orelse "") orelse return error.BadInput);
     } else if (eql(u8, action, "rm")) {
@@ -973,12 +996,18 @@ test "needsIds: the flags that put a ticket in Needs You, then alerts" {
     var done = base;
     done.stage = .done;
     done.flags = &done_flags;
+    // Parked, a todo's due date (or reminder) still asks; nothing else does.
+    const todo_flags = [_]ticket_watch.SeenFlag{ .{ .id = 11, .kind = "idle", .detail = "" }, .{ .id = 12, .kind = "due", .detail = "due today" } };
+    var parked_todo = base;
+    parked_todo.parked = true;
+    parked_todo.flags = &todo_flags;
     const al = [_]alerts.Alert{.{ .tmux = "cl_x", .from = "x", .operator = false, .text = "hi", .at = 42, .ticket = "", .project = "" }};
-    const ids = try needsIds(a, &.{ base, parked, working, hidden_project, done }, &al);
-    try std.testing.expectEqual(@as(usize, 3), ids.len);
+    const ids = try needsIds(a, &.{ base, parked, working, hidden_project, done, parked_todo }, &al);
+    try std.testing.expectEqual(@as(usize, 4), ids.len);
     try std.testing.expectEqualStrings("f7", ids[0]);
     try std.testing.expectEqualStrings("f10", ids[1]);
-    try std.testing.expectEqualStrings("acl_x@42", ids[2]);
+    try std.testing.expectEqualStrings("f12", ids[2]);
+    try std.testing.expectEqualStrings("acl_x@42", ids[3]);
 }
 
 // ---- push notifications (push.zig) ----

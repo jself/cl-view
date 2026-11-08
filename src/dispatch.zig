@@ -20,6 +20,7 @@ const history = @import("history.zig");
 const review = @import("review.zig");
 const autoreview = @import("autoreview.zig");
 const park = @import("park.zig");
+const reminders = @import("reminders.zig");
 const drift = @import("drift.zig");
 const actions = @import("actions.zig");
 const images = @import("images.zig");
@@ -1283,6 +1284,8 @@ fn sessionGone(ctx: Ctx, db: board.Db, t: board.Ticket) !void {
 pub fn tick(ctx: Ctx, cfg: config.Config, db: board.Db) !usize {
     // Parked tickets' checks (they run detached; a passing one resumes its ticket).
     park.checkDue(ctx, db) catch {};
+    // Todos' reminders and due dates (Needs You's Today group).
+    reminders.checkDue(ctx, cfg, db) catch {};
     // Nothing queued or in progress, and no session to let go of: nothing to look at.
     if ((try db.int("SELECT 1 FROM tickets WHERE stage IN ('queued', 'planning', 'running') OR (stage = 'backlog' AND tmux != '') OR finishing != '' OR tmux LIKE '%-plan\\_%' ESCAPE '\\' LIMIT 1", .{})) == null) return 0;
     var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);

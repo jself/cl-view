@@ -13,6 +13,7 @@ const std = @import("std");
 const Ctx = @import("ctx.zig");
 const config = @import("config.zig");
 const sqlite = @import("db.zig");
+const when = @import("when.zig");
 
 pub const Db = sqlite.Db;
 
@@ -70,6 +71,8 @@ pub const flag_park_expired = "park-expired"; // its park's check never passed i
 pub const flag_idle = "idle"; // Claude ended its turn; nothing else asks, so it waits on you
 pub const flag_pr_closed = "pr-closed"; // the PR its park waited on was closed without merging
 pub const flag_ready_to_close = "ready-to-close"; // its sub-tickets are all done, but it has work of its own
+pub const flag_reminder = "reminder"; // a todo's reminder came up (Ticket.remind_at): seen it, it can go
+pub const flag_due = "due"; // a todo is due today or overdue (Ticket.due_at); raised again each morning
 
 pub const Project = struct {
     name: []const u8,
@@ -272,6 +275,14 @@ pub const Ticket = struct {
     /// Where it came from (a Slack permalink, an email, a PR URL), "" for
     /// none. Any ticket may have one; a todo's sub-tickets are told it.
     link: []const u8 = "",
+    /// A todo's due date (unix seconds), 0 for none. A date alone is that
+    /// day's morning (`board.morning`); `due_time` says a time was given.
+    /// From its morning on, the dispatcher keeps it flagged `due`.
+    due_at: i64 = 0,
+    due_time: bool = false,
+    /// A todo's next reminder (unix seconds), 0 for none: once it comes,
+    /// the dispatcher flags it `reminder` and sets this back to 0.
+    remind_at: i64 = 0,
     /// On its way to Done: "merge" or "pr" while Claude merges its branch or
     /// opens a PR (it moves to Done when Claude is finished), else "".
     finishing: []const u8 = "",
@@ -398,6 +409,9 @@ const schema =
     \\  umbrella INTEGER NOT NULL DEFAULT 0,
     \\  todo INTEGER NOT NULL DEFAULT 0,
     \\  link TEXT NOT NULL DEFAULT '',
+    \\  due_at INTEGER NOT NULL DEFAULT 0,
+    \\  due_time INTEGER NOT NULL DEFAULT 0,
+    \\  remind_at INTEGER NOT NULL DEFAULT 0,
     \\  onto TEXT NOT NULL DEFAULT '',
     \\  pr_then TEXT NOT NULL DEFAULT '',
     \\  created INTEGER NOT NULL,
@@ -473,7 +487,7 @@ pub fn open(ctx: Ctx, cfg: config.Config) !Db {
     return db;
 }
 
-const version = 12;
+const version = 13;
 
 /// Version 11: parked tickets. Made whatever the version says, as the
 /// columns above are.
@@ -505,6 +519,14 @@ const drift_schema =
     \\  onto TEXT NOT NULL DEFAULT '',
     \\  at INTEGER NOT NULL
     \\);
+;
+
+/// The dispatcher looks for todos that are due or have a reminder each
+/// pass (reminders.zig): only the few with a date. Made whatever the version
+/// says, as the columns above are.
+const dates_schema =
+    \\CREATE INDEX IF NOT EXISTS tickets_due ON tickets(due_at) WHERE due_at != 0;
+    \\CREATE INDEX IF NOT EXISTS tickets_remind ON tickets(remind_at) WHERE remind_at != 0;
 ;
 
 /// Dependencies: `ticket` doesn't start until `blocker` is Done. Made
@@ -574,6 +596,11 @@ pub fn migrate(db: Db) !void {
         // Version 12: todos, and where a ticket came from.
         _ = try addColumn(db, "tickets", "todo", "INTEGER NOT NULL DEFAULT 0");
         _ = try addColumn(db, "tickets", "link", "TEXT NOT NULL DEFAULT ''");
+        // Version 13: todos' due dates and reminders.
+        _ = try addColumn(db, "tickets", "due_at", "INTEGER NOT NULL DEFAULT 0");
+        _ = try addColumn(db, "tickets", "due_time", "INTEGER NOT NULL DEFAULT 0");
+        _ = try addColumn(db, "tickets", "remind_at", "INTEGER NOT NULL DEFAULT 0");
+        try db.execMulti(dates_schema);
     }
     if (have >= version) return;
     // Version 1 had no sub-tickets, version 2 no planning skill.
@@ -594,6 +621,7 @@ pub fn migrate(db: Db) !void {
     try db.execMulti(parks_schema);
     try db.execMulti(deps_schema);
     try db.execMulti(drift_schema);
+    try db.execMulti(dates_schema);
     try db.execMulti(std.fmt.comptimePrint("PRAGMA user_version = {d}", .{version}));
 }
 
@@ -1064,6 +1092,10 @@ pub const TicketInput = struct {
     /// null for the default (parallel under a todo, in order otherwise).
     /// Changed later with `setParallel`.
     parallel: ?bool = null,
+    /// A todo's due date (`Ticket.due_at`, `due_time`); `.{}` clears it.
+    due: ?when.When = null,
+    /// A todo's next reminder (`Ticket.remind_at`); 0 clears it.
+    remind: ?i64 = null,
     /// Target branch (`Ticket.onto_own`); "" for the project's. A new
     /// sub-ticket without one takes its parent's.
     onto: ?[]const u8 = null,
@@ -1094,6 +1126,10 @@ pub fn createTicket(ctx: Ctx, db: Db, a: std.mem.Allocator, in: TicketInput) Err
     const todo = in.todo orelse false;
     if (todo and (plan or in.umbrella == true or !todoStage(stage))) return error.Todo;
     if (!validLink(in.link orelse "")) return error.BadInput;
+    // Dates are for todos: nothing else waits on the human that way.
+    const due = in.due orelse when.When{};
+    const remind = in.remind orelse 0;
+    if (!todo and (due.at != 0 or remind != 0)) return error.BadInput;
     // A Claude task for a todo goes on its own: it neither waits on the todo
     // (see `blockers`) nor on the tasks before it.
     const parallel = in.parallel orelse if (parent) |pt| pt.todo else false;
@@ -1108,9 +1144,9 @@ pub fn createTicket(ctx: Ctx, db: Db, a: std.mem.Allocator, in: TicketInput) Err
     };
     const t = now(ctx);
     try db.exec(
-        \\INSERT INTO tickets (key, project, title, body, stage, mode, plan, target, profile, parent, skill, created, updated, rank, umbrella, onto, todo, link, parallel)
-        \\VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, (SELECT coalesce(max(rank), 0) + ?13 FROM tickets), ?14, ?15, ?16, ?17, ?18)
-    , .{ key, p.name, title, body, @tagName(stage), @tagName(in.mode orelse p.mode), plan, in.target orelse "", in.profile orelse p.profile, if (parent) |pt| pt.id else null, in.skill orelse "", t, rank_gap, in.umbrella orelse false, if (!p.repo) @as([]const u8, "") else in.onto orelse if (parent) |pt| pt.onto_own else "", todo, std.mem.trim(u8, in.link orelse "", " \t\r\n"), parallel });
+        \\INSERT INTO tickets (key, project, title, body, stage, mode, plan, target, profile, parent, skill, created, updated, rank, umbrella, onto, todo, link, parallel, due_at, due_time, remind_at)
+        \\VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, (SELECT coalesce(max(rank), 0) + ?13 FROM tickets), ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
+    , .{ key, p.name, title, body, @tagName(stage), @tagName(in.mode orelse p.mode), plan, in.target orelse "", in.profile orelse p.profile, if (parent) |pt| pt.id else null, in.skill orelse "", t, rank_gap, in.umbrella orelse false, if (!p.repo) @as([]const u8, "") else in.onto orelse if (parent) |pt| pt.onto_own else "", todo, std.mem.trim(u8, in.link orelse "", " \t\r\n"), parallel, due.at, due.at != 0 and due.has_time, remind });
     const id = db.lastId();
     try logEvent(ctx, db, id, "created", @tagName(stage));
     if (parent) |pt| {
@@ -1127,7 +1163,7 @@ const ticket_cols = "t.id, t.key, t.project, t.title, t.body, t.stage, t.mode, t
     "EXISTS (SELECT 1 FROM events e WHERE e.ticket = t.id AND e.kind = 'started'), " ++
     "(SELECT count(*) FROM tickets c WHERE c.parent = t.id AND c.stage = 'done'), t.umbrella, " ++
     "t.onto, coalesce((SELECT p.onto FROM projects p WHERE p.name = t.project), ''), t.autoreview, t.pr_then, " ++
-    "coalesce((SELECT p.repo FROM projects p WHERE p.name = t.project), 1), t.todo, t.link";
+    "coalesce((SELECT p.repo FROM projects p WHERE p.name = t.project), 1), t.todo, t.link, t.due_at, t.due_time, t.remind_at";
 
 fn readTicket(st: sqlite.Stmt, a: std.mem.Allocator) !Ticket {
     return .{
@@ -1174,6 +1210,9 @@ fn readTicket(st: sqlite.Stmt, a: std.mem.Allocator) !Ticket {
         .repo = st.int(40) != 0,
         .todo = st.int(41) != 0,
         .link = try st.dupe(a, 42),
+        .due_at = st.int(43),
+        .due_time = st.int(44) != 0,
+        .remind_at = st.int(45),
     };
 }
 
@@ -1241,6 +1280,8 @@ pub const Filter = struct {
     shown: bool = false,
     /// Only todos (true), or no todos (false).
     todo: ?bool = null,
+    /// Only todos with a due date, the soonest first.
+    due: bool = false,
 };
 
 /// Words of `q` as FTS5 prefix terms ("foo" bar → "foo"* "bar"*), so user
@@ -1277,18 +1318,24 @@ pub fn listTickets(db: Db, a: std.mem.Allocator, f: Filter) Error![]Ticket {
     if (f.parked) try sql.appendSlice(a, " AND EXISTS (SELECT 1 FROM parks k WHERE k.ticket = t.id)");
     if (f.shown) try sql.appendSlice(a, " AND NOT EXISTS (SELECT 1 FROM projects p WHERE p.name = t.project AND p.hidden != 0)");
     if (f.todo) |v| try sql.appendSlice(a, if (v) " AND t.todo != 0" else " AND t.todo = 0");
-    // Parked: it waits on something outside cl, not on you.
-    if (f.needs) try sql.appendSlice(a, " AND NOT EXISTS (SELECT 1 FROM parks k WHERE k.ticket = t.id)");
+    if (f.due) try sql.appendSlice(a, " AND t.todo != 0 AND t.due_at != 0");
+    // Parked: it waits on something outside cl, not on you. Only a todo's
+    // reminder or due date still asks then (`todayFlag`).
     if (f.needs) try sql.appendSlice(a, if (f.hidden)
-        " AND EXISTS (SELECT 1 FROM flags g WHERE g.ticket = t.id AND g.cleared IS NULL) AND NOT EXISTS (SELECT 1 FROM flags g WHERE g.ticket = t.id AND g.cleared IS NULL AND g.hidden = 0)"
+        " AND EXISTS (SELECT 1 FROM flags g WHERE g.ticket = t.id AND g.cleared IS NULL AND (g.kind IN ('" ++ flag_reminder ++ "', '" ++ flag_due ++ "') OR NOT EXISTS (SELECT 1 FROM parks k WHERE k.ticket = t.id)))" ++
+            " AND NOT EXISTS (SELECT 1 FROM flags g WHERE g.ticket = t.id AND g.cleared IS NULL AND g.hidden = 0)" ++
+            // Snoozed (a todo with a reminder still to come): not hidden, it comes back by itself then.
+            " AND NOT (t.todo != 0 AND t.remind_at != 0)"
     else
-        " AND EXISTS (SELECT 1 FROM flags g WHERE g.ticket = t.id AND g.cleared IS NULL AND g.hidden = 0)");
+        " AND EXISTS (SELECT 1 FROM flags g WHERE g.ticket = t.id AND g.cleared IS NULL AND g.hidden = 0 AND (g.kind IN ('" ++ flag_reminder ++ "', '" ++ flag_due ++ "') OR NOT EXISTS (SELECT 1 FROM parks k WHERE k.ticket = t.id)))");
     const fts = if (f.search) |q| try ftsQuery(a, q) else "";
     if (fts.len > 0) try sql.appendSlice(a,
         \\ AND (t.id IN (SELECT rowid FROM tickets_fts WHERE tickets_fts MATCH ?4)
         \\  OR t.id IN (SELECT c.ticket FROM comments c JOIN comments_fts s ON s.rowid = c.id WHERE comments_fts MATCH ?4))
     );
-    if (f.needs) {
+    if (f.due) {
+        try sql.appendSlice(a, " ORDER BY t.due_at, t.id");
+    } else if (f.needs) {
         try sql.appendSlice(a, " ORDER BY (SELECT min(at) FROM flags g WHERE g.ticket = t.id AND g.cleared IS NULL), t.id");
     } else if (f.parent != null) {
         // The order they run in.
@@ -1352,6 +1399,8 @@ pub fn updateTicket(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, in:
     // yours: nothing would finish it.
     if (todo and !t.todo and t.stage != .done and (t.tmux.len > 0 or t.worktree.len > 0 or t.change.len > 0 or t.branch.len > 0)) return error.Todo;
     if (!validLink(in.link orelse "")) return error.BadInput;
+    // Dates are for todos (see createTicket).
+    if (!todo and ((in.due orelse when.When{}).at != 0 or (in.remind orelse 0) != 0)) return error.BadInput;
     if (!repo) {
         if (in.mode == .worktree or (in.onto orelse @as([]const u8, "")).len > 0) return error.NoRepo;
         // Into a repo-less project: work it has in a repo would be left
@@ -1377,6 +1426,19 @@ pub fn updateTicket(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, in:
     // wait on one another (as new ones under it don't: see createTicket).
     if (in.todo == true and !t.todo) try db.exec("UPDATE tickets SET parallel = 1 WHERE parent = ?1 AND stage != 'done'", .{t.id});
     if (in.link) |v| try db.exec("UPDATE tickets SET link = ?2 WHERE id = ?1", .{ t.id, std.mem.trim(u8, v, " \t\r\n") });
+    // A new due date: `due` goes, and the dispatcher raises it again if the
+    // new one is due too (a later one clears it).
+    if (in.due) |d| if (d.at != t.due_at or (d.at != 0 and d.has_time != t.due_time)) {
+        try db.exec("UPDATE tickets SET due_at = ?2, due_time = ?3 WHERE id = ?1", .{ t.id, d.at, d.at != 0 and d.has_time });
+        try clearFlagId(ctx, db, t.id, flag_due);
+    };
+    if (in.remind) |r| if (r != t.remind_at) try setRemind(ctx, db, t.id, r);
+    // No longer a todo: no dates either.
+    if (in.todo == false and t.todo) {
+        try db.exec("UPDATE tickets SET due_at = 0, due_time = 0, remind_at = 0 WHERE id = ?1", .{t.id});
+        try clearFlagId(ctx, db, t.id, flag_due);
+        try clearFlagId(ctx, db, t.id, flag_reminder);
+    }
     if (in.onto) |v| try db.exec("UPDATE tickets SET onto = ?2 WHERE id = ?1", .{ t.id, v });
     if (in.project.len > 0 and !std.mem.eql(u8, in.project, t.project)) {
         _ = try getProject(db, a, in.project);
@@ -1966,6 +2028,8 @@ fn moveId(ctx: Ctx, db: Db, id: i64, from: Stage, to: Stage) Error!void {
     // All but what runs after the merge (the after-merge command, the push
     // and its CI): that stays until the next run (or the human) clears it.
     if (to == .done) try db.exec("UPDATE flags SET cleared = ?2 WHERE ticket = ?1 AND cleared IS NULL AND kind NOT IN (?3, ?4, ?5)", .{ id, now(ctx), flag_after_merge, flag_push_failed, flag_ci_failed });
+    // A todo done: its reminder has nothing left to remind of.
+    if (to == .done) try db.exec("UPDATE tickets SET remind_at = 0 WHERE id = ?1", .{id});
     // Out of Done, it is under way again: "done without merging" no longer holds.
     if (from == .done) try clearFlagId(ctx, db, id, flag_unmerged);
     if (to == .queued) try moveSubtickets(ctx, db, id, .backlog, .queued);
@@ -2070,10 +2134,74 @@ pub fn asksWhenDone(kind: []const u8) bool {
 /// clears them, so the board doesn't offer to dismiss them; Hide is for "not
 /// now". `cl ticket unflag` still clears any flag.
 pub fn waitingFlag(kind: []const u8) bool {
-    for ([_][]const u8{ flag_question, flag_input, flag_review, flag_testing, flag_conflict, flag_idle }) |k| {
+    for ([_][]const u8{ flag_question, flag_input, flag_review, flag_testing, flag_conflict, flag_idle, flag_due }) |k| {
         if (std.mem.eql(u8, kind, k)) return true;
     }
     return false;
+}
+
+/// A todo's reminder or due date: Needs You keeps these apart, in a compact
+/// Today group under Claude's asks, and they show even while it's parked
+/// (waiting on Josh doesn't stop it being due).
+pub fn todayFlag(kind: []const u8) bool {
+    return std.mem.eql(u8, kind, flag_reminder) or std.mem.eql(u8, kind, flag_due);
+}
+
+/// Every flag that puts it in Needs You is a todo's reminder or due date
+/// (on a parked ticket, those are the only ones that do): a line in the
+/// Today group, under Claude's asks.
+pub fn todayOnly(t: Ticket) bool {
+    var any = false;
+    for (t.flags) |f| if (!f.hidden and (t.stage != .done or asksWhenDone(f.kind)) and (t.park == null or todayFlag(f.kind))) {
+        if (!todayFlag(f.kind)) return false;
+        any = true;
+    };
+    return any;
+}
+
+test todayOnly {
+    const due = [_]Flag{.{ .kind = flag_due, .source = "auto", .detail = "due today", .at = 1 }};
+    const both = [_]Flag{ due[0], .{ .kind = flag_idle, .source = "auto", .detail = "", .at = 2 } };
+    const hidden = [_]Flag{.{ .kind = flag_reminder, .source = "auto", .detail = "", .at = 1, .hidden = true }};
+    const base: Ticket = .{ .id = 1, .key = "ME-1", .project = "me", .title = "t", .body = "", .stage = .backlog, .mode = .queue, .plan = false, .skill = "", .base = "", .change = "", .target = "", .worktree = "", .branch = "", .profile = "", .tmux = "", .session_id = "", .summary = "", .round = 1, .created = 0, .updated = 0, .parent = "", .children = 0, .todo = true };
+    var t = base;
+    t.flags = @constCast(&due);
+    try std.testing.expect(todayOnly(t));
+    // Claude idle in its talk session asks too: a card, not a Today line...
+    t.flags = @constCast(&both);
+    try std.testing.expect(!todayOnly(t));
+    // ...unless it's parked, when only the due date asks.
+    t.park = .{ .reason = "Josh", .at = 0 };
+    try std.testing.expect(todayOnly(t));
+    // Nothing that asks: not in Today; Done: nothing asks.
+    t = base;
+    t.flags = @constCast(&hidden);
+    try std.testing.expect(!todayOnly(t));
+    t.flags = @constCast(&due);
+    t.stage = .done;
+    try std.testing.expect(!todayOnly(t));
+}
+
+/// Set a todo's next reminder (0 for none). The reminder that came up
+/// before goes: this one replaces it.
+fn setRemind(ctx: Ctx, db: Db, id: i64, at: i64) Error!void {
+    try db.exec("UPDATE tickets SET remind_at = ?2 WHERE id = ?1", .{ id, at });
+    try clearFlagId(ctx, db, id, flag_reminder);
+}
+
+/// Snooze a todo until `at`: a reminder then, and nothing in Needs You
+/// until it comes (its `reminder` goes, its `due` is hidden: that comes back
+/// with the reminder, or the next morning, whichever is first).
+/// `said` is `at` as the human reads it ("Mon 9 Nov 08:00"), for the
+/// activity log. BadInput
+/// for a ticket that isn't a todo, or one that's Done.
+pub fn snooze(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, at: i64, said: []const u8) Error!void {
+    const t = try getTicket(db, a, key);
+    if (!t.todo or t.stage == .done or at <= 0) return error.BadInput;
+    try setRemind(ctx, db, t.id, at);
+    try db.exec("UPDATE flags SET hidden = 1 WHERE ticket = ?1 AND kind = ?2 AND cleared IS NULL", .{ t.id, flag_due });
+    try logEvent(ctx, db, t.id, "snoozed", said);
+    try touch(ctx, db, t.id);
 }
 
 /// Dismiss a flag from the board: "seen it, it's dealt with". It clears the

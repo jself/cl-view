@@ -53,18 +53,19 @@ pub const Seen = struct {
     flags: []const SeenFlag,
 
     /// In Needs You, as the board decides it: a flag the human hasn't hidden
-    /// that still asks something, not parked, Claude not working on it, and
-    /// not in a hidden project.
+    /// that still asks something, Claude not working on it, and not in a
+    /// hidden project.
     pub fn inNeeds(self: Seen) bool {
-        if (self.parked or self.working or self.project_hidden) return false;
+        if (self.working or self.project_hidden) return false;
         for (self.flags) |f| if (self.asks(f)) return true;
         return false;
     }
 
     /// A flag that puts it in Needs You. On a Done ticket only work that
-    /// didn't land or a failed after-merge run still asks (board.asksWhenDone).
+    /// didn't land or a failed after-merge run still asks (board.asksWhenDone);
+    /// on a parked one only a todo's reminder or due date (board.todayFlag).
     pub fn asks(self: Seen, f: SeenFlag) bool {
-        return !f.hidden and (self.stage != .done or board.asksWhenDone(f.kind));
+        return !f.hidden and (self.stage != .done or board.asksWhenDone(f.kind)) and (!self.parked or board.todayFlag(f.kind));
     }
 
     /// The kinds of the flags that put it in Needs You, comma-separated.

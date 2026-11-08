@@ -484,7 +484,7 @@ microphone for voice (below).
 The phone (or any browser on the HTTPS address) can get a notification when
 something lands in Needs You: a question or permission prompt, a plan or
 work ready for you, work that didn't land, a parked ticket waking, Claude
-idle, or a `cl alert`. Tapping it opens a compact view of just that item:
+idle, or a `cl alert` (and, if you pick it, a todo's reminder or due date). Tapping it opens a compact view of just that item:
 a question with its options, the plan with Approve plan and a box for
 feedback, the review with Merge (Full ticket shows the rest, and closing it
 shows the board). On the board, Projects → **Notifications** → **Turn on for
@@ -787,6 +787,7 @@ board.worktrees = ~/.local/share/cl/worktrees
 board.dispatch = true            # cl web starts queued tickets
 board.trust_projects = true      # say yes to Claude's folder-trust dialog in project folders and worktrees
 board.todo_project = me          # where `cl todo` puts todos (see Todos)
+board.morning = 08:00            # when a todo's date with no time comes up (see Due dates and reminders)
 ```
 
 Every ticket belongs to a project, which gives it a key prefix:
@@ -1116,6 +1117,8 @@ cl t new --parent ME-1 "Draft a reply to Josh's thread"   # a Claude task for it
 cl t move ME-1 running | done                  # doing it, finished
 cl t park ME-1 --reason "waiting on Josh"      # waiting on someone
 cl t start ME-1                                # talk to Claude about it, in a session of its own
+cl todo "Send the budget" --due fri --remind "thu 3pm"   # due dates and reminders (below)
+cl t snooze ME-1 tomorrow                      # out of Needs You until a reminder then
 ```
 
 - `cl todo` prints the key. Its project is `-p`, else `board.todo_project`,
@@ -1173,7 +1176,7 @@ cl t start ME-1                                # talk to Claude about it, in a s
   `slack://`, since the board opens it. `show` prints it, and `--json` has `todo` and `link`.
 
 On the board, New ticket's Kind has Todo (yours, never runs): it asks for a
-Link and hides what only a Claude session takes (when, runs as, queue
+Link, a due date and a reminder, and hides what only a Claude session takes (when, runs as, queue
 session, skill, profile, target branch). A todo's card says To do, Doing or
 Waiting, in teal, with a chip for its link that opens it in a new tab. Its
 popup has Talk to Claude (Open terminal once its session is live; its card
@@ -1184,6 +1187,69 @@ switch over the board, next to Parked, shows or hides them. In `cl board` a
 todo's status is "to do" or "doing", `a` says there's nothing to approve,
 and `m d` moves it to Done (its open tasks stay under it, with no spin-off
 question).
+
+#### Due dates and reminders
+
+```
+cl todo "Send the budget" --due fri            # due Friday: in Needs You from Friday morning
+cl todo "Call the bank" --due "today 3pm"      # a time too
+cl todo "Ask Sam about the offsite" --remind mon   # a reminder Monday morning, once
+cl t edit ME-3 --due 11-20 --remind "+2h"      # change them; --due none / --remind none drop them
+cl t snooze ME-3 "mon 9am"                     # out of Needs You until a reminder then
+cl t list --due                                # todos with a due date, soonest first
+```
+
+- `--due` and `--remind` take `today`, `tomorrow`, a weekday (`mon` or
+  `monday`: the next one, never today), `+3d`, `+2w`, `+4h`, `+30m`, `now`,
+  `2026-11-20` or `11-20` (this year's, or next year's once it has passed),
+  each optionally followed by a time (`15:00`, `3pm`, `3:30pm`); a time alone
+  is today's, or tomorrow's once it has passed; `none` clears it. A date with
+  no time means that day's morning, `board.morning` in the config (08:00
+  unless set). Times are local: cl reads them through SQLite, which knows the
+  machine's time zone. Only todos have them (`new` needs `--todo`).
+- **Due**: from the morning of its day (or its time, if that's earlier, and
+  at once for a date gone by) the todo is flagged `due` ("due today", "due
+  today 15:00"). It waits on you, so there's no Dismiss: it goes when the todo
+  is Done or its due date moves (`edit --due`; a later date clears it, and the
+  dispatcher raises it again only when that one comes). Each morning while
+  it's overdue it is raised anew ("overdue since Thu 5 Nov (2 days)"), so a
+  hidden one comes back and it counts as new (`cl window`'s attention, a
+  phone notification if picked); between midnight and the morning it stays
+  as it was. Hide means "not today".
+- **Reminder**: when it comes, the todo is flagged `reminder` once ("reminder
+  for Mon 9 Nov 08:00") and the reminder is used up. It's informational:
+  Dismiss or Hide takes it away. A new `--remind` replaces it.
+- **Snooze** (`cl t snooze <key> <when>`, the board's Snooze) sets a reminder
+  then, takes the `reminder` that's up away and hides `due`, so the todo
+  leaves Needs You until the reminder comes, or the next morning brings `due`
+  back, whichever is first. A todo snoozed like that (any todo with a
+  reminder still to come) isn't listed with the hidden items either (the
+  board's "N hidden", `cl t needs --hidden`). Moving it to Done drops its
+  reminder.
+- Both show in Needs You even while the todo is parked: waiting on Josh
+  doesn't stop it being due. They count like anything else there (the board's
+  tab title, `cl window`'s attention request, `cl t watch --change needs`).
+  Phone notifications for them are off unless you pick "Your todos' reminders
+  and due dates" under Notifications.
+- The dispatcher checks them each pass (`cl web`, or `cl t dispatch`); a
+  `cl web` that doesn't dispatch (`board.dispatch = false`, or a second
+  server on its own port) checks them every 30 seconds itself.
+- `cl t show` says `due:` and `reminder:` (from now: "today 15:00",
+  "tomorrow", "Fri 20 Nov"); `--json` adds `dates`, with `due` and `remind`
+  in local ISO (`2026-11-20`, or `2026-11-20T15:00` with a time), `due_time`,
+  and `due_text` / `remind_text` as said. The ticket itself has `due_at`,
+  `due_time` and `remind_at` (unix seconds, 0 for none). `cl t list` and
+  `needs` add the due date to a todo's line.
+
+On the board, a todo's form (New ticket with Kind Todo, and its Details tab)
+has Due and Remind me, each a date with an optional time; its card has a chip
+for each ("due Fri 20 Nov", red once overdue; "remind tomorrow 08:00"), and
+its popup a Snooze button. Needs You puts todos whose only ask is a reminder
+or a due date in a compact **Today** group under Claude's cards, one line
+each, overdue first: what it says, its title and project, and Done, Snooze
+(in an hour, tomorrow morning, Monday, in a week, or a day and time you
+pick), Open and Hide. Today folds on its own (remembered in the browser). In
+`cl board` they're the last rows of Needs you, with `m d` to move one to Done.
 
 ### What needs you
 
@@ -1211,8 +1277,9 @@ and the flag comes back only if the same thing happens again. When two or
 more cards share a kind, "Dismiss all" clears that kind on them after you
 confirm. Dismiss is only offered on informational flags (didn't start,
 session ended, after-merge failed, didn't land, not merged, woke from park,
-park expired, PR closed, flags set by hand); a question, a permission prompt, a review, a test or a conflict waits
-on you, and clears when you act on it.
+park expired, PR closed, a todo's reminder, flags set by hand); a question, a permission prompt, a review, a test, a conflict or a due todo waits
+on you, and clears when you act on it. A todo's reminders and due dates
+gather in the Today group under the cards (see Due dates and reminders).
 
 `cl t watch` prints a line each time a ticket's flags or stage change, until
 killed (`--json` for one object per line, with the flag's details):
@@ -1677,7 +1744,8 @@ Reload banner while you are typing.
 
 `/board` shows Board, Lanes (a row per project) and List views, with "Needs
 you" across the top: every ask, with quick answers, and the sessions' alerts
-(`cl alert`, see Alerts). Filters pick what needs
+(`cl alert`, see Alerts), then your todos' reminders and due dates in a compact
+Today group (see Due dates and reminders). Filters pick what needs
 you, a project, and whether sub-tickets, done and parked tickets and todos
 (see Todos) show. A ticket opens in a popup:
 answer its questions, comment or send it back, watch its session or open it

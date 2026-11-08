@@ -7,6 +7,7 @@ const config = @import("config.zig");
 const tmux = @import("tmux.zig");
 const claude = @import("claude.zig");
 const board = @import("board.zig");
+const when = @import("when.zig");
 const images = @import("images.zig");
 const dispatch = @import("dispatch.zig");
 const worktree = @import("worktree.zig");
@@ -26,6 +27,7 @@ pub const ticket_usage =
     \\  new <project> <title> [-m <body>] [--worktree | --queue] [--target <session>]
     \\      [--plan [--skill <name>]] [--stage <stage>] [--profile <name>] [--parent <key>]
     \\      [--after <key,...>] [--parallel] [--umbrella] [--onto <branch>] [--todo] [--link <url>]
+    \\      [--due <when>] [--remind <when>]
     \\                              create a ticket; prints its key. With --parent the
     \\                              project may be left out (it's the parent's). Sub-tickets
     \\                              run in order: each waits for the one ranked before it to
@@ -56,21 +58,31 @@ pub const ticket_usage =
     \\                              tasks for it: parallel, they don't wait on it, and each
     \\                              is told the todo's title, body and link. Never --plan or
     \\                              --umbrella. --link: where it came from (a Slack message,
-    \\                              an email, a PR); any ticket may have one
+    \\                              an email, a PR); any ticket may have one.
+    \\                              A todo's --due: flagged due from that day's morning
+    \\                              (board.morning, 08:00) or its time, and again each morning
+    \\                              while overdue, until done or moved later. --remind: flagged
+    \\                              reminder once, then. Both are in Needs You's Today group.
+    \\                              <when>: today, tomorrow, mon (the next one), +3d, +2w, +4h,
+    \\                              +30m, now, 2026-11-10 or 11-10, each optionally followed by a
+    \\                              time (15:00, 3pm); a time alone; none clears
     \\  sub <title> [-m <body>] [options of new]
     \\                              in a ticket's session: a sub-ticket of $CL_TICKET
     \\  list [--stage <s>] [--project <p>] [--flag <f>] [--needs] [--search <q>] [--open]
-    \\      [--top] [--parent <key>] [--parked] [--hidden-projects] [--todo | --no-todo]
+    \\      [--top] [--parent <key>] [--parked] [--hidden-projects] [--todo | --no-todo] [--due]
     \\                              tickets, newest first (--needs: oldest ask first;
     \\                              --top: no sub-tickets; --parent: its sub-tickets;
-    \\                              --todo: only todos, --no-todo: none)
+    \\                              --todo: only todos, --no-todo: none; --due: todos with
+    \\                              a due date, soonest first). A todo with one says when
     \\  needs [--hidden] [--hidden-projects]
     \\                              tickets with a flag, oldest first (the inbox); a ticket
     \\                              whose session is working on it is left out until it stops,
     \\                              and a hidden one until it raises a new flag (--hidden: those).
     \\                              First the sessions' alerts (cl alert), one line each:
     \\                              alert, from (operator or a session), ticket or -, raised
-    \\                              (unix s), text. --json: {"tickets": [...], "alerts": [...]}
+    \\                              (unix s), text. Last, under "today:", todos asking only
+    \\                              with a reminder or due date (they show while parked too),
+    \\                              with what it says. --json: {"tickets": [...], "alerts": [...]}
     \\                              list and needs leave out hidden projects' tickets (cl project
     \\                              hide) unless --hidden-projects, --project or --parent names them
     \\  watch [<key>...] [--project <p,...>] [--change set,cleared,moved,new,needs,left]
@@ -93,12 +105,14 @@ pub const ticket_usage =
     \\      [--target <session>] [--plan | --no-plan] [--skill <name>] [--profile <name>]
     \\      [--after <key,...>] [--not-after <key,...>] [--parallel | --in-order]
     \\      [--umbrella | --no-umbrella] [--onto <branch>] [--todo | --no-todo] [--link <url>]
+    \\      [--due <when>] [--remind <when>]
     \\                              --onto "" goes back to the project's target. --after: the
     \\                              dispatcher doesn't start it until those
     \\                              tickets are done (refused if they wait on it already);
     \\                              --not-after drops the link; --parallel / --in-order: a
     \\                              sub-ticket doesn't / does wait for the one before it;
-    \\                              --todo makes it yours (see new), --link "" drops the link
+    \\                              --todo makes it yours (see new), --link "" drops the link,
+    \\                              --due none / --remind none drop the date
     \\  move <key> <stage> [--spin-off] [--merge | --pr [--then <steps>] | --tell <text> | --close]
     \\                              backlog planning queued running review testing done
     \\                              (done also closes the ticket's session; it's refused while
@@ -154,6 +168,9 @@ pub const ticket_usage =
     \\                              the ticket's origin remote; --reason defaults to "PR #n: waiting
     \\                              to merge", --max to 14d.
     \\                              The dispatcher never starts a parked ticket, even in Queued
+    \\  snooze <key> <when>          a todo: remind you then (see new's --due for <when>), and
+    \\                              out of Needs You until then: its reminder goes, and its due
+    \\                              flag hides until the reminder or the next morning
     \\  unpark <key> [--no-resume]   end the park now and resume its session (--no-resume: just
     \\                              end it; the session stays stopped)
     \\  rebase <key>                its change will conflict with its target (the dispatcher test-
@@ -636,7 +653,8 @@ fn checkProfile(cfg: config.Config, name: ?[]const u8) !void {
 // ---- todos ----
 
 const todo_usage =
-    \\usage: cl todo <title> [-p <project>] [-m <body>] [--link <url>] [--parent <key>] [--json]
+    \\usage: cl todo <title> [-p <project>] [-m <body>] [--link <url>] [--parent <key>]
+    \\                [--due <when>] [--remind <when>] [--json]
     \\
     \\A todo of yours on the board (cl ticket new <project> <title> --todo): the dispatcher
     \\never starts it and it never closes by itself. Prints its key. The project is -p, else
@@ -644,6 +662,10 @@ const todo_usage =
     \\Done: cl ticket move <key> done. Waiting on someone: cl ticket park <key> --reason ...
     \\Talk to Claude about it: cl ticket start <key> (a session of its own; it keeps its stage).
     \\A Claude task for it: cl ticket new --parent <key> "<task>".
+    \\--due: in Needs You's Today group from that day's morning (board.morning, 08:00) or
+    \\time on, and each morning while overdue. --remind: in Today then, once.
+    \\Snooze: cl ticket snooze <key> <when>. <when>: today, tomorrow, mon, +3d, +2w, +4h,
+    \\+30m, now, 2026-11-10 or 11-10, each optionally followed by a time (15:00, 3pm).
     \\
 ;
 
@@ -654,8 +676,8 @@ pub fn todoMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void {
     const a = arena_state.allocator();
     var expanded: std.ArrayList([]const u8) = .empty;
     for (argv) |s| try expanded.append(a, if (std.mem.eql(u8, s, "-p")) "--project" else s);
-    const args = try Args.parse(a, expanded.items, &.{ "--body", "--project", "--link", "--parent" }, todo_usage);
-    args.only(&.{ "--body", "--project", "--link", "--parent", "--json" }, todo_usage);
+    const args = try Args.parse(a, expanded.items, &.{ "--body", "--project", "--link", "--parent", "--due", "--remind" }, todo_usage);
+    args.only(&.{ "--body", "--project", "--link", "--parent", "--json", "--due", "--remind" }, todo_usage);
     if (args.pos.items.len != 1) fail("{s}", .{todo_usage});
     const db = openBoard(ctx, cfg);
     defer db.close();
@@ -669,10 +691,28 @@ pub fn todoMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void {
         .body = args.get("--body"),
         .todo = true,
         .link = args.get("--link"),
+        .due = parseWhen(ctx, cfg, db, "--due", args.get("--due")),
+        .remind = if (parseWhen(ctx, cfg, db, "--remind", args.get("--remind"))) |w| w.at else null,
     }) catch |e| boardFail(db, e, if (parent != null) "parent ticket or project" else "project");
     if (args.has("--json")) return out(try std.fmt.allocPrint(a, "{f}\n", .{std.json.fmt(.{ .key = key }, .{})}));
     return out(try std.fmt.allocPrint(a, "{s}\n", .{key}));
 }
+
+/// `--due` / `--remind` read (when.parse); null when not given.
+fn parseWhen(ctx: Ctx, cfg: config.Config, db: board.Db, opt: []const u8, text: ?[]const u8) ?when.When {
+    const t = text orelse return null;
+    return when.parse(db, ctx.nowSeconds(), cfg.board.morning, t) catch |e| switch (e) {
+        error.BadWhen => fail("{s} {s}: not a date I know. It takes {s}", .{ opt, t, when.forms }),
+        else => boardFail(db, e, "date"),
+    };
+}
+
+/// Said from now, for a todo's dates in `show` and `list`.
+fn dueLine(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket) ![]const u8 {
+    return when.dueText(db, a, ctx.nowSeconds(), .{ .at = t.due_at, .has_time = t.due_time });
+}
+
+
 
 fn checkLink(link: ?[]const u8) void {
     if (!board.validLink(link orelse "")) fail("--link is a web page (https://...), a mail (mailto:...) or a Slack link (slack://...)", .{});
@@ -703,14 +743,18 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         "--reason", "--until", "--every", "--max", "--at", "--change", "--not-after", "--onto", "--findings", "--link",
     };
     // park's --pr names the PR; elsewhere (move, approve) it's a finish.
-    const args = try Args.parse(a, argv[1..], if (std.mem.eql(u8, cmd, "park")) &(valued ++ [_][]const u8{"--pr"}) else &valued, ticket_usage);
+    // list's --due is a switch (todos with a due date); new's and edit's
+    // take a date.
+    const listing = std.mem.eql(u8, cmd, "list") or std.mem.eql(u8, cmd, "ls") or std.mem.eql(u8, cmd, "needs");
+    const args = try Args.parse(a, argv[1..], if (std.mem.eql(u8, cmd, "park")) &(valued ++ [_][]const u8{"--pr"}) else if (listing) &valued else &(valued ++ [_][]const u8{ "--due", "--remind" }), ticket_usage);
     const env_key = ctx.env.get("CL_TICKET");
     const db = openBoard(ctx, cfg);
     defer db.close();
     const pos = args.pos.items;
 
     if (std.mem.eql(u8, cmd, "new") or std.mem.eql(u8, cmd, "sub")) {
-        args.only(&.{ "--body", "--worktree", "--queue", "--target", "--plan", "--skill", "--stage", "--profile", "--parent", "--json", "--after", "--parallel", "--umbrella", "--onto", "--todo", "--link" }, ticket_usage);
+        args.only(&.{ "--body", "--worktree", "--queue", "--target", "--plan", "--skill", "--stage", "--profile", "--parent", "--json", "--after", "--parallel", "--umbrella", "--onto", "--todo", "--link", "--due", "--remind" }, ticket_usage);
+        if (!args.has("--todo") and (args.get("--due") != null or args.get("--remind") != null)) fail("--due and --remind are for todos: add --todo (or use cl todo)", .{});
         const is_sub = std.mem.eql(u8, cmd, "sub");
         const parent = args.get("--parent") orelse if (is_sub) (env_key orelse fail("cl ticket sub runs in a ticket's session ($CL_TICKET); elsewhere use new --parent <key>", .{})) else null;
         // With a parent, the project is optional: new --parent QA-2 "title".
@@ -740,13 +784,15 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
             .onto = args.get("--onto"),
             .todo = args.has("--todo"),
             .link = args.get("--link"),
+            .due = parseWhen(ctx, cfg, db, "--due", args.get("--due")),
+            .remind = if (parseWhen(ctx, cfg, db, "--remind", args.get("--remind"))) |w| w.at else null,
         }) catch |e| boardFail(db, e, if (parent != null) "parent ticket or project" else "project");
         try applyDeps(ctx, db, a, key, args);
         if (args.has("--json")) return out(try std.fmt.allocPrint(a, "{f}\n", .{std.json.fmt(.{ .key = key }, .{})}));
         return out(try std.fmt.allocPrint(a, "{s}\n", .{key}));
     }
     if (std.mem.eql(u8, cmd, "list") or std.mem.eql(u8, cmd, "ls") or std.mem.eql(u8, cmd, "needs")) {
-        args.only(&.{ "--stage", "--project", "--flag", "--needs", "--hidden", "--search", "--open", "--top", "--parent", "--parked", "--hidden-projects", "--json", "--todo", "--no-todo" }, ticket_usage);
+        args.only(&.{ "--stage", "--project", "--flag", "--needs", "--hidden", "--search", "--open", "--top", "--parent", "--parked", "--hidden-projects", "--json", "--todo", "--no-todo", "--due" }, ticket_usage);
         if (args.has("--todo") and args.has("--no-todo")) fail("--todo or --no-todo, not both", .{});
         if (pos.len != 0) fail("{s} takes no arguments\n{s}", .{ cmd, ticket_usage });
         const needs = args.has("--needs") or args.has("--hidden") or std.mem.eql(u8, cmd, "needs");
@@ -767,6 +813,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
             .parent = args.get("--parent"),
             .parked = args.has("--parked"),
             .todo = if (args.has("--todo")) true else if (args.has("--no-todo")) false else null,
+            .due = args.has("--due"),
             // Hidden projects stay out unless asked for, by name or flag.
             .shown = !args.has("--hidden-projects") and args.get("--project") == null and args.get("--parent") == null,
         }) catch |e| boardFail(db, e, "ticket");
@@ -782,8 +829,24 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         var aw: std.Io.Writer.Allocating = .init(a);
         // alert, from, ticket, raised (unix s), text
         for (als) |al| try aw.writer.print("alert\t{s}\t{s}\t{d}\t{s}\n", .{ al.from, if (al.ticket.len > 0) al.ticket else "-", al.at, al.text });
-        // key, stage, project, flags, parent, title
-        for (ts) |t| try aw.writer.print("{s}\t{s}\t{s}\t{s}\t{s}\t{s}{s}{s}{s}\n", .{ t.key, @tagName(t.stage), t.project, try flagList(a, t.flags), if (t.parent.len > 0) t.parent else "-", t.title, if (t.todo) "\ttodo" else "", if (t.park != null) "\tparked: " else "", if (t.park) |p| p.reason else "" });
+        // key, stage, project, flags, parent, title, then todo, its due
+        // date and its park. In needs, the Today group goes last.
+        for ([_]bool{ false, true }) |today| {
+            var heading = false;
+            for (ts) |t| {
+                if (needs and board.todayOnly(t) != today) continue;
+                if (!needs and today) break;
+                if (today and !heading) {
+                    try aw.writer.writeAll("today:\n");
+                    heading = true;
+                }
+                const due = if (t.todo and t.due_at != 0 and t.stage != .done) try std.fmt.allocPrint(a, "\t{s}", .{try dueLine(ctx, db, a, t)}) else "";
+                const remind = if (today) for (t.flags) |f| {
+                    if (std.mem.eql(u8, f.kind, board.flag_reminder)) break try std.fmt.allocPrint(a, "\t{s}", .{f.detail});
+                } else "" else "";
+                try aw.writer.print("{s}\t{s}\t{s}\t{s}\t{s}\t{s}{s}{s}{s}{s}{s}\n", .{ t.key, @tagName(t.stage), t.project, try flagList(a, t.flags), if (t.parent.len > 0) t.parent else "-", t.title, if (t.todo) "\ttodo" else "", due, remind, if (t.park != null) "\tparked: " else "", if (t.park) |p| p.reason else "" });
+            }
+        }
         return out(aw.writer.buffered());
     }
     if (std.mem.eql(u8, cmd, "watch")) {
@@ -818,11 +881,12 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         const evs = board.events(db, a, t.id) catch |e| boardFail(db, e, "ticket");
         const subs = board.listTickets(db, a, .{ .parent = t.key }) catch |e| boardFail(db, e, "ticket");
         const blocks = board.dependents(db, a, t.id) catch |e| boardFail(db, e, "ticket");
-        if (args.has("--json")) return out(try std.fmt.allocPrint(a, "{f}\n", .{std.json.fmt(.{ .ticket = t, .blocks = blocks, .subtickets = subs, .comments = cs, .events = evs }, .{})}));
-        return out(try showText(ctx, a, t, blocks, subs, cs, evs));
+        const dates = try todoDates(ctx, db, a, t);
+        if (args.has("--json")) return out(try std.fmt.allocPrint(a, "{f}\n", .{std.json.fmt(.{ .ticket = t, .dates = dates, .blocks = blocks, .subtickets = subs, .comments = cs, .events = evs }, .{})}));
+        return out(try showText(ctx, a, t, dates, blocks, subs, cs, evs));
     }
     if (std.mem.eql(u8, cmd, "edit")) {
-        args.only(&.{ "--title", "--body", "--project", "--worktree", "--queue", "--target", "--plan", "--no-plan", "--skill", "--profile", "--after", "--not-after", "--parallel", "--in-order", "--umbrella", "--no-umbrella", "--onto", "--todo", "--no-todo", "--link" }, ticket_usage);
+        args.only(&.{ "--title", "--body", "--project", "--worktree", "--queue", "--target", "--plan", "--no-plan", "--skill", "--profile", "--after", "--not-after", "--parallel", "--in-order", "--umbrella", "--no-umbrella", "--onto", "--todo", "--no-todo", "--link", "--due", "--remind" }, ticket_usage);
         if (args.has("--todo") and args.has("--no-todo")) fail("--todo or --no-todo, not both", .{});
         const key = keyArg(pos, 0, env_key, "cl ticket edit <key> [options]");
         try checkProfile(cfg, args.get("--profile"));
@@ -836,6 +900,12 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
             const cur = board.getTicket(db, a, key) catch |e| boardFail(db, e, "ticket");
             checkProjectOnto(ctx, a, board.getProject(db, a, args.get("--project") orelse cur.project) catch |e| boardFail(db, e, "project"), args.get("--onto"));
         }
+        const due = parseWhen(ctx, cfg, db, "--due", args.get("--due"));
+        const remind = parseWhen(ctx, cfg, db, "--remind", args.get("--remind"));
+        if ((due orelse when.When{}).at != 0 or (remind orelse when.When{}).at != 0) {
+            const cur = board.getTicket(db, a, key) catch |e| boardFail(db, e, "ticket");
+            if (args.has("--no-todo") or (!cur.todo and !args.has("--todo"))) fail("--due and --remind are for todos: {s} isn't one (--todo makes it one)", .{cur.key});
+        }
         board.updateTicket(ctx, db, a, key, .{
             .project = args.get("--project") orelse "",
             .title = args.get("--title"),
@@ -848,6 +918,8 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
             .onto = args.get("--onto"),
             .todo = if (args.has("--todo")) true else if (args.has("--no-todo")) false else null,
             .link = args.get("--link"),
+            .due = due,
+            .remind = if (remind) |w| w.at else null,
         }) catch |e| boardFail(db, e, "ticket or project");
         try applyDeps(ctx, db, a, key, args);
         if (parseMode(args)) |m| return relocate(ctx, cfg, db, a, key, m);
@@ -1132,6 +1204,19 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         };
         const t = board.getTicket(db, a, pos[0]) catch |e| boardFail(db, e, "ticket");
         return out(try std.fmt.allocPrint(a, "{s}: asked Claude to rebase onto {s} and settle the conflicts{s}\n", .{ t.key, if (t.drift) |d| d.onto else "its target", if (was == .review or was == .testing) "; it went back to running" else "" }));
+    }
+    if (std.mem.eql(u8, cmd, "snooze")) {
+        args.only(&.{}, ticket_usage);
+        if (pos.len < 2) fail("usage: cl ticket snooze <key> <when>  ({s})", .{when.forms});
+        const t = board.getTicket(db, a, pos[0]) catch |e| boardFail(db, e, "ticket");
+        if (!t.todo) fail("{s} isn't a todo: only todos have reminders", .{t.key});
+        if (t.stage == .done) fail("{s} is done", .{t.key});
+        const text = try std.mem.join(a, " ", pos[1..]);
+        const w = parseWhen(ctx, cfg, db, "snooze", text).?;
+        if (w.at == 0) fail("snooze until when? ({s})", .{when.forms});
+        const said = try when.label(db, a, ctx.nowSeconds(), .{ .at = w.at, .has_time = true });
+        board.snooze(ctx, db, a, t.key, w.at, try when.format(db, a, ctx.nowSeconds(), .{ .at = w.at, .has_time = true })) catch |e| boardFail(db, e, "ticket");
+        return out(try std.fmt.allocPrint(a, "{s} snoozed: a reminder {s}, and out of Needs You until then\n", .{ t.key, said }));
     }
     if (std.mem.eql(u8, cmd, "unpark")) {
         args.only(&.{"--no-resume"}, ticket_usage);
@@ -1649,7 +1734,34 @@ test planNote {
     try std.testing.expectEqualStrings("", try planNote(a, t));
 }
 
-fn showText(ctx: Ctx, a: std.mem.Allocator, t: board.Ticket, blocks: []const []const u8, subs: []const board.Ticket, cs: []const board.Comment, evs: []const board.Event) ![]const u8 {
+/// A todo's dates as `show` gives them: local ISO (2026-11-10T15:00, or
+/// just the date when no time was given) and said from now.
+const TodoDates = struct {
+    due: ?[]const u8 = null,
+    due_time: bool = false,
+    due_text: ?[]const u8 = null,
+    remind: ?[]const u8 = null,
+    remind_text: ?[]const u8 = null,
+};
+
+fn todoDates(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket) !TodoDates {
+    const now = ctx.nowSeconds();
+    var d: TodoDates = .{};
+    if (t.due_at != 0) {
+        const w: when.When = .{ .at = t.due_at, .has_time = t.due_time };
+        d.due = try when.iso(db, a, w);
+        d.due_time = t.due_time;
+        d.due_text = if (t.stage == .done) try std.fmt.allocPrint(a, "due {s}", .{try when.format(db, a, now, w)}) else try dueLine(ctx, db, a, t);
+    }
+    if (t.remind_at != 0) {
+        const w: when.When = .{ .at = t.remind_at, .has_time = true };
+        d.remind = try when.iso(db, a, w);
+        d.remind_text = try when.label(db, a, now, w);
+    }
+    return d;
+}
+
+fn showText(ctx: Ctx, a: std.mem.Allocator, t: board.Ticket, dates: TodoDates, blocks: []const []const u8, subs: []const board.Ticket, cs: []const board.Comment, evs: []const board.Event) ![]const u8 {
     var aw: std.Io.Writer.Allocating = .init(a);
     const w = &aw.writer;
     try w.print("{s}  {s}\n", .{ t.key, t.title });
@@ -1662,6 +1774,8 @@ fn showText(ctx: Ctx, a: std.mem.Allocator, t: board.Ticket, blocks: []const []c
     if (t.umbrella) try w.writeAll("umbrella: only a container for its sub-tickets; it never runs\n");
     if (t.todo) try w.print("todo: yours ({s}){s}\n", .{ todoStageName(t.stage), if (t.stage == .done) "" else "; nothing runs it, and it closes when you move it to done" });
     if (t.link.len > 0) try w.print("link: {s}\n", .{t.link});
+    if (dates.due_text) |d| try w.print("due: {s}\n", .{if (std.mem.startsWith(u8, d, "due ")) d[4..] else d});
+    if (dates.remind_text) |r| try w.print("reminder: {s}\n", .{r});
     if (std.mem.trim(u8, t.plan_md, " \t\r\n").len > 0) try w.print("plan: {s}; `cl ticket show {s} --plan` prints it\n", .{ if (t.stage == .planning) "handed in" else "kept from its planning", t.key });
     if (t.children > 0) try w.print("sub-tickets: {d}/{d} done\n", .{ t.children_done, t.children });
     try writeDeps(w, a, t, blocks);

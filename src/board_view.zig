@@ -220,6 +220,7 @@ fn flagColor(kind: []const u8) vaxis.Color {
     if (eql(u8, kind, board.flag_question) or eql(u8, kind, board.flag_input)) return .{ .index = 1 };
     if (eql(u8, kind, board.flag_review) or eql(u8, kind, board.flag_unparked) or eql(u8, kind, board.flag_ready_to_close)) return .{ .index = 2 };
     if (eql(u8, kind, board.flag_testing)) return .{ .index = 6 };
+    if (board.todayFlag(kind)) return .{ .index = 37 }; // teal: a todo's, as its card
     if (eql(u8, kind, board.flag_conflict) or eql(u8, kind, board.flag_after_merge) or eql(u8, kind, board.flag_park_expired) or
         eql(u8, kind, board.flag_push_failed) or eql(u8, kind, board.flag_ci_failed) or
         eql(u8, kind, board.flag_pr_closed) or eql(u8, kind, board.flag_merge_failed) or eql(u8, kind, board.flag_unmerged)) return .{ .index = 5 };
@@ -370,6 +371,8 @@ pub fn needsFlag(t: board.Ticket) ?board.Flag {
     for (t.flags) |f| {
         if (f.hidden) continue;
         if (t.stage == .done and !board.asksWhenDone(f.kind)) continue;
+        // Parked, only a todo's reminder or due date still asks.
+        if (t.park != null and !board.todayFlag(f.kind)) continue;
         return f;
     }
     return null;
@@ -457,6 +460,7 @@ fn askHint(t: board.Ticket, f: board.Flag) []const u8 {
     const eql = std.mem.eql;
     if (eql(u8, f.kind, board.flag_question) or eql(u8, f.kind, board.flag_input)) return "A answer";
     if (eql(u8, f.kind, board.flag_review) or (eql(u8, f.kind, board.flag_testing) and t.stage == .testing)) return "a approve";
+    if (board.todayFlag(f.kind)) return "m d done";
     return "enter open";
 }
 
@@ -746,6 +750,12 @@ pub const View = struct {
         // Exactly what `cl ticket needs` lists (with --hidden-projects when
         // they are switched on).
         self.needs = try board.listTickets(env.db, env.a, .{ .needs = true, .busy = busy.items, .shown = !self.opts.hidden_projects });
+        // Todos' reminders and due dates last, as the web board's Today group.
+        std.sort.insertion(board.Ticket, self.needs, {}, struct {
+            fn lt(_: void, x: board.Ticket, y: board.Ticket) bool {
+                return !board.todayOnly(x) and board.todayOnly(y);
+            }
+        }.lt);
         self.restoreNeeds();
         self.tickets = try board.listTickets(env.db, env.a, .{});
         var o = self.opts;
@@ -1542,6 +1552,16 @@ test "Needs you lists what cl ticket needs does, and actions go to its row" {
     v.opts.hidden_projects = true;
     try v.load(env);
     try testing.expectEqual(@as(usize, 3), v.needs.len);
+
+    // A todo's reminder or due date goes last, even when it asked first.
+    v.opts.hidden_projects = false;
+    const todo = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Mine", .todo = true });
+    try board.setFlag(ctx, db, a, todo, board.flag_due, "auto", "due today");
+    try db.exec("UPDATE flags SET at = 1 WHERE kind = 'due'", .{});
+    try v.load(env);
+    try testing.expectEqual(@as(usize, 3), v.needs.len);
+    try testing.expectEqualStrings(todo, v.needs[2].key);
+    try testing.expectEqualStrings("m d done", askHint(v.needs[2], needsFlag(v.needs[2]).?));
 }
 
 test askLine {

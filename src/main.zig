@@ -45,6 +45,7 @@ const usage =
     \\  cl board                  the ticket board in the terminal (b in the chooser)
     \\  cl ticket | t <command>   the ticket board (cl ticket for the commands)
     \\  cl todo <title> [-p <project>] [-m <body>] [--link <url>] [--parent <key>]
+    \\        [--due <when>] [--remind <when>]
     \\                            a todo of yours on the board (board.todo_project, else -p);
     \\                            prints its key. Short for cl ticket new <project> <title> --todo
     \\  cl project <command>      projects tickets belong to (cl project for the commands)
@@ -449,6 +450,8 @@ test {
     std.testing.refAllDecls(@import("ci.zig"));
     std.testing.refAllDecls(@import("web_service.zig"));
     std.testing.refAllDecls(@import("park.zig"));
+    std.testing.refAllDecls(@import("when.zig"));
+    std.testing.refAllDecls(@import("reminders.zig"));
     std.testing.refAllDecls(@import("ticket_watch.zig"));
     std.testing.refAllDecls(@import("board_view.zig"));
     std.testing.refAllDecls(@import("images.zig"));

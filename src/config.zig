@@ -17,6 +17,7 @@
 //!   board.trust_projects = true          (yes to Claude's folder-trust dialog in project folders and
 //!                                          ticket worktrees; board.trust_worktrees is the old name)
 //!   board.todo_project = me              (the project `cl todo` puts todos in)
+//!   board.morning = 08:00                (when a todo due or reminded on a date, with no time, comes up)
 //!
 //!   gutter.path = ~/bin/gutter           (gutter for reviews; "" looks it up on PATH)
 //!   review.model = sonnet                (the automated reviewer's model; default: the profile's)
@@ -44,6 +45,7 @@
 //! see `overridePort`.
 const std = @import("std");
 const Ctx = @import("ctx.zig");
+const when = @import("when.zig");
 
 pub const Profile = struct {
     name: []const u8,
@@ -118,6 +120,9 @@ pub const Board = struct {
     /// The project `cl todo` puts todos in when it isn't given one; "" for
     /// none (then the only project that isn't a code repo, if there is one).
     todo_project: []const u8 = "",
+    /// When a todo's date with no time comes up (its reminder, or showing
+    /// as due), in minutes after local midnight: `board.morning = 08:00`.
+    morning: i64 = when.default_morning,
 };
 
 pub const Gutter = struct {
@@ -221,6 +226,8 @@ fn loadFile(ctx: Ctx) !Config {
             board.trust_projects = !(std.mem.eql(u8, val, "false") or std.mem.eql(u8, val, "no") or std.mem.eql(u8, val, "off"));
         } else if (std.mem.eql(u8, key, "board.todo_project")) {
             board.todo_project = val;
+        } else if (std.mem.eql(u8, key, "board.morning")) {
+            board.morning = when.parseMorning(val) orelse board.morning;
         } else if (std.mem.eql(u8, key, "board.dispatch")) {
             board.dispatch = !(std.mem.eql(u8, val, "false") or std.mem.eql(u8, val, "no") or std.mem.eql(u8, val, "off"));
         } else if (std.mem.eql(u8, key, "gutter.path")) {

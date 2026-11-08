@@ -80,6 +80,10 @@ pub const Group = enum {
     idle,
     /// `cl alert` from a session or the operator.
     alert,
+    /// A todo's reminder came up, or it became due.
+    /// Off until picked: Needs You's Today group is where they're meant to
+    /// be seen (not in the `kinds` default).
+    todo,
 
     pub fn ofFlag(kind: []const u8) Group {
         const eql = std.mem.eql;
@@ -87,6 +91,7 @@ pub const Group = enum {
         if (eql(u8, kind, board.flag_review) or eql(u8, kind, board.flag_testing) or eql(u8, kind, board.flag_ready_to_close)) return .review;
         if (eql(u8, kind, board.flag_unparked) or eql(u8, kind, board.flag_park_expired)) return .park;
         if (eql(u8, kind, board.flag_idle)) return .idle;
+        if (board.todayFlag(kind)) return .todo;
         return .problem;
     }
 };
@@ -233,6 +238,8 @@ fn flagLabel(f: ticket_watch.SeenFlag) []const u8 {
         .{ board.flag_ci_failed, "CI failed" },
         .{ board.flag_merge_failed, "didn't land" },
         .{ board.flag_unmerged, "not merged" },
+        .{ board.flag_reminder, "reminder" },
+        .{ board.flag_due, "due" },
         .{ "ended", "session ended" },
         .{ "start-failed", "didn't start" },
     };

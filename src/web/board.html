@@ -100,7 +100,7 @@
   #needs .strip { display: flex; gap: calc(12 * var(--u)); overflow-x: auto; padding: 0 calc(14 * var(--u)) calc(14 * var(--u)); scroll-snap-type: x mandatory; }
   #needs.closed .strip, #needs.closed .bulk { display: none; }
   #needs .bulk { display: flex; flex-wrap: wrap; gap: calc(8 * var(--u)); padding: 0 calc(14 * var(--u)) calc(10 * var(--u)); }
-  #needs .bulk:empty { display: none; }
+  #needs .bulk:empty, #needs .strip:empty { display: none; }
   .ask { flex: none; width: calc(300 * var(--u)); max-width: 85vw; scroll-snap-align: start; background: #1a1b1e; border: 1px solid var(--line);
          border-radius: calc(12 * var(--u)); padding: calc(12 * var(--u)); display: flex; flex-direction: column; gap: calc(8 * var(--u)); }
   .ask .what { font-size: calc(12.5 * var(--u)); color: var(--dim); line-height: 1.45; overflow-wrap: anywhere;
@@ -110,6 +110,18 @@
   .ask .acts { display: flex; flex-wrap: wrap; gap: calc(6 * var(--u)); margin-top: auto; }
   .ask[data-ask] { cursor: pointer; } .ask[data-ask] .acts { cursor: default; }
   .ask[data-ask]:hover { border-color: #3a3c42; }
+  /* Today: your todos' reminders and due dates, one line each under Claude's asks. */
+  #needs .today { border-top: 1px solid #3a2f1a; padding: 0 calc(14 * var(--u)) calc(8 * var(--u)); }
+  #needs.closed .today, #needs .today[hidden] { display: none; }
+  #todayToggle { display: flex; align-items: center; gap: calc(8 * var(--u)); width: 100%; min-height: calc(38 * var(--u)); padding: 0; border: 0;
+                 background: transparent; cursor: pointer; text-align: left; font-weight: 600; font-size: calc(13.5 * var(--u)); color: #e8dcc0; }
+  #todayToggle .count { font-family: var(--mono); color: var(--todo); }
+  .trow { display: flex; flex-wrap: wrap; align-items: center; gap: calc(6 * var(--u)) calc(10 * var(--u)); padding: calc(7 * var(--u)) 0; border-top: 1px solid #2a2418; cursor: pointer; }
+  .trow .ttl { flex: 1 1 calc(180 * var(--u)); min-width: 0; overflow-wrap: anywhere; font-weight: 500; }
+  .trow .meta { font: calc(11.5 * var(--u)) var(--mono); color: var(--muted); }
+  .trow .acts { display: flex; flex-wrap: wrap; gap: calc(6 * var(--u)); cursor: default; }
+  .trow .btn { min-height: calc(30 * var(--u)); padding: 0 calc(10 * var(--u)); }
+  .trow.hidden { opacity: .6; }
 
   nav#filters { display: flex; flex-wrap: wrap; align-items: center; gap: calc(8 * var(--u)); padding: calc(12 * var(--u)) calc(16 * var(--u)); }
   nav#filters select { min-height: calc(34 * var(--u)); }
@@ -213,6 +225,9 @@
   .f-conflict { background: var(--conflict-bg); color: var(--conflict); }
   .f-drift { background: var(--drift-bg); color: var(--drift); }
   .f-alert { background: #e3b341; color: #17150f; font-weight: 600; }
+  /* A todo's due date and reminder (Needs you's Today group, its card). */
+  .f-due { background: #3b1f12; color: #fdba74; } .f-due.over { background: var(--conflict-bg); color: var(--conflict); }
+  .f-reminder { background: #0f2f2b; color: var(--todo); }
   .f-finishing { background: var(--finishing-bg); color: var(--finishing); }
   /* Parked: waiting on something outside cl. The reason is cut to the card's width. */
   .f-parked { background: var(--parked-bg); color: var(--parked); max-width: 100%; }
@@ -532,6 +547,7 @@
     <button type="button" id="needsHiddenBtn" aria-pressed="false" hidden></button></div>
   <div class="bulk" id="needsBulk"></div>
   <div class="strip" id="needsStrip"></div>
+  <div class="today" id="needsToday" hidden></div>
 </section>
 
 <nav id="filters" aria-label="Filters">
@@ -570,6 +586,14 @@
       <label>Check every<input type="text" name="every" value="1h" size="6"></label>
       <label>Give up after<input type="text" name="max" value="7d" size="6"></label></div>
     <div class="actions"><button type="submit" class="btn primary">Park it</button></div></form></div></dialog>
+<dialog id="snoozeDlg" aria-label="Snooze the todo" style="width:min(calc(460 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg">
+  <div class="head"><h1 style="flex:1" id="snoozeTitle">Snooze</h1><button type="button" class="btn" id="closeSnooze">Cancel</button></div>
+  <p class="muted" style="margin:0">It leaves Needs you, and a reminder brings it back then. A due date stays as it is.</p>
+  <div style="display:flex;flex-wrap:wrap;gap:calc(8 * var(--u))"><button type="button" class="btn" data-snooze-when="+1h">In an hour</button>
+    <button type="button" class="btn" data-snooze-when="tomorrow">Tomorrow morning</button><button type="button" class="btn" data-snooze-when="mon">Monday</button>
+    <button type="button" class="btn" data-snooze-when="+1w">In a week</button></div>
+  <form class="form" id="snoozeForm"><div class="row2"><label>Day<input type="date" name="day" required></label><label>Time (empty: the morning)<input type="time" name="time"></label></div>
+    <div class="actions"><button type="submit" class="btn primary">Snooze</button></div></form></div></dialog>
 <dialog id="projDlg" aria-label="Project" style="width:min(calc(620 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="projBody"></div></dialog>
 <dialog id="projRmDlg" aria-label="Delete the project" style="width:min(calc(520 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="projRmBody"></div></dialog>
 <dialog id="dismissDlg" aria-label="Dismiss alerts" style="width:min(calc(480 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg" id="dismissBody"></div></dialog>
@@ -607,13 +631,13 @@ const STAGES = ["backlog", "planning", "queued", "running", "review", "testing",
 // A todo is only ever in Backlog (to do), Running (doing) or Done (board.zig todoStage).
 const TODO_STAGES = ["backlog", "running", "done"];
 const STAGE_NAME = { backlog: "Backlog", planning: "Planning", queued: "Queued", running: "Running", review: "Review", testing: "Testing", done: "Done" };
-const FLAG_NAME = { input: "Needs input", question: "Question", review: "Ready for review", testing: "Needs testing", ended: "Session ended", "start-failed": "Didn't start", conflict: "Conflicts", "after-merge": "After-merge failed", "push-failed": "Push failed", "ci-failed": "CI failed", "merge-failed": "Didn't land", unmerged: "Not merged", unparked: "Woke from park", "park-expired": "Park expired", "pr-closed": "PR closed", "follow-up-failed": "Follow-up failed", idle: "Idle", "ready-to-close": "Ready to close" };
+const FLAG_NAME = { input: "Needs input", question: "Question", review: "Ready for review", testing: "Needs testing", ended: "Session ended", "start-failed": "Didn't start", conflict: "Conflicts", "after-merge": "After-merge failed", "push-failed": "Push failed", "ci-failed": "CI failed", "merge-failed": "Didn't land", unmerged: "Not merged", unparked: "Woke from park", "park-expired": "Park expired", "pr-closed": "PR closed", "follow-up-failed": "Follow-up failed", idle: "Idle", "ready-to-close": "Ready to close", reminder: "Reminder", due: "Due" };
 const STATUS_NAME = { waits: "Waits", paused: "Paused", busy: "Working", waiting: "Waiting on you", blocked: "Waiting on you", idle: "Idle", shell: "Idle · background task", starting: "Starting", gone: "Session ended", nosession: "No session", killed: "Killed · restart it", parked: "Parked", unknown: "Unknown" };
 
 const store = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch { return null; } };
 const state = {
   data: null, view: store("cl-view") || "board", filter: "all", project: "", subs: store("cl-subs") === "1", done: store("cl-done") === "1", parked: store("cl-parked") !== "0", todos: store("cl-todos") !== "0",
-  search: "", needsOpen: store("cl-needs") !== "0", needsHidden: store("cl-needs-hidden") === "1", open: null, detail: null, tab: null, picks: {}, other: {}, checks: {},
+  search: "", needsOpen: store("cl-needs") !== "0", todayOpen: store("cl-today") !== "0", needsHidden: store("cl-needs-hidden") === "1", open: null, detail: null, tab: null, picks: {}, other: {}, checks: {},
   sending: false, editing: null, edit: {}, hiddenProjects: store("cl-hidden-projects") === "1",
 };
 
@@ -691,10 +715,17 @@ const flagDetail = (f) => { try { return JSON.parse(f.detail); } catch { return 
 // A Done ticket only for work that didn't land or a failed after-merge run (board.zig asksWhenDone).
 const DONE_ASKS = ["after-merge", "push-failed", "ci-failed", "unmerged", "merge-failed", "conflict"];
 const asksStill = (t, f) => t.stage !== "done" || DONE_ASKS.includes(f.kind);
-// Parked, it waits on something outside cl, not on you.
-const needsMe = (row) => !row.ticket.park && row.ticket.flags.some((f) => !f.hidden && asksStill(row.ticket, f)) && !row.working;
-// Hidden from Needs you: every flag it has is hidden (a new one brings it back).
-const hiddenNeeds = (row) => !row.ticket.park && row.ticket.flags.length > 0 && row.ticket.flags.every((f) => f.hidden) && row.ticket.flags.some((f) => asksStill(row.ticket, f)) && !row.working;
+// A todo's reminder or due date (board.zig todayFlag): they go in the Today group.
+const TODAY = ["reminder", "due"];
+// Parked, it waits on something outside cl, not on you; only a todo's reminder or due date still asks.
+const asksNow = (t, f) => asksStill(t, f) && (!t.park || TODAY.includes(f.kind));
+const needsMe = (row) => row.ticket.flags.some((f) => !f.hidden && asksNow(row.ticket, f)) && !row.working;
+// Hidden from Needs you: every flag it has is hidden (a new one brings it back). A todo
+// with a reminder still to come is snoozed, not hidden: it comes back by itself then (board.zig listTickets).
+const hiddenNeeds = (row) => !(row.ticket.todo && row.ticket.remind_at) && row.ticket.flags.length > 0 && row.ticket.flags.every((f) => f.hidden) && row.ticket.flags.some((f) => asksNow(row.ticket, f)) && !row.working;
+// All it asks is a reminder or a due date: a line in Today, not a card.
+const todayRow = (row) => { const fs = row.ticket.flags.filter((f) => asksNow(row.ticket, f) && (!f.hidden || hiddenNeeds(row)));
+  return fs.length > 0 && fs.every((f) => TODAY.includes(f.kind)); };
 // Hidden projects (cl project hide): their tickets stay out of the views and
 // Needs you unless the Hidden projects switch is on. Picking one in the
 // project filter shows its tickets anyway.
@@ -738,7 +769,7 @@ function askLine(t, f, quick) {
 // blocked on a question or prompt, the ticket's next step (review, test, conflict), or Claude
 // idle at its prompt (the dispatcher would only raise that again). Acting on those clears
 // them; Hide is for "not now".
-const WAITING = ["question", "input", "review", "testing", "conflict", "idle"];
+const WAITING = ["question", "input", "review", "testing", "conflict", "idle", "due"];
 const dismissable = (f) => !WAITING.includes(f.kind);
 // A ci-failed flag's first failed run (its detail's second line).
 const ciRunUrl = (f) => (f.detail.split("\n")[1] || "").startsWith("https://") ? f.detail.split("\n")[1] : "";
@@ -1028,7 +1059,8 @@ function renderNeeds() {
   const counts = {}; for (const r of rows) for (const f of r.ticket.flags) counts[f.kind] = (counts[f.kind] || 0) + 1;
   document.getElementById("needsSum").textContent = [alerts.length ? `${alerts.length} alert${alerts.length === 1 ? "" : "s"}` : "",
     ...Object.entries(counts).map(([k, n]) => `${n} ${(FLAG_NAME[k] || k).toLowerCase()}`)].filter(Boolean).join(" · ");
-  setHtml(document.getElementById("needsStrip"), alerts.map(alertHtml).join("") + shown.map((r) => {
+  renderToday(shown.filter(todayRow));
+  setHtml(document.getElementById("needsStrip"), alerts.map(alertHtml).join("") + shown.filter((r) => !todayRow(r)).map((r) => {
     const t = r.ticket; const isHidden = hiddenNeeds(r); const f = isHidden ? t.flags[0] : t.flags.find((x) => !x.hidden && asksStill(t, x)); const d = flagDetail(f);
     let quick = "";
     if (f.kind === "question" && d?.questions?.length === 1 && !d.questions[0].multiSelect)
@@ -1060,6 +1092,29 @@ function renderNeeds() {
   for (const r of shown) for (const f of r.ticket.flags) if (dismissable(f) && asksStill(r.ticket, f)) (byKind[f.kind] ||= []).push(r.ticket.key);
   setHtml(document.getElementById("needsBulk"), Object.entries(byKind).filter(([, keys]) => keys.length > 1).map(([k, keys]) =>
     `<button type="button" class="btn" data-dismiss-all="${esc(k)}" data-keys="${esc(keys.join(" "))}" title="Remove the ${esc((FLAG_NAME[k] || k).toLowerCase())} alert from ${keys.length} tickets (you confirm first). The tickets don't change">Dismiss all ${keys.length} ${esc(FLAG_NAME[k] || k)}</button>`).join(""));
+}
+
+// Today: todos whose only ask is a reminder or a due date, one line each, overdue first.
+function renderToday(rows) {
+  const box = document.getElementById("needsToday");
+  box.hidden = !rows.length;
+  const dueAt = (t) => t.flags.some((f) => f.kind === "due") ? t.due_at : Infinity;
+  rows.sort((a, b) => dueAt(a.ticket) - dueAt(b.ticket) || Math.min(...a.ticket.flags.map((f) => f.at)) - Math.min(...b.ticket.flags.map((f) => f.at)));
+  setHtml(box, !rows.length ? "" : `<button type="button" id="todayToggle" aria-expanded="${state.todayOpen}" title="Your todos' reminders and due dates"><span>Today</span><span class="count">${rows.length}</span><span style="flex:1"></span><span class="sum">${state.todayOpen ? "Collapse" : "Expand"}</span></button>`
+    + (state.todayOpen ? rows.map(todayHtml).join("") : ""));
+}
+function todayHtml(r) {
+  const t = r.ticket; const isHidden = hiddenNeeds(r); const k = esc(t.key);
+  const pills = t.flags.filter((f) => TODAY.includes(f.kind) && asksNow(t, f)).map((f) => f.kind === "due"
+    ? `<span class="pill f-due${f.detail.startsWith("overdue") ? " over" : ""}">${esc(f.detail)}</span>`
+    : `<span class="pill f-reminder" title="${esc(f.detail)}">Reminder</span>`).join("");
+  const hide = isHidden ? `<button type="button" class="btn" data-unhide="${k}" title="Put it back in Needs you">Unhide</button>`
+    : `<button type="button" class="btn" data-hide="${k}" title="Not today: out of Needs you. A due date comes back the next morning, a reminder with the next one">Hide</button>`;
+  return `<div class="trow${isHidden ? " hidden" : ""}" tabindex="-1" data-ask="${k}"><span class="pills">${pills}</span><span class="ttl">${esc(t.title)}</span>
+    <span class="meta">${k} · ${esc(t.project)}${t.park ? " · waiting: " + esc(t.park.reason) : ""}</span>
+    <span class="acts"><button type="button" class="btn primary" data-to-done="${k}" title="It's finished: it goes to Done">Done</button>
+      <button type="button" class="btn" data-snooze="${k}" title="Out of Needs you until a reminder you pick">Snooze</button>
+      <button type="button" class="btn" data-open="${k}">Open</button>${hide}</span></div>`;
 }
 
 function renderFilters() {
@@ -1097,13 +1152,43 @@ function cardHtml(row, compact) {
     ${t.parent ? `<span class="sub">sub-ticket of ${esc(t.parent)}${t.parallel ? " · parallel" : ""}</span>` : ""}
     ${compact ? "" : `<span class="meta">${esc(t.project)} · ${t.todo ? "todo" : esc(where(t))}</span>`}
     ${t.children ? `<span class="meta" title="${t.children_done} of its ${t.children} sub-ticket${t.children > 1 ? "s are" : " is"} done">${t.children_done}/${t.children} sub-ticket${t.children > 1 ? "s" : ""} done</span>` : ""}
-    ${statusHtml(row)}${linkChip(t)}${pills(t)}${t.park ? `<span class="pills"><span class="unpark-ic" data-unpark="${esc(t.key)}" role="button" tabindex="0" title="${t.todo ? "End the wait: it's back to To do or Doing" : "End the park and resume its session now"}">${t.todo ? "Done waiting" : "Resume"}</span></span>` : ""}</button>`;
+    ${statusHtml(row)}${linkChip(t)}${dateChips(t)}${pills(t)}${t.park ? `<span class="pills"><span class="unpark-ic" data-unpark="${esc(t.key)}" role="button" tabindex="0" title="${t.todo ? "End the wait: it's back to To do or Doing" : "End the park and resume its session now"}">${t.todo ? "Done waiting" : "Resume"}</span></span>` : ""}</button>`;
 }
 // Where a ticket came from (a Slack message, an email, a PR): opens in a new tab. In a card (a button) it's a span.
 const LINK_SVG = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.5 9.5l3-3M7 4.5l1-1a2.5 2.5 0 013.5 3.5l-1 1M9 11.5l-1 1a2.5 2.5 0 01-3.5-3.5l1-1"/></svg>`;
 const linkHost = (u) => { try { return new URL(u).hostname.replace(/^www\./, ""); } catch { return "link"; } };
 const safeLink = (u) => /^(https?:\/\/|mailto:|slack:\/\/)/i.test(u || "");
 const linkChip = (t) => safeLink(t.link) ? `<span class="pills"><span class="pill link-pill" data-link="${esc(t.link)}" role="link" tabindex="0" title="${esc("Open where it came from: " + t.link)}">${LINK_SVG}${esc(linkHost(t.link))}</span></span>` : "";
+// A todo's dates (board.zig due_at, remind_at), said in this browser's time.
+const pad2 = (n) => String(n).padStart(2, "0");
+const dayDiff = (at) => { const d = new Date(at * 1000); const n = new Date();
+  return Math.round((new Date(d.getFullYear(), d.getMonth(), d.getDate()) - new Date(n.getFullYear(), n.getMonth(), n.getDate())) / 86400000); };
+const dayLabel = (at, time) => { const d = new Date(at * 1000); const k = dayDiff(at);
+  const day = k === 0 ? "today" : k === 1 ? "tomorrow" : d.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
+  return time ? `${day} ${pad2(d.getHours())}:${pad2(d.getMinutes())}` : day; };
+const isoDay = (at) => { const d = new Date(at * 1000); return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; };
+const isoTime = (at) => { const d = new Date(at * 1000); return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`; };
+// What the form's date and time fields send (when.zig reads it; "" clears).
+const whenOf = (day, time) => day ? (time ? `${day}T${time}` : day) : "";
+// A todo's Details save sends a date only when you changed it: read back to
+// the minute (and in this browser's zone) it could move, and a moved due
+// date raises its flag anew.
+function todoDatesEdited(t, f) {
+  if (!t?.todo) return {};
+  const out = {};
+  const due = whenOf(f.due_day, f.due_time); const remind = whenOf(f.remind_day, f.remind_time);
+  if (due !== (t.due_at ? whenOf(isoDay(t.due_at), t.due_time ? isoTime(t.due_at) : "") : "")) out.due = due;
+  if (remind !== (t.remind_at ? whenOf(isoDay(t.remind_at), isoTime(t.remind_at)) : "")) out.remind = remind;
+  return out;
+}
+function dateChips(t) {
+  if (!t.todo || t.stage === "done" || (!t.due_at && !t.remind_at)) return "";
+  const out = [];
+  if (t.due_at) { const k = dayDiff(t.due_at); const over = k < 0 || (k === 0 && t.due_time && t.due_at * 1000 < Date.now());
+    out.push(`<span class="pill f-due${over ? " over" : ""}" title="Due ${esc(dayLabel(t.due_at, t.due_time))}: in Needs you from that morning${t.due_time ? " (or its time)" : ""} until it's done">${k < 0 ? `overdue ${-k}d` : "due " + esc(dayLabel(t.due_at, t.due_time))}</span>`); }
+  if (t.remind_at) out.push(`<span class="pill f-reminder" title="A reminder puts it in Needs you then">remind ${esc(dayLabel(t.remind_at, true))}</span>`);
+  return `<span class="pills">${out.join("")}</span>`;
+}
 // Done is a column only when it's toggled on.
 const columns = () => state.done ? STAGES : STAGES.filter((s) => s !== "done");
 // A column top to bottom: by priority (drag to reorder), except Done, latest first.
@@ -1438,6 +1523,7 @@ function renderDetailInner() {
     acts.push(`<button type="button" class="btn" data-to-done="${esc(t.key)}" title="It's finished: it goes to Done. Its Claude tasks carry on">Done</button>`,
       `<button type="button" class="btn" data-new-task="${esc(t.key)}" title="A Claude ticket under this todo, told its title, description and link. It doesn't wait on the todo">New Claude task</button>`);
     if (!t.park) acts.push(`<button type="button" class="btn" data-act="park" title="Park it while you wait on someone or something (a reply, a PR); a check can wake it">Waiting on…</button>`);
+    acts.push(`<button type="button" class="btn" data-snooze="${esc(t.key)}" title="A reminder later, and out of Needs you until then">Snooze</button>`);
   }
   else if (!t.park && !liveSession && t.stage !== "done" && !t.umbrella && !t.todo) acts.push(`<button type="button" class="btn primary" data-act="start"${ranBefore ? ` title="A fresh session for it${t.session_id ? ", resuming its conversation where Claude still has it" : ""}"` : ""}>${ranBefore ? "Restart" : "Start now"}</button>`);
   if (d.gutter && liveSession && (d.guide || t.worktree)) acts.push(`<button type="button" class="btn" data-act="gutter">Open in gutter</button>`);
@@ -1474,7 +1560,7 @@ function renderDetailInner() {
         <select id="stageSel">${STAGES.filter((s) => !t.todo || TODO_STAGES.includes(s)).map((s) => `<option value="${s}" ${s === t.stage ? "selected" : ""}>${STAGE_NAME[s]}</option>`).join("")}</select></label>
       ${moreMenu}<button type="button" class="xclose" id="closeDlg" title="Close" aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button></span></div>
     <h1>${esc(t.title)}</h1>
-    <div class="facts"><span class="stat">${shell}${status}</span>${ws}${link}${t.onto ? `<span class="mono" title="It starts from this branch and merges into it, not trunk${t.onto_own ? "" : " (the project's target)"}">onto ${esc(t.onto)}</span>` : ""}${t.tmux ? `<span class="mono">${esc(t.tmux)}</span>` : ""}
+    <div class="facts"><span class="stat">${shell}${status}</span>${ws}${link}${dateChips(t)}${t.onto ? `<span class="mono" title="It starts from this branch and merges into it, not trunk${t.onto_own ? "" : " (the project's target)"}">onto ${esc(t.onto)}</span>` : ""}${t.tmux ? `<span class="mono">${esc(t.tmux)}</span>` : ""}
       ${t.round > 1 ? `<span>round ${t.round}</span>` : ""}${planFact(t)}${parent}</div>
     ${acts.length ? `<div class="actions">${acts.join("")}</div>` : ""}${parkBox(t)}${driftBox(t, liveSession)}${depBox(d)}
     <div class="tabs" role="tablist">${tabs.map(([k, l]) => `<button type="button" role="tab" class="${state.tab === k ? "on" : ""}" aria-selected="${state.tab === k}" data-tab="${k}">${esc(l)}</button>`).join("")}</div>
@@ -1495,7 +1581,7 @@ const flagTab = (f) => f.kind === "review" ? (f.detail === "plan" ? "plan" : "re
   : f.kind === "question" || f.kind === "input" ? "needs" : "";
 function renderFocus() {
   const d = state.detail; const t = d.ticket; const tabs = tabsFor(d);
-  const asking = t.flags.filter((f) => asksStill(t, f) && !t.park);
+  const asking = t.flags.filter((f) => asksNow(t, f));
   // The flag the notification was about (by its tab), else whatever else still asks.
   const f = asking.find((x) => flagTab(x) === state.tab) || asking[0] || null;
   if (f && !state.tab) state.tab = flagTab(f);
@@ -1874,6 +1960,8 @@ function detailsTab(d) {
     <label>Description<textarea name="body" rows="5" placeholder="Paste or drop screenshots here too">${esc(t.body)}</textarea></label>
     <div class="thumbs">${thumbsHtml(t.body)}</div>
     <label title="Where it came from (a Slack message, an email, a PR); a todo's Claude tasks are told it">Link<input type="url" name="link" value="${esc(t.link || "")}" placeholder="https://..." autocomplete="off"></label>
+    ${t.todo ? `<div class="row2"><label title="From that day's morning (or its time) it's in Needs you's Today group, and again each morning while it's overdue, until it's done">Due<input type="date" name="due_day" value="${t.due_at ? isoDay(t.due_at) : ""}"></label><label>Due at (optional)<input type="time" name="due_time" value="${t.due_at && t.due_time ? isoTime(t.due_at) : ""}"></label></div>
+    <div class="row2"><label title="Then it's in Needs you's Today group, once. Without a time: that morning">Remind me<input type="date" name="remind_day" value="${t.remind_at ? isoDay(t.remind_at) : ""}"></label><label>At (empty: the morning)<input type="time" name="remind_time" value="${t.remind_at ? isoTime(t.remind_at) : ""}"></label></div>` : ""}
     <div class="row2"><label>Project<select name="project">${state.data.projects.map((p) => `<option ${p.name === t.project ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select></label>
       <label ${t.todo ? "" : "hidden"} title="${esc(KIND_TITLE)}">Kind<select name="kind">${kindOptions(t)}</select></label>
       <label ${!t.todo && (t.repo || t.mode !== "queue") ? "" : "hidden"}>Runs as<select name="mode"><option value="queue" ${t.mode === "queue" ? "selected" : ""}>Queue in a session</option><option value="worktree" ${t.mode === "worktree" ? "selected" : ""}>Its own worktree</option></select></label>
@@ -1988,6 +2076,8 @@ function openNew(parentKey, pick = {}) {
       <label>What should happen<textarea name="body" rows="4" placeholder="Paste or drop screenshots here too"></textarea></label>
       <div class="thumbs"></div>
       <label data-todo-only hidden title="Where it came from (a Slack message, an email, a PR); its Claude tasks are told it">Link<input type="url" name="link" placeholder="https://..." autocomplete="off"></label>
+      <div class="row2" data-todo-only hidden><label title="From that day's morning (or its time) it's in Needs you's Today group, and again each morning while it's overdue, until it's done">Due<input type="date" name="due_day"></label><label>Due at (optional)<input type="time" name="due_time"></label></div>
+      <div class="row2" data-todo-only hidden><label title="Then it's in Needs you's Today group, once. Without a time: that morning">Remind me<input type="date" name="remind_day"></label><label>At (empty: the morning)<input type="time" name="remind_time"></label></div>
       <div class="row2" data-claude-only><label>When<select name="when"><option value="queued">Start when there's room</option><option value="backlog">Backlog for now</option><option value="planning">Plan first</option></select></label>
         <label data-repo-only>Runs as<select name="mode"><option value="queue" ${p?.mode !== "worktree" ? "selected" : ""}>Queue in a session</option><option value="worktree" ${p?.mode === "worktree" ? "selected" : ""}>Its own worktree</option></select></label></div>
       <div class="row2" data-claude-only><label>Queue session<select name="target"><option value="">Project default / parent's</option>${d.sessions.map((s) => `<option value="${esc(s.tmux)}">${esc(s.name)} (${esc(s.status)})</option>`).join("")}</select></label>
@@ -2043,7 +2133,8 @@ async function submitNew(form) {
     if (f.pname) { await api("project", { name: f.pname, dir: f.pdir, mode: f.mode }); f.project = f.pname; }
     const todo = f.kind === "todo";
     const r = await api("ticket", todo
-      ? { project: f.project, title: f.title, body: f.body, parent: f.parent || undefined, todo: true, link: f.link?.trim() || undefined, stage: "backlog" }
+      ? { project: f.project, title: f.title, body: f.body, parent: f.parent || undefined, todo: true, link: f.link?.trim() || undefined, stage: "backlog",
+        due: whenOf(f.due_day, f.due_time) || undefined, remind: whenOf(f.remind_day, f.remind_time) || undefined }
       : { project: f.project, title: f.title, body: f.body, mode: f.mode, target: f.target || undefined,
         stage: f.when, plan: f.when === "planning", skill: f.skill || undefined, profile: f.profile || undefined, parent: f.parent || undefined, umbrella: f.kind === "umbrella", onto: f.onto?.trim() || undefined });
     store("cl-new", JSON.stringify({ project: f.project, ...Object.fromEntries(NEW_KEEP.map((k) => [k, f[k] ?? ""])) }));
@@ -2250,6 +2341,17 @@ function parkPrChanged(form) {
   // A PR waits longer by default (reviews take time); a value you typed stays.
   if (f.max.value === "7d" || f.max.value === "14d") f.max.value = pr ? "14d" : "7d";
 }
+// Snooze a todo: a reminder then (when.zig reads `when`), out of Needs you until it comes.
+function openSnooze(key) {
+  const dlg = document.getElementById("snoozeDlg"); dlg.dataset.key = key;
+  document.getElementById("snoozeTitle").textContent = `Snooze ${key}`;
+  document.getElementById("snoozeForm").reset(); dlg.showModal();
+}
+async function snoozeTo(key, when) {
+  if (!key || !when) return;
+  try { const r = await act(key, "snooze", { when }); toast(`${key} snoozed: a reminder ${r.until}`); } catch { return; }
+  document.getElementById("snoozeDlg").close();
+}
 async function submitPark(form) {
   const f = form.elements; const key = form.dataset.key;
   const pr = f.pr.value.trim(); const until = pr ? "" : f.until.value.trim();
@@ -2415,6 +2517,10 @@ async function onClick(e) {
   if (el.id === "reloadBtn") return location.reload();
   if (el.id === "closeQuick") return document.getElementById("quickDlg").close();
   if (el.id === "closePark") return document.getElementById("parkDlg").close();
+  if (el.id === "closeSnooze") return document.getElementById("snoozeDlg").close();
+  if (el.id === "todayToggle") { state.todayOpen = !state.todayOpen; store("cl-today", state.todayOpen ? "1" : "0"); renderNeeds(); return; }
+  if (ds.snooze) { e.stopPropagation(); return openSnooze(ds.snooze); }
+  if (ds.snoozeWhen) return snoozeTo(document.getElementById("snoozeDlg").dataset.key, ds.snoozeWhen);
   if (el.id === "closeDlg" || el.id === "focusBoard") { document.getElementById("ticketDlg").close(); return; }
   if (el.id === "focusFull") { setFocus(false); renderDetail(); return; }
   if (ds.finish === "tell") return finishTell();
@@ -2836,6 +2942,7 @@ async function onSubmit(e) {
   if (e.target.id === "quickForm") return submitQuick(e.target);
   if (e.target.id === "projForm") return submitProject(e.target);
   if (e.target.id === "parkForm") return submitPark(e.target);
+  if (e.target.id === "snoozeForm") return snoozeTo(document.getElementById("snoozeDlg").dataset.key, whenOf(e.target.elements.day.value, e.target.elements.time.value));
   if (e.target.id === "blockForm") {
     const input = e.target.elements.blocker; const k = input.value.trim().toUpperCase(); if (!k) return;
     input.value = "";
@@ -2848,7 +2955,8 @@ async function onSubmit(e) {
     // A todo's form shows Kind up top (its other fields are hidden); a ticket's, next to Plan first.
     const kind = state.detail?.ticket.todo ? f.kind : f.kind2;
     let r; try { r = await act(state.open, "edit", kind === "todo"
-      ? { title: f.title, body: f.body, project: f.project, link: f.link.trim(), todo: true, umbrella: false, plan: false }
+      ? { title: f.title, body: f.body, project: f.project, link: f.link.trim(), todo: true, umbrella: false, plan: false,
+        ...todoDatesEdited(state.detail?.ticket, f) }
       : { title: f.title, body: f.body, project: f.project, link: f.link.trim(), mode: f.mode, target: f.target, plan: f.plan === "1", umbrella: kind === "umbrella", todo: false, skill: f.skill, onto: f.onto.trim() }); } catch { return; }
     toast(r?.result && was && was !== f.mode ? "Saved. " + relocatedMsg(r.result, f.mode) : "Saved");
     if (e.submitter?.value === "close") document.getElementById("ticketDlg").close();
@@ -2875,7 +2983,7 @@ document.getElementById("ticketDlg").addEventListener("keydown", (e) => {
 // what notifies and the quiet hours are the same for every device.
 const PUSH_KINDS = [["ask", "Questions and permission prompts"], ["review", "Plans, reviews and tests ready for you"],
   ["problem", "Work that didn't land, conflicts, failed after-merge runs"], ["park", "Parked tickets waking up (or giving up)"],
-  ["idle", "Claude idle, waiting on you"], ["alert", "Alerts (cl alert, the operator)"]];
+  ["idle", "Claude idle, waiting on you"], ["alert", "Alerts (cl alert, the operator)"], ["todo", "Your todos' reminders and due dates"]];
 const push = { reg: null, id: null, info: null };
 const pushable = () => isSecureContext && "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
 const standalone = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
@@ -3101,7 +3209,7 @@ document.addEventListener("pointerdown", () => { if (hint.on) hintStop(); }, tru
 // -- h/j/k/l: a cursor over the cards --
 // The cursor is the focused card (or list row, or Needs you item), so Enter
 // opens it. A redraw puts it back on the same ticket, wherever that went.
-const NAV_SEL = "#needsStrip [data-ask], #main [data-open], #main tr.row";
+const NAV_SEL = "#needsStrip [data-ask], #needsToday [data-ask], #main [data-open], #main tr.row";
 const navId = (el) => el.dataset.ask ? ["ask", el.dataset.ask] : el.dataset.open ? ["open", el.dataset.open] : ["projEdit", el.dataset.projEdit];
 function navFind([k, v]) {
   return [...document.querySelectorAll(NAV_SEL)].find((el) => el.dataset[k] === v) || null;
@@ -3231,6 +3339,7 @@ function palActions(key) {
   if (live) a(t.todo ? "Open terminal" : "Open shell", () => { location.href = shellHref(t); }, "the session's terminal");
   // A todo's talk session doesn't care about its park: offered either way, as in the popup.
   if (!live && t.stage !== "done" && t.todo) a("Talk to Claude", () => act(key, "start", {}, "Talking to Claude").catch(() => {}), "a session of its own about it");
+  if (t.stage !== "done" && t.todo) a("Snooze", () => openSnooze(key), "a reminder later, out of Needs you until then");
   if (t.park) a(t.todo ? "Done waiting" : "Resume now", async () => { try { const r = await act(key, "unpark", {}); toast(unparkMsg(key, r.resumed)); } catch {} }, "end the park");
   else if (!live && t.stage !== "done" && !t.umbrella && !t.todo) a(t.killed || t.tmux || t.session_id ? "Restart" : "Start now", () => act(key, "start", {}, t.killed || t.session_id ? "Restarted" : "Started").catch(() => {}));
   if (approveLabel(t))
