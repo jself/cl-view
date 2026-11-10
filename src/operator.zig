@@ -75,6 +75,10 @@ const instructions =
     \\    keeps ending or failing to start: one alert.
     \\When unsure, stay quiet.
     \\
+    \\`reminder` and `due` flags are the human's own todos coming up (a reminder they set, a
+    \\due date); the board's Today group shows them. Leave those lines alone, even in a
+    \\project you keep moving, unless the human told you what to do with them (your notes say).
+    \\
     \\Keeping a project moving: when the human asks for it, write in your notes the project
     \\and what they let you do there: answer Claude's questions (which kinds), allow
     \\permission prompts, approve plans, reviews and tests, finish tickets (--merge, --pr or
@@ -143,6 +147,9 @@ const instructions =
     \\or two short sentences, plain words, no markdown, lists, paths or IDs beyond ticket keys,
     \\the answer first ("Two tickets need you: CL-39 has a question, CL-41 is ready to test.").
     \\If you need something from them, ask it there. Your written reply can carry the details.
+    \\When you made a ticket or todo, say its key, and a todo's date: "Added ME-4, reply to
+    \\Josh, reminder Monday morning." Spoken words that are the human's own to do ("remind me
+    \\to...", "I need to...") are a todo (the cl-tickets skill, Todos).
 ;
 
 /// The operator's ticket skill, written to <dir>/.claude/skills/cl-tickets
@@ -150,7 +157,7 @@ const instructions =
 const tickets_skill =
     \\---
     \\name: cl-tickets
-    \\description: Create, find, read and change tickets on the cl board. Use whenever the human asks for a ticket, a task to be queued or done by a session, what is waiting on them, or about a ticket by key (like QA-3).
+    \\description: Create, find, read and change tickets and todos on the cl board. Use whenever the human asks for a ticket, a task to be queued or done by a session, something they need to do or be reminded of (a todo), what is waiting on them, or about a ticket by key (like QA-3).
     \\---
     \\
     \\# Tickets on the cl board
@@ -160,6 +167,9 @@ const tickets_skill =
     \\Run `cl ticket` (or `cl t`) with no arguments for the full command list.
     \\
     \\## Creating a ticket
+    \\
+    \\First decide whether it is a ticket at all: something the human has to do themselves is
+    \\a todo (see Todos below), not a ticket.
     \\
     \\1. Find the project: `cl project list --json`. Match what the human said to a project
     \\   name or directory. If none fits, ask which one, or offer
@@ -195,6 +205,74 @@ const tickets_skill =
     \\moves to running when a sub-ticket starts and to done when they all are; in backlog it
     \\stays put. No need to write "close this when its sub-tickets are done" in its body. Any
     \\other parent has work of its own and runs first: its sub-tickets wait until it is done.
+    \\
+    \\## Todos
+    \\
+    \\A todo is the human's own work on the board: replying to someone, deciding, following
+    \\up, preparing a 1:1, sending something, waiting on someone. The dispatcher never starts
+    \\it and it never closes by itself. Tell a todo from a ticket by who does the work:
+    \\- The human: a todo. "Remind me to...", "I need to...", "I have to...", "todo: ...",
+    \\  "don't let me forget...", "follow up with Sam", "reply to Josh".
+    \\- Claude: a ticket. "Fix...", "build...", "look into...", "have a session...". When it
+    \\  serves one of their todos ("draft my reply to Josh" while "Reply to Josh" is open),
+    \\  make it a sub-ticket of that todo: `cl ticket new --parent <todo> "<task>" -m "<body>"`
+    \\  (`cl ticket list --todo` finds it). It is told the todo's title, body and link,
+    \\  doesn't wait on the todo, and sits in backlog until the human starts or queues it.
+    \\- Both ("I need to answer Josh; have Claude draft it"): the todo, then the ticket under it.
+    \\- Can't tell: ask, in one short question.
+    \\
+    \\  cl todo "<title>" [-p <project>] [-m "<details>"] [--link <url>] [--due <when>] [--remind <when>]
+    \\
+    \\It prints the key. Leave -p out unless the human names a project or it is plainly part
+    \\of one's work: cl then uses board.todo_project or the only project that isn't a code
+    \\repo, and says so when it can't pick (ask which, or offer `cl project add me ~/todo
+    \\--no-repo`). The title is short and in their words ("Reply to Josh about the offsite").
+    \\The body is optional: details they gave, not a prompt for Claude.
+    \\
+    \\--link is where it came from, so a Claude helping with it later can read it: an
+    \\https://, http://, mailto: or slack:// link. When the human points at a Slack message
+    \\("Josh's message in #ops", "that thread"), find it with the Slack connector (search, or
+    \\read the channel) and put its permalink in --link. An email's link comes from the Gmail
+    \\connector, a PR's or doc's is its URL. Never make one up: if you can't find it, or have
+    \\no connector for it, ask for the link or leave it out and say so.
+    \\
+    \\Dates. --due is when it must be done: it shows in Needs You from that day's morning, and
+    \\again each morning while overdue. --remind is a one-time nudge: it shows then, once.
+    \\"Remind me Monday" is --remind; "by Friday", "due Friday" is --due; both may apply.
+    \\They take today, tomorrow, a weekday (mon or monday: the next one, never today), +3d,
+    \\+2w, +4h, +30m, now, 2026-11-20 or 11-20, each optionally followed by a time (15:00,
+    \\3pm, 3:30pm). A time alone is today's (tomorrow's once it has passed). A date with no
+    \\time means that morning (board.morning, 08:00 unless set). Turn their words into these:
+    \\  "Monday"                   mon
+    \\  "Monday after standup"     "mon 10am" (the time from your notes; otherwise pick one,
+    \\                             say it, and note the time they give you when they correct it)
+    \\  "tomorrow afternoon"       "tomorrow 2pm"        "tonight"         "today 6pm"
+    \\  "in a couple of hours"     +2h                   "next week"       mon
+    \\  "end of the week"          fri                   "Nov 20"          11-20
+    \\  "in two weeks"             +2w                   "after lunch Thu" "thu 1:30pm"
+    \\A date and time already past goes off at once ("today 6pm" said at 7pm): late in the
+    \\day, make "tonight" a later time, or ask. Quote anything with a space. Always tell the
+    \\human the date you set, in words.
+    \\
+    \\  cl ticket snooze <key> <when>      not now: out of Needs You until a reminder then
+    \\  cl ticket move <key> done          finished (`cl ticket done` is refused for a todo)
+    \\  cl ticket move <key> running       they're doing it (backlog: back to to do)
+    \\  cl ticket park <key> --reason "waiting on Josh" [--until '<check>' | --pr <url>]
+    \\                                     waiting on someone or something; unpark ends it
+    \\  cl ticket edit <key> --due <when> | --remind <when> | --link <url>
+    \\                                     change them (--due none, --remind none, --link "")
+    \\  cl ticket start <key>              a Claude session to talk about it in (it keeps
+    \\                                     its stage)
+    \\  cl ticket list --todo [--due]      their todos (--due: those with a due date, soonest
+    \\                                     first)
+    \\Moving one to done, snoozing and parking act for the human: only when they ask.
+    \\
+    \\A message that starts "Add a Ticket or Todo:" (the board's Quick Ticket box) always asks
+    \\for one. A "[voice]" message (the board's mic) does only when it asks for something to
+    \\be added or remembered ("remind me...", "make a ticket to..."); handle the rest as
+    \\usual. For these, make whichever the words call for, a todo or a ticket, without asking
+    \\unless which one, or its project, is really unclear. Then reply with the key and, for
+    \\a todo, its date ("ME-4, reminder Monday 8:00"); for voice, `cl say` names them too ("Added ME-4, Reply to Josh, reminder Monday morning.").
     \\
     \\## Roadmaps and dependencies
     \\
@@ -258,7 +336,8 @@ const tickets_skill =
     \\prompt), review (finished, to review), testing (to try), ended (its session went away),
     \\idle (Claude ended its turn with nothing else pending; it waits for a prompt), unparked
     \\(its park's check passed and it resumed), park-expired (the check never passed), pr-closed
-    \\(the PR its park waited on was closed without merging).
+    \\(the PR its park waited on was closed without merging), and for todos reminder (its
+    \\reminder came) and due (due today, or overdue).
     \\`cl ticket list --parked` lists parked tickets; `show` has what each waits on and its checks.
     \\
     \\## Watching Needs You
@@ -285,6 +364,9 @@ const tickets_skill =
     \\kind of flag (one `cl alert` naming the ticket and what it needs, replacing the last),
     \\or when something looks wrong that the board won't make obvious. When unsure, stay
     \\quiet. Hidden projects' tickets and hidden sessions' tickets don't show up in it.
+    \\`reminder` and `due` lines are the human's own todos coming up: the board's Today group
+    \\shows them, so leave them alone, even in a project you keep moving, unless your notes
+    \\say what to do with them (alert about due ones, say).
     \\
     \\Hidden projects (`hidden` in `cl project list`; `cl project hide` / `unhide`): the human
     \\put them aside. `needs` and `list` leave their tickets out (`--hidden-projects`, or
@@ -591,16 +673,30 @@ fn deliver(ctx: Ctx, tmux_name: []const u8, text: []const u8, fresh: bool, accep
 }
 
 /// What the Quick Ticket button sends: the prefix, then the human's words.
+/// The operator makes a ticket or a todo from them (the skill's Todos).
 pub fn quickTicketText(a: std.mem.Allocator, text: []const u8) ![]const u8 {
     const t = std.mem.trim(u8, text, " \t\r\n");
     if (t.len == 0) return error.BadInput;
-    return std.fmt.allocPrint(a, "Add a Ticket: {s}", .{t});
+    return std.fmt.allocPrint(a, "Add a Ticket or Todo: {s}", .{t});
+}
+
+test "the operator knows todos: capture, dates, and leaving their flags alone" {
+    const has = struct {
+        fn f(hay: []const u8, needle: []const u8) bool {
+            return std.mem.indexOf(u8, hay, needle) != null;
+        }
+    }.f;
+    try std.testing.expect(has(tickets_skill, "## Todos"));
+    try std.testing.expect(has(tickets_skill, "cl todo \"<title>\""));
+    try std.testing.expect(has(tickets_skill, "Add a Ticket or Todo:"));
+    try std.testing.expect(has(instructions, "`reminder` and `due` flags"));
+    try std.testing.expect(has(instructions, "a todo's date"));
 }
 
 test quickTicketText {
     const a = std.testing.allocator;
     const s = try quickTicketText(a, "  fix the login page\nit 500s\n");
     defer a.free(s);
-    try std.testing.expectEqualStrings("Add a Ticket: fix the login page\nit 500s", s);
+    try std.testing.expectEqualStrings("Add a Ticket or Todo: fix the login page\nit 500s", s);
     try std.testing.expectError(error.BadInput, quickTicketText(a, " \n "));
 }

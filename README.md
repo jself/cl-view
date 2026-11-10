@@ -299,7 +299,14 @@ It continues its last conversation when it starts again, so the chat carries
 on across restarts (`/clear` in it starts a new one). For the board it has a
 `cl-tickets` skill (written to `~/.config/cl/operator/.claude/skills/` each
 time it is opened): ask it for a ticket and it picks the project, writes the
-ticket's first message, and creates it. Its conversation goes on across
+ticket's first message, and creates it. Something that is yours to do ("remind
+me Monday to reply to Josh", "I need to prep Sam's 1:1 by Friday") it makes a
+todo instead (see Todos): it turns "Monday after standup" into a `--remind`
+cl reads, puts the source in `--link` (a Slack message's permalink, found with
+its Slack connector), and tells you the key and the date. Asked for Claude
+work that serves one of your todos ("have Claude draft that reply"), it makes
+a task under the todo. It snoozes, parks or finishes a todo only when you ask.
+Its conversation goes on across
 upgrades, so it may still hold an older version of the skill: when a new cl
 rewrites it, the next message cl sends the operator (a Quick Ticket, a job
 for it) starts by telling it to load the skill again.
@@ -307,6 +314,11 @@ for it) starts by telling it to load the skill again.
 The operator keeps notes in `~/.config/cl/operator/notes/` (an `index.md` plus
 a file per topic), reads them when it starts, and updates them as it goes, so
 they survive restarting it. Tell it "note that ..." to add one.
+
+It leaves your todos' `reminder` and `due` flags alone: they land in Needs You
+like anything else (so `cl t watch --change needs` shows them), but the board's
+Today group already shows them to you. Tell it otherwise ("alert me when
+something is overdue", "what time is standup") and it notes it.
 
 It runs in `~/.config/cl/operator/` with the profile from the `operator`
 setting. Its instructions come from the binary (`src/operator.zig`); put a
@@ -599,6 +611,12 @@ or two>"`, written to be heard. The board waits for that, shows it in a box at
 the bottom right (↻ says it again, ↗ opens the voice operator, × stops), and
 speaks it. If it finishes without `cl say`, the board speaks the first
 sentence of its written reply.
+
+Voice makes todos too: "remind me tomorrow afternoon to call the bank" becomes
+a todo with a reminder, and the spoken answer names its key and when ("Added
+ME-4, call the bank, reminder tomorrow at 2."). So does the board's **Quick
+ticket** box, which sends your words as `Add a Ticket or Todo: ...`: the
+operator makes a ticket for Claude's work and a todo for yours.
 
 The voice operator is a second operator, apart from the one Chat opens, so
 voice can run on a quicker, cheaper model without changing Chat's:
@@ -1131,6 +1149,8 @@ cl todo "Send the budget" --due fri --remind "thu 3pm"   # due dates and reminde
 cl t snooze ME-1 tomorrow                      # out of Needs You until a reminder then
 ```
 
+- Besides `cl todo` and the board's New ticket, the operator makes them:
+  ask it in Chat, the Quick ticket box or by voice (see Operator and Voice).
 - `cl todo` prints the key. Its project is `-p`, else `board.todo_project`,
   else the only project that isn't a code repo (`cl project add me ~/todo
   --no-repo`, see Repo-less projects); with none of those it says so.
