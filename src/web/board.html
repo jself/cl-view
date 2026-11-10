@@ -617,7 +617,7 @@
     <tr><td><kbd>Esc</kbd></td><td>Leave a text box (it keeps what you typed); again, close the dialog.</td></tr>
     <tr><td><kbd>?</kbd></td><td>This list.</td></tr>
   </table>
-  <p class="muted">Single keys don't fire while you type in a box, and of these only <kbd>s</kbd>, <kbd>Ctrl</kbd>+<kbd>K</kbd> and <kbd>?</kbd> work with a dialog open. Dialogs have their own: <kbd>Ctrl</kbd>+<kbd>Enter</kbd> creates the ticket in New ticket, and in a ticket's Test tab, <kbd>p</kbd> <kbd>f</kbd> <kbd>n</kbd> <kbd>c</kbd> walk the test plan.</p></div></dialog>
+  <p class="muted">Single keys don't fire while you type in a box, and of these only <kbd>s</kbd>, <kbd>Ctrl</kbd>+<kbd>K</kbd> and <kbd>?</kbd> work with a dialog open. Dialogs have their own: <kbd>Ctrl</kbd>+<kbd>Enter</kbd> creates the ticket in New ticket, and in a ticket, <kbd>t</kbd> opens its session's terminal and, in its Test tab, <kbd>p</kbd> <kbd>f</kbd> <kbd>n</kbd> <kbd>c</kbd> walk the test plan.</p></div></dialog>
 <div id="toast" role="status" popover="manual"></div>
 <div id="voiceBar" hidden role="status"><div class="txt"><div class="heard" id="voiceHeard"></div><div id="voiceText"></div></div><a id="voiceOpen" href="/?attach=voice" title="Open the voice operator (it runs on voice.model, apart from Chat)" aria-label="Open the voice operator" hidden>&#8599;</a><button type="button" id="voiceReplay" title="Say it again" aria-label="Say it again" hidden>&#8635;</button><button type="button" id="voiceClose" title="Stop and close" aria-label="Stop and close">&times;</button></div>
 
@@ -2894,6 +2894,18 @@ document.addEventListener("keydown", (e) => {
   e.preventDefault();
   document.getElementById("chatBtn").click();
 });
+// T in a ticket's popup opens its session's terminal, like Open shell (Open
+// terminal for a todo), unless you're typing, S's labels are up or another
+// dialog is over it.
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "t" || hint.on || !plainKey(e) || e.repeat || textBox(e.target)) return;
+  const dlg = document.getElementById("ticketDlg");
+  if (!dlg.open || topDialog() !== dlg || state.detail?.ticket.key !== state.open) return; // not while it loads another ticket
+  const d = state.detail; const t = d.ticket;
+  e.preventDefault();
+  if (!(t.tmux && d.status && d.status !== "gone")) return toast(`${t.key} has no session running`, true);
+  location.href = shellHref(t);
+});
 // In the test plan walk-through (the ticket's Test tab): P and F pass or fail
 // the first check of this step not answered yet, N goes to the next step and
 // C puts the cursor in the step's comment box (the note box on Results).
@@ -3122,7 +3134,7 @@ document.getElementById("pushDlg").addEventListener("click", (e) => {
 // typing a label clicks it; h/j/k/l and the arrows move a cursor over the
 // cards; / searches; q and n make tickets; ? lists them all. Ctrl+K, from
 // anywhere, finds a ticket or a command, and Tab on a ticket lists what can be
-// done with it. (O, V and the Test tab's P/F/N/C are further up.)
+// done with it. (O, V, the popup's T and the Test tab's P/F/N/C are further up.)
 const textBox = (t) => !!(t && (t.isContentEditable || t.closest?.("input, textarea, select")) && !t.closest?.(".xterm"));
 const plainKey = (e) => !(e.ctrlKey || e.metaKey || e.altKey || e.isComposing);
 // The dialog on top: the open one shown last (the markup's order says nothing about that).

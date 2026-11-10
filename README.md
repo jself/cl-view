@@ -376,6 +376,8 @@ web.font_size = 16              # text size of the board and terminal pages, in 
   with a dialog open; the dialogs have keys of their own (below).
 - In the New ticket dialog, Ctrl+Enter (Cmd+Enter on a Mac) creates the
   ticket from any field, the description box included.
+- In a ticket's popup, T opens its session's terminal, like Open shell (or a
+  todo's Open terminal); with no session running, it says so instead.
 - In a ticket's test plan walk-through (its Test tab), P and F pass or fail
   the first check of the step that isn't answered yet, N goes to the next
   step, and C puts the cursor in the step's comment box (the note box on the
