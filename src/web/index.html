@@ -277,6 +277,44 @@
     else send("0", "\x11");
   }, true);
 
+  // Opened from the board (it notes when it's left; the note moves into this
+  // page's history entry, so a reload keeps it): going back to the board is
+  // going back in history. The browser then shows the board as it was, from
+  // its back/forward cache, instead of loading it again. Opened any other
+  // way (a link, a new tab), the board is loaded as before.
+  const fromBoard = (() => {
+    try {
+      if (history.state?.fromBoard) return true;
+      const left = Number(sessionStorage.getItem("cl-left-board") || 0);
+      sessionStorage.removeItem("cl-left-board");
+      if (history.length < 2 || !(Date.now() - left < 10000)) return false;
+      history.replaceState({ ...history.state, fromBoard: true }, "");
+      return true;
+    } catch { return false; }
+  })();
+  document.addEventListener("click", (e) => {
+    if (!fromBoard || e.defaultPrevented || e.button || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+    if (!e.target.closest?.('a[href="/board"]')) return;
+    e.preventDefault();
+    // This page is next in history now: opening it again from the board
+    // goes forward to it (board.html's openTerm).
+    try { sessionStorage.setItem("cl-term-next", location.pathname + location.search); } catch {}
+    history.back();
+  });
+  // Kept in the back/forward cache, this page keeps its screen but not its
+  // connection (a page with an open WebSocket isn't kept): it lets go of the
+  // terminal as an unloaded page does, and takes it up again when shown.
+  addEventListener("pagehide", () => {
+    clearTimeout(retryTimer);
+    clearTimeout(probeTimer);
+    if (ws) { ws.onclose = null; ws.close(); ws = null; }
+  });
+  addEventListener("pageshow", (e) => {
+    try { sessionStorage.removeItem("cl-term-next"); sessionStorage.removeItem("cl-left-board"); } catch {}
+    // (Unless coming back visible already did.)
+    if (e.persisted && !ws && !overlay.classList.contains("show")) { retries = 0; connect(); }
+  });
+
   let retries = 0;
   let retryTimer = 0;
   let probeTimer = 0;

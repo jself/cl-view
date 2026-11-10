@@ -18,7 +18,52 @@ const Event = union(enum) {
     key_press: vaxis.Key,
     mouse: vaxis.Mouse,
     winsize: vaxis.Winsize,
+    /// From `Ticker`, a few times a second: time to see if a refresh is due.
+    tick,
 };
+
+/// Wakes the main loop every `every_ms` (250 in `runIn`) so it can see when
+/// its once-a-second refresh is due; ticking only once a second would let
+/// refreshes drift up to 2 s apart. In between, the loop waits for a key
+/// instead of checking for one every 25 ms, which kept each key (opening a
+/// session, say) waiting up to 25 ms first.
+const Ticker = struct {
+    done: std.Io.Event = .unset,
+
+    fn run(t: *Ticker, io: std.Io, loop: *vaxis.Loop(Event), every_ms: i64) void {
+        while (true) {
+            t.done.waitTimeout(io, .{ .duration = .{ .raw = .fromMilliseconds(every_ms), .clock = .awake } }) catch |err| switch (err) {
+                error.Timeout => {
+                    // A full queue already has something to wake the loop.
+                    _ = loop.tryPostEvent(.tick) catch {};
+                    continue;
+                },
+                error.Canceled => return,
+            };
+            return;
+        }
+    }
+
+    fn stop(t: *Ticker, io: std.Io, thread: std.Thread) void {
+        t.done.set(io);
+        thread.join();
+    }
+};
+
+test "Ticker posts ticks until stopped" {
+    const io = std.testing.io;
+    var tty: vaxis.Tty = undefined;
+    var vx: vaxis.Vaxis = undefined;
+    var loop: vaxis.Loop(Event) = .init(io, &tty, &vx);
+    var t: Ticker = .{};
+    const thread = try std.Thread.spawn(.{}, Ticker.run, .{ &t, io, &loop, 5 });
+    try std.testing.expect(loop.nextEvent() catch unreachable == .tick);
+    try std.testing.expect(loop.nextEvent() catch unreachable == .tick);
+    t.stop(io, thread);
+    while (loop.tryEvent() catch null) |_| {}
+    io.sleep(.fromMilliseconds(20), .awake) catch {};
+    try std.testing.expect((loop.tryEvent() catch null) == null);
+}
 
 const Mode = union(enum) {
     list,
@@ -643,8 +688,17 @@ const App = struct {
         tmux.attach(self.ctx, tmux_name) catch |err| self.setMessage("attach failed: {s}", .{@errorName(err)});
         try self.loop.start();
         try self.vx.enterAltScreen(writer);
-        // The loop was stopped while attached, so a resize then went unseen.
-        try self.redraw();
+        // Back at once: the screen as it was (its data is still in the
+        // arena), at the terminal's size now (the loop was stopped while
+        // attached, so a resize then went unseen). Re-reading the sessions,
+        // their statuses and the board takes tens of milliseconds; the
+        // screen used to stay blank for that long.
+        if (self.tty.getWinsize()) |ws| {
+            try self.vx.resize(self.ctx.gpa, writer, ws);
+        } else |_| {}
+        self.vx.queueRefresh();
+        try self.draw();
+        try self.refresh();
         self.selectByName(tmux_name);
         try self.loadPreview();
     }
@@ -1123,9 +1177,15 @@ fn runIn(ctx: Ctx, cfg: config.Config, select: ?[]const u8, on_board: bool) !voi
     try app.loadPreview();
     if (on_board) try app.openBoard();
 
+    var ticker: Ticker = .{};
+    const ticker_thread = try std.Thread.spawn(.{}, Ticker.run, .{ &ticker, ctx.io, &loop, 250 });
+    defer ticker.stop(ctx.io, ticker_thread);
+
     while (!app.quit) {
-        ctx.sleepMs(25);
-        while (try loop.tryEvent()) |event| {
+        if (app.dirty) try app.draw();
+        // Sleep until a key (or a resize), or the ticker's next tick.
+        var next: ?Event = try loop.nextEvent();
+        while (next) |event| : (next = try loop.tryEvent()) {
             switch (event) {
                 .key_press => |key| try app.handleKey(key),
                 .winsize => |ws| {
@@ -1133,12 +1193,11 @@ fn runIn(ctx: Ctx, cfg: config.Config, select: ?[]const u8, on_board: bool) !voi
                     try app.loadPreview();
                     app.dirty = true;
                 },
-                .mouse => {},
+                .mouse, .tick => {},
             }
         }
         const now = std.Io.Timestamp.now(ctx.io, .real).toMilliseconds();
         if (now - app.last_refresh_ms >= 1000) try app.refresh();
-        if (app.dirty) try app.draw();
     }
     try vx.exitAltScreen(tty.writer());
     try tty.writer().flush();

@@ -1322,6 +1322,28 @@ async function removeProject(name) {
 // ---- ticket popup ----
 // The terminal page shows the ticket's title above the session.
 function shellHref(t) { return `/?attach=${encodeURIComponent(t.tmux)}&ticket=${encodeURIComponent(t.key)}`; }
+// Open a terminal page (href as shellHref makes it). The one this tab just
+// came back from is still the next page in history (index.html goes back
+// with history.back()): going forward shows it as it was, connecting again
+// at once, instead of loading it all again.
+function openTerm(href) {
+  if (termIsNext(href)) {
+    history.forward();
+    // Nothing went (history moved on after all): open it the usual way.
+    const t = setTimeout(() => { location.href = href; }, 500);
+    addEventListener("pagehide", () => clearTimeout(t), { once: true });
+    return;
+  }
+  location.href = href;
+}
+function termIsNext(href) {
+  let noted = false;
+  try { noted = !!href && sessionStorage.getItem("cl-term-next") === href; } catch {}
+  // The Navigation API says what's next, but not its URL here (the pages'
+  // referrer policy hides it): only that there is something.
+  if (noted && window.navigation?.entries && navigation.currentEntry) return !!navigation.entries()[navigation.currentEntry.index + 1];
+  return noted;
+}
 async function openTicket(key, tab, focus) {
   setFocus(!!focus);
   state.open = key; state.tab = tab || null; state.editing = null; state.edit = {}; state.tailPinned = true; tail.text = null; state.picks = {}; state.other = {}; state.checks = {};
@@ -2483,7 +2505,7 @@ async function onClick(e) {
   const ln = e.target.closest("[data-link]");
   if (ln) { e.preventDefault(); e.stopPropagation(); if (safeLink(ln.dataset.link)) window.open(ln.dataset.link, "_blank", "noopener"); return; }
   const sh = e.target.closest("[data-shell]");
-  if (sh) { e.preventDefault(); if (e.ctrlKey || e.metaKey) window.open(sh.dataset.shell); else location.href = sh.dataset.shell; return; }
+  if (sh) { e.preventDefault(); if (e.ctrlKey || e.metaKey) window.open(sh.dataset.shell); else openTerm(sh.dataset.shell); return; }
   const el = e.target.closest("button, a, tr.row");
   if (!el) {
     // A Needs you item's text opens its ticket like its card; its buttons (and the
@@ -2542,7 +2564,7 @@ async function onClick(e) {
     // Opening it clears it (attaching does too, but a terminal the page already has open doesn't attach again).
     e.preventDefault();
     if (e.ctrlKey || e.metaKey) { window.open(el.href); return dismissAlert(ds.alertOpen); }
-    await dismissAlert(ds.alertOpen); location.href = el.href; return;
+    await dismissAlert(ds.alertOpen); openTerm(el.getAttribute("href")); return;
   }
   if (ds.dismissAll) return dismissAll(ds.dismissAll, ds.keys.split(" "));
   if (ds.dismissYes !== undefined) { document.getElementById("dismissDlg").close(ds.dismissYes); return; }
@@ -2658,6 +2680,16 @@ async function onClick(e) {
   }
 }
 document.addEventListener("click", (e) => busyWhile(e.target.closest("[data-unpark], button, a, tr.row"), onClick(e)));
+// Links to a terminal (Open shell, Open terminal, Chat...) go through openTerm,
+// unless a modifier opens them elsewhere or onClick took the click (it calls
+// openTerm itself). Added after onClick, so its synchronous part runs first.
+document.addEventListener("click", (e) => {
+  if (e.defaultPrevented || e.button || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+  const a = e.target.closest?.('a[href^="/?attach="]');
+  if (!a || a.target) return;
+  e.preventDefault();
+  openTerm(a.getAttribute("href"));
+});
 document.addEventListener("input", (e) => {
   const ds = e.target.dataset;
   if (ds.other !== undefined) { state.other[ds.other] = e.target.value; }
@@ -2904,7 +2936,7 @@ document.addEventListener("keydown", (e) => {
   const d = state.detail; const t = d.ticket;
   e.preventDefault();
   if (!(t.tmux && d.status && d.status !== "gone")) return toast(`${t.key} has no session running`, true);
-  location.href = shellHref(t);
+  openTerm(shellHref(t));
 });
 // In the test plan walk-through (the ticket's Test tab): P and F pass or fail
 // the first check of this step not answered yet, N goes to the next step and
@@ -3320,7 +3352,7 @@ function palCommands() {
     { label: "New ticket", hint: "n", run: () => openNew(null) },
     { label: "Quick ticket", hint: "q", run: () => openQuick() },
     { label: "Chat with the operator", hint: "o", run: () => document.getElementById("chatBtn").click() },
-    { label: "Open the voice operator", run: () => { location.href = "/?attach=voice"; } },
+    { label: "Open the voice operator", run: () => openTerm("/?attach=voice") },
     { label: "Search tickets", hint: "/", run: searchFocus },
     view("board", "Board"), view("lanes", "Lanes"), view("list", "List"), view("projects", "Projects"),
     sw("doneSw", "done tickets"), sw("parkedSw", "parked tickets"), sw("todosSw", "todos"), sw("subsSw", "sub-tickets"),
@@ -3348,7 +3380,7 @@ function palActions(key) {
   for (const [tab, l] of [["needs", "Needs you"], ["plan", "Plan"], ["review", "Review"], ["test", "Test"], ["landing", "Not merged"], ["after-merge", "After merge"]])
     if (flagTabs.includes(tab) || (tab === "plan" && t.stage === "planning") || (tab === "review" && t.stage === "review") || (tab === "test" && t.stage === "testing")) a(`Open: ${l}`, open(tab));
   for (const [tab, l] of [["session", "Session"], ["comments", "Comments"], ["activity", "Activity"], ["details", "Details"]]) a(`Open: ${l}`, open(tab));
-  if (live) a(t.todo ? "Open terminal" : "Open shell", () => { location.href = shellHref(t); }, "the session's terminal");
+  if (live) a(t.todo ? "Open terminal" : "Open shell", () => openTerm(shellHref(t)), "the session's terminal");
   // A todo's talk session doesn't care about its park: offered either way, as in the popup.
   if (!live && t.stage !== "done" && t.todo) a("Talk to Claude", () => act(key, "start", {}, "Talking to Claude").catch(() => {}), "a session of its own about it");
   if (t.stage !== "done" && t.todo) a("Snooze", () => openSnooze(key), "a reminder later, out of Needs you until then");
@@ -3464,6 +3496,16 @@ addEventListener("pagehide", () => {
   const place = { filter: state.filter, project: state.project, search: state.search, open: state.open, tab: state.tab,
     picks: state.picks, other: state.other, tailPinned: state.tailPinned, drafts, scrolls: scrolls(), page: [scrollX, scrollY] };
   try { sessionStorage.setItem("cl-board-place", JSON.stringify(place)); } catch {}
+  // A terminal opened from here comes back with history.back() (index.html),
+  // which shows this page as it was when the browser kept it.
+  try { sessionStorage.setItem("cl-left-board", String(Date.now())); } catch {}
+});
+// Shown again from the back/forward cache, everything is where it was; only
+// the board's data may be old. Loaded afresh, the terminal noted as next in
+// history may not be any more.
+addEventListener("pageshow", (e) => {
+  try { sessionStorage.removeItem("cl-left-board"); if (!e.persisted) sessionStorage.removeItem("cl-term-next"); } catch {}
+  if (e.persisted) refresh();
 });
 async function restorePlace() {
   let place = null;

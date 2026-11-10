@@ -543,17 +543,36 @@ test terminalFeaturesPlan {
 /// Konsole that send Ctrl+Shift+Space as Ctrl+Space (which this doesn't
 /// catch). Idempotent.
 pub fn ensureDetachBinding(ctx: Ctx) !void {
+    return bindAndThen(ctx, &.{});
+}
+
+/// ensureDetachBinding, then `more` (tmux commands, ";"-separated) in the
+/// same tmux call: one process instead of two before an attach.
+fn bindAndThen(ctx: Ctx, more: []const []const u8) !void {
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
     const exe = ctx.exePath(&exe_buf) catch "cl";
     const dictate = try dictateCommand(ctx.gpa, exe);
     defer ctx.gpa.free(dictate);
-    try runQuiet(ctx, &.{
+    const bind = [_][]const u8{
         "bind-key", "-n", "C-q", "if-shell", "-F", "#{m:cl_*,#{session_name}}", "detach-client", "", ";",
         "bind-key", "-n", "C-l", "if-shell", "-F", "#{m:cl_*,#{session_name}}", "resize-window -A ; set-option window-size latest ; refresh-client ; send-keys C-l", "send-keys C-l", ";",
         "bind-key", "-n", "Left", "if-shell", "-F", agents_guard, "", "send-keys Left", ";",
         "bind-key", "-n", "C-S-Space", "if-shell", "-F", "#{m:cl_*,#{session_name}}", dictate, "send-keys C-S-Space", ";",
         "bind-key", "-n", "M-`", "if-shell", "-F", "#{m:cl_*,#{session_name}}", dictate, "send-keys M-`",
-    });
+    };
+    if (more.len == 0) return runQuiet(ctx, &bind);
+    const argv = try std.mem.concat(ctx.gpa, []const u8, &.{ &bind, &.{";"}, more });
+    defer ctx.gpa.free(argv);
+    try runQuiet(ctx, argv);
+}
+
+/// The tmux commands that clear a session's alert (cl alert).
+fn clearAlertArgs(tmux_name: []const u8) [17][]const u8 {
+    return .{
+        "set-option", "-qu", "-t", tmux_name, "@cl_alert", ";",
+        "set-option", "-qu", "-t", tmux_name, "@cl_alert_at", ";",
+        "set-option", "-qu", "-t", tmux_name, "@cl_alert_ticket",
+    };
 }
 
 /// The tmux command the dictate keys run: `cl dictate` on this session, in
@@ -694,11 +713,8 @@ fn cutUtf8(text: []const u8, max: usize) []const u8 {
 
 /// Clear the session's alert (nothing happens if it has none).
 pub fn clearAlert(ctx: Ctx, tmux_name: []const u8) !void {
-    try runQuiet(ctx, &.{
-        "set-option", "-qu", "-t", tmux_name, "@cl_alert", ";",
-        "set-option", "-qu", "-t", tmux_name, "@cl_alert_at", ";",
-        "set-option", "-qu", "-t", tmux_name, "@cl_alert_ticket",
-    });
+    const args = clearAlertArgs(tmux_name);
+    try runQuiet(ctx, &args);
 }
 
 /// The cl session this process runs in (cl sessions set CL_SESSION; the
@@ -816,9 +832,11 @@ pub fn paste(ctx: Ctx, tmux_name: []const u8, text: []const u8) !void {
 
 /// Attach the current terminal to a session; returns when the client detaches.
 pub fn attach(ctx: Ctx, tmux_name: []const u8) !void {
-    try ensureDetachBinding(ctx);
     // Opening a session is how you acknowledge its alert, wherever it shows.
-    clearAlert(ctx, tmux_name) catch {};
+    // The keys are bound and the alert cleared in one tmux call; should it
+    // fail, the keys alone, which the attach needs.
+    const clear = clearAlertArgs(tmux_name);
+    bindAndThen(ctx, &clear) catch try ensureDetachBinding(ctx);
     // Drop TMUX so attaching from inside another tmux works (nested client).
     var env = try ctx.env.clone(ctx.gpa);
     defer env.deinit();
@@ -998,6 +1016,48 @@ test "sessions go to the socket's server, not the default one" {
     try std.testing.expectEqualStrings(try std.fmt.allocPrint(arena, "{s}={s}", .{ socket_env, sock }), env);
     // And the default server never saw it.
     try std.testing.expect(!hasSession(testCtx(null, false), name));
+}
+
+test "attach's tmux call binds the keys and clears the alert at once" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    const probe = std.process.run(a, io, .{ .argv = &.{ "tmux", "-V" } }) catch return error.SkipZigTest;
+    a.free(probe.stdout);
+    a.free(probe.stderr);
+    var rnd: [8]u8 = undefined;
+    io.random(&rnd);
+    const sock = try std.fmt.allocPrint(a, "/tmp/cl-test-tmux-{x}", .{rnd});
+    defer a.free(sock);
+    defer std.Io.Dir.deleteFileAbsolute(io, sock) catch {};
+    // The server is stopped with an explicit -S, never through the code under test.
+    defer if (std.process.run(a, io, .{ .argv = &.{ "tmux", "-S", sock, "kill-server" } })) |r| {
+        a.free(r.stdout);
+        a.free(r.stderr);
+    } else |_| {};
+
+    const ctx = testCtx(sock, false);
+    try runQuiet(ctx, &.{ "new-session", "-d", "-s", "cl_alerted", "sleep", "60" });
+    try runQuiet(ctx, &.{ "set-option", "-t", "cl_alerted", "@cl_alert", "look", ";", "set-option", "-t", "cl_alerted", "@cl_alert_at", "1" });
+
+    const clear = clearAlertArgs("cl_alerted");
+    try bindAndThen(ctx, &clear);
+    const alert = try run(ctx, &.{ "show-options", "-qv", "-t", "cl_alerted", "@cl_alert" });
+    defer a.free(alert);
+    try std.testing.expectEqualStrings("", alert);
+    const at = try run(ctx, &.{ "show-options", "-qv", "-t", "cl_alerted", "@cl_alert_at" });
+    defer a.free(at);
+    try std.testing.expectEqualStrings("", at);
+    const keys = try run(ctx, &.{ "list-keys", "-T", "root", "C-q" });
+    defer a.free(keys);
+    try std.testing.expect(std.mem.indexOf(u8, keys, "detach-client") != null);
+
+    // A session that's gone (-q: no error) still gets the keys bound.
+    try runQuiet(ctx, &.{ "unbind-key", "-n", "C-q" });
+    const gone = clearAlertArgs("cl_gone");
+    try bindAndThen(ctx, &gone);
+    const again = try run(ctx, &.{ "list-keys", "-T", "root", "C-q" });
+    defer a.free(again);
+    try std.testing.expect(std.mem.indexOf(u8, again, "detach-client") != null);
 }
 
 test "configure keeps CL_TMUX_SOCKET from the environment, and passes on tmux.socket" {

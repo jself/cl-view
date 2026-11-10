@@ -54,16 +54,13 @@ fn buildId(a: std.mem.Allocator) ![]const u8 {
     return std.fmt.allocPrint(a, "{x:0>16}", .{std.hash.Wyhash.hash(0, board_html)});
 }
 
+/// Revalidated every time rather than no-store: a page that fetched a
+/// no-store response can't go in the browser's back/forward cache, and the
+/// board should (see `web.respondPage`). The page asks with cache: "no-store"
+/// anyway, so it never gets an old answer.
 const json_headers = [_]std.http.Header{
     .{ .name = "content-type", .value = "application/json" },
-    .{ .name = "cache-control", .value = "no-store" },
-};
-
-const html_headers = [_]std.http.Header{
-    .{ .name = "content-type", .value = "text/html; charset=utf-8" },
-    .{ .name = "cache-control", .value = "no-store" },
-    .{ .name = "x-frame-options", .value = "DENY" },
-    .{ .name = "referrer-policy", .value = "no-referrer" },
+    .{ .name = "cache-control", .value = "private, no-cache" },
 };
 
 /// Handle /board and /api/*; false when the path is someone else's.
@@ -84,7 +81,7 @@ pub fn handle(ctx: Ctx, cfg: config.Config, req: *std.http.Server.Request, path:
     if (!is_api) {
         const page = try web.withFontSize(ctx.gpa, board_html, cfg.web.font_size);
         defer ctx.gpa.free(page);
-        try req.respond(page, .{ .extra_headers = &html_headers });
+        try web.respondPage(req, page);
         return true;
     }
 
@@ -1231,7 +1228,7 @@ fn voiceSpeak(ctx: Ctx, cfg: config.Config, a: std.mem.Allocator, req: *std.http
     const wav = try voice.speak(ctx, a, cfg, t);
     try req.respond(wav, .{ .extra_headers = &.{
         .{ .name = "content-type", .value = "audio/wav" },
-        .{ .name = "cache-control", .value = "no-store" },
+        .{ .name = "cache-control", .value = "private, no-cache" },
     } });
 }
 

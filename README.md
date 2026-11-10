@@ -398,6 +398,14 @@ web.font_size = 16              # text size of the board and terminal pages, in 
   ticket from any field, the description box included.
 - In a ticket's popup, T opens its session's terminal, like Open shell (or a
   todo's Open terminal); with no session running, it says so instead.
+- A terminal opened from the board goes back to it (✕, Ctrl-Q or Alt-Q)
+  with the browser's Back: the board shows again as you left it, at once,
+  from the browser's back/forward cache, and refreshes. Opening the same
+  terminal again goes Forward to it the same way, and it reconnects. Only
+  when the browser didn't keep a page is it loaded again, as before. (The
+  pages and the board's data are sent `Cache-Control: private, no-cache`,
+  checked with cl web on every load, rather than `no-store`, which keeps a
+  page out of that cache.)
 - In a ticket's test plan walk-through (its Test tab), P and F pass or fail
   the first check of the step that isn't answered yet, N goes to the next
   step, and C puts the cursor in the step's comment box (the note box on the

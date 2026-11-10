@@ -373,6 +373,7 @@ fn listenLoop(state: *State, spec: Spec) void {
                 logf("accept on {f}: {s}", .{ addr, @errorName(err) });
                 break;
             };
+            noDelay(stream);
             const t = std.Thread.spawn(.{}, handleConnection, .{ state, stream }) catch {
                 stream.close(ctx.io);
                 continue;
@@ -380,6 +381,30 @@ fn listenLoop(state: *State, spec: Spec) void {
             t.detach();
         }
     }
+}
+
+/// Send small writes at once. With Nagle's algorithm on, a terminal's output
+/// right after another small frame (the "resumed" that starts every opened
+/// session, a keystroke's echo after the previous one) waited for the
+/// browser's delayed ACK: 40 ms on Linux before anything showed.
+fn noDelay(stream: std.Io.net.Stream) void {
+    std.posix.setsockopt(stream.socket.handle, std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY, &std.mem.toBytes(@as(c_int, 1))) catch {};
+}
+
+test noDelay {
+    const io = std.testing.io;
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
+    var server = try addr.listen(io, .{ .reuse_address = true });
+    defer server.deinit(io);
+    const client = try server.socket.address.connect(io, .{ .mode = .stream });
+    defer client.close(io);
+    const accepted = try server.accept(io);
+    defer accepted.close(io);
+    noDelay(accepted);
+    var on: c_int = 0;
+    var len: std.posix.socklen_t = @sizeOf(c_int);
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.getsockopt(accepted.socket.handle, std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY, std.mem.asBytes(&on), &len));
+    try std.testing.expectEqual(@as(c_int, 1), on);
 }
 
 // ---- relays ----
@@ -986,7 +1011,7 @@ fn handleRequest(state: *State, req: *std.http.Server.Request) !bool {
         }
         const page = try withFontSize(state.ctx.gpa, index_html, state.cfg.web.font_size);
         defer state.ctx.gpa.free(page);
-        try req.respond(page, .{ .extra_headers = &html_headers });
+        try respondPage(req, page);
         return false;
     }
     if (try web_board.handle(state.ctx, state.cfg, req, path, authed)) return false;
@@ -1000,6 +1025,40 @@ const html_headers = [_]std.http.Header{
     .{ .name = "x-frame-options", .value = "DENY" },
     .{ .name = "referrer-policy", .value = "no-referrer" },
 };
+
+/// A signed-in page (the board, the terminal): checked with the server on
+/// every load, like no-store, but a page the browser already has comes back
+/// as a 304 instead of all of it again. Not no-store: with it, the browser
+/// can't keep the board in its back/forward cache, so leaving a terminal
+/// reloaded the board instead of showing it as it was.
+pub fn respondPage(req: *std.http.Server.Request, page: []const u8) !void {
+    var etag_buf: [20]u8 = undefined;
+    const etag = pageEtag(page, &etag_buf);
+    const headers = [_]std.http.Header{
+        .{ .name = "content-type", .value = "text/html; charset=utf-8" },
+        .{ .name = "cache-control", .value = "private, no-cache" },
+        .{ .name = "etag", .value = etag },
+        .{ .name = "x-frame-options", .value = "DENY" },
+        .{ .name = "referrer-policy", .value = "no-referrer" },
+    };
+    if (std.mem.eql(u8, header(req, "if-none-match") orelse "", etag))
+        return req.respond("", .{ .status = .not_modified, .extra_headers = &headers });
+    try req.respond(page, .{ .extra_headers = &headers });
+}
+
+fn pageEtag(page: []const u8, buf: *[20]u8) []const u8 {
+    return std.fmt.bufPrint(buf, "\"{x:0>16}\"", .{std.hash.Wyhash.hash(0, page)}) catch unreachable;
+}
+
+test pageEtag {
+    var a: [20]u8 = undefined;
+    var b: [20]u8 = undefined;
+    const one = pageEtag("<html lang=\"en\" style=\"--font:16\">", &a);
+    try std.testing.expectEqualStrings(one, pageEtag("<html lang=\"en\" style=\"--font:16\">", &b));
+    // Another build or font size is another page.
+    try std.testing.expect(!std.mem.eql(u8, one, pageEtag("<html lang=\"en\" style=\"--font:18\">", &b)));
+    try std.testing.expect(one.len == 18 and one[0] == '"' and one[17] == '"');
+}
 
 /// `html` with web.font_size set as --font on its <html> element, which the
 /// board and terminal pages size their text from. Caller frees.
