@@ -21,6 +21,14 @@ database built into cl.
 
 Runs on Linux and macOS (Windows: use WSL).
 
+![The web board: Needs you along the top, then a column per stage](docs/screenshots/board.png)
+
+| Approving a plan | Reviewing finished work | On a phone |
+|---|---|---|
+| ![A ticket's Plan tab with Approve plan and a box for feedback](docs/screenshots/plan.png) | ![A ticket in review with Claude's summary, Approve and automated review](docs/screenshots/ticket.png) | ![The board on a phone](docs/screenshots/phone.png) |
+
+(The screenshots are of a demo board: the projects and tickets are made up.)
+
 ## Requirements
 
 cl itself needs only these two, on the PATH of the shell that runs it (and of
