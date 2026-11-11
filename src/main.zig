@@ -68,6 +68,7 @@ pub const LaunchOptions = launch.Options;
 
 pub fn main(init: std.process.Init) !void {
     var ctx = Ctx.init(init);
+    @import("db.zig").configure();
     var args_it: std.process.Args.Iterator = .init(init.minimal.args);
     _ = args_it.next(); // argv[0]
     var args: std.ArrayList([]const u8) = .empty;

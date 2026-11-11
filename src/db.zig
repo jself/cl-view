@@ -8,6 +8,30 @@ pub const Error = error{Sqlite};
 /// sqlite3_bind_text with SQLITE_TRANSIENT (SQLite copies the text), in
 /// sqlite_shim.c.
 extern fn cl_sqlite_bind_text(stmt: *c.sqlite3_stmt, i: c_int, text: [*]const u8, len: c_int) c_int;
+extern fn cl_sqlite_page_cache(page_size: c_int, lines: c_int) c_int;
+
+/// Give SQLite one page cache for the whole process, before anything opens
+/// a database. Without it each connection mallocs its own pages and frees
+/// them on close; `cl web` opens one for every request and loop pass, and
+/// the allocator behind malloc in release builds (std.heap.SmpAllocator)
+/// keeps freed memory on per-CPU free lists and never returns it, so those
+/// short-lived caches pile up (CL-165: ~200 MB after a day). SQLite reuses
+/// this buffer itself; past it, pages come from malloc as before. Measured
+/// with two ReleaseSafe `cl web`s side by side on copies of the board, the
+/// dispatcher on, sampling VmRSS each minute for 30 minutes: +16.5 MB over
+/// the last 20 without this, +3.5 MB with it.
+///
+/// It must run before SQLite initializes (anything opening a database);
+/// after that SQLite refuses it, which Debug builds stop on.
+pub fn configure() void {
+    // 4096 is SQLite's default page size (the board's); 2048 pages is 8 MiB
+    // of address space, touched only as it is used.
+    const rc = cl_sqlite_page_cache(4096, 2048);
+    if (rc != c.SQLITE_OK) {
+        if (@import("builtin").mode == .Debug) std.debug.panic("SQLite page cache: {s} (configure must run before any database is opened)", .{c.sqlite3_errstr(rc)});
+        std.debug.print("cl: SQLite page cache not set up: {s}\n", .{c.sqlite3_errstr(rc)});
+    }
+}
 
 pub const Db = struct {
     handle: *c.sqlite3,
@@ -26,8 +50,16 @@ pub const Db = struct {
         return db;
     }
 
+    /// SQLite won't close a connection with a statement still open
+    /// (SQLITE_BUSY), and the connection then lives as long as the process:
+    /// a leak, for `cl web`'s loops that open one each pass. Debug builds
+    /// (the tests) stop on it; release builds say so on stderr (`cl web`'s
+    /// log).
     pub fn close(self: Db) void {
-        _ = c.sqlite3_close(self.handle);
+        const rc = c.sqlite3_close(self.handle);
+        if (rc == c.SQLITE_OK) return;
+        if (@import("builtin").mode == .Debug) std.debug.panic("sqlite3_close: {s} (a statement wasn't finalized)", .{c.sqlite3_errstr(rc)});
+        std.debug.print("cl: sqlite3_close: {s} (a statement wasn't finalized; the connection stays open)\n", .{c.sqlite3_errstr(rc)});
     }
 
     /// The last error, for messages.

@@ -567,9 +567,11 @@ pub fn saveMarks(db: board.Db, m: Marks) !void {
 /// The VAPID key pair, made and kept on first use.
 pub fn vapid(ctx: Ctx, db: board.Db, a: std.mem.Allocator) !Ecdsa.KeyPair {
     try ensureSchema(db);
-    var st = try db.query("SELECT vapid FROM push_settings WHERE id = 1", .{});
-    const stored = if (try st.step()) try st.dupe(a, 0) else "";
-    st.finalize();
+    const stored = blk: {
+        var st = try db.query("SELECT vapid FROM push_settings WHERE id = 1", .{});
+        defer st.finalize();
+        break :blk if (try st.step()) try st.dupe(a, 0) else "";
+    };
     if (stored.len > 0) {
         const raw = try decode64(a, stored);
         if (raw.len == 32) if (Ecdsa.SecretKey.fromBytes(raw[0..32].*)) |sk| return Ecdsa.KeyPair.fromSecretKey(sk) else |_| {};
