@@ -234,9 +234,15 @@ pub const Ticket = struct {
     overview_last: []const u8 = "",
     overview_next: []const u8 = "",
     overview_at: i64 = 0,
-    /// The test plan Claude gave with `done` (markdown: Setup, Launch,
-    /// Checks), "" for none.
+    /// The test plan Claude gave with `done` (markdown steps, review.zig's
+    /// format_help: only what needs the human), "" for none.
     test_plan: []const u8 = "",
+    /// What Claude checked by itself before `done`, and what it saw
+    /// (markdown, the handoff's "# Verified"), "" for none.
+    verified: []const u8 = "",
+    /// A guided tour of what changed (the handoff's "# Demo": steps like the
+    /// test plan's, without checks), "" for none.
+    demo: []const u8 = "",
     /// The review guide for gutter its session last wrote, taken from
     /// .claude/review-guide.md at `done`; "" for none.
     review_guide: []const u8 = "",
@@ -445,6 +451,8 @@ const schema =
     \\  overview_last TEXT NOT NULL DEFAULT '',
     \\  overview_next TEXT NOT NULL DEFAULT '',
     \\  overview_at INTEGER NOT NULL DEFAULT 0,
+    \\  verified TEXT NOT NULL DEFAULT '',
+    \\  demo TEXT NOT NULL DEFAULT '',
     \\  created INTEGER NOT NULL,
     \\  updated INTEGER NOT NULL
     \\);
@@ -643,6 +651,9 @@ pub fn migrate(db: Db) !void {
         _ = try addColumn(db, "tickets", "pr_seen", "INTEGER NOT NULL DEFAULT 0");
         _ = try addColumn(db, "tickets", "pr_seen_sha", "TEXT NOT NULL DEFAULT ''");
         _ = try addColumn(db, "parks", "review", "INTEGER NOT NULL DEFAULT 0");
+        // The handoff's other two parts, next to the test plan.
+        _ = try addColumn(db, "tickets", "verified", "TEXT NOT NULL DEFAULT ''");
+        _ = try addColumn(db, "tickets", "demo", "TEXT NOT NULL DEFAULT ''");
     }
     if (have >= version) return;
     // Version 1 had no sub-tickets, version 2 no planning skill.
@@ -825,10 +836,12 @@ test "migrate: a board another branch moved to a later version still gets the te
     const db = try Db.open(":memory:");
     defer db.close();
     try migrate(db);
-    try db.execMulti(std.fmt.comptimePrint("ALTER TABLE tickets DROP COLUMN test_plan; ALTER TABLE tickets DROP COLUMN test_progress; ALTER TABLE projects DROP COLUMN after_merge; PRAGMA user_version = {d}", .{version}));
+    try db.execMulti(std.fmt.comptimePrint("ALTER TABLE tickets DROP COLUMN test_plan; ALTER TABLE tickets DROP COLUMN test_progress; ALTER TABLE tickets DROP COLUMN verified; ALTER TABLE tickets DROP COLUMN demo; ALTER TABLE projects DROP COLUMN after_merge; PRAGMA user_version = {d}", .{version}));
     try migrate(db);
     try std.testing.expect((try db.int("SELECT 1 FROM pragma_table_info('tickets') WHERE name = 'test_progress'", .{})) != null);
     try std.testing.expect((try db.int("SELECT 1 FROM pragma_table_info('tickets') WHERE name = 'test_plan'", .{})) != null);
+    try std.testing.expect((try db.int("SELECT 1 FROM pragma_table_info('tickets') WHERE name = 'verified'", .{})) != null);
+    try std.testing.expect((try db.int("SELECT 1 FROM pragma_table_info('tickets') WHERE name = 'demo'", .{})) != null);
     try std.testing.expect((try db.int("SELECT 1 FROM pragma_table_info('projects') WHERE name = 'after_merge'", .{})) != null);
     try std.testing.expectEqual(@as(?i64, version), try db.int("PRAGMA user_version", .{}));
 }
@@ -1257,7 +1270,7 @@ const ticket_cols = "t.id, t.key, t.project, t.title, t.body, t.stage, t.mode, t
     "(SELECT count(*) FROM tickets c WHERE c.parent = t.id AND c.stage = 'done'), t.umbrella, " ++
     "t.onto, coalesce((SELECT p.onto FROM projects p WHERE p.name = t.project), ''), t.autoreview, t.pr_then, " ++
     "coalesce((SELECT p.repo FROM projects p WHERE p.name = t.project), 1), t.todo, t.link, t.due_at, t.due_time, t.remind_at, t.overview_last, t.overview_next, t.overview_at, " ++
-    "t.pr_url, t.pr_stage, t.pr_seen, t.pr_seen_sha";
+    "t.pr_url, t.pr_stage, t.pr_seen, t.pr_seen_sha, t.verified, t.demo";
 
 fn readTicket(st: sqlite.Stmt, a: std.mem.Allocator) !Ticket {
     return .{
@@ -1314,6 +1327,8 @@ fn readTicket(st: sqlite.Stmt, a: std.mem.Allocator) !Ticket {
         .pr_stage = try st.dupe(a, 50),
         .pr_seen = st.int(51),
         .pr_seen_sha = try st.dupe(a, 52),
+        .verified = try st.dupe(a, 53),
+        .demo = try st.dupe(a, 54),
     };
 }
 
@@ -1562,9 +1577,10 @@ pub fn setSession(ctx: Ctx, db: Db, id: i64, tmux_name: []const u8, session_id: 
     try touch(ctx, db, id);
 }
 
-/// Keep the test plan Claude wrote for the ticket; testing it starts over.
-pub fn setTestPlan(ctx: Ctx, db: Db, id: i64, md: []const u8) Error!void {
-    try db.exec("UPDATE tickets SET test_plan = ?2, test_progress = '' WHERE id = ?1", .{ id, md });
+/// Keep the handoff Claude gave for the ticket: what it verified, the test
+/// plan and the demo. Testing it starts over.
+pub fn setHandoff(ctx: Ctx, db: Db, id: i64, verified: []const u8, test_plan: []const u8, demo: []const u8) Error!void {
+    try db.exec("UPDATE tickets SET verified = ?2, test_plan = ?3, demo = ?4, test_progress = '' WHERE id = ?1", .{ id, verified, test_plan, demo });
     try touch(ctx, db, id);
 }
 

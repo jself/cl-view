@@ -1,8 +1,8 @@
 //! Reviewing and trying a ticket: gutter's window on its changes (with the
 //! review guide Claude wrote, kept in the ticket at `done`), whose submitted review goes to the session, and
-//! the test plan Claude gave `cl ticket done --test-plan` (kept in the
-//! ticket): setup steps, one Launch command run in a hidden tmux session, and
-//! checks.
+//! the handoff Claude gave `cl ticket done --test-plan` (kept in the
+//! ticket): what it verified itself, a test plan of steps (commands run in
+//! hidden tmux sessions, pages to open, checks) and an optional demo.
 //!
 //! gutter and launches run in tmux sessions named clg_<key> and clrun_<key>
 //! (and automated reviews in clrv_<key>, autoreview.zig), outside cl's `cl_`
@@ -279,33 +279,67 @@ pub const TestPlan = struct {
 
 /// What `cl ticket testplan --format` prints, and what Claude writes.
 pub const format_help =
-    \\A test plan is markdown that walks the human through trying the change, one
-    \\step at a time, like a wizard. Give it to `cl ticket done <key> --test-plan -`
-    \\on stdin. Each "## " heading is a step, in order. In a step:
+    \\The handoff is markdown given to `cl ticket done <key> --test-plan -` on stdin,
+    \\in up to three sections, each under its own "# " heading:
+    \\
+    \\  # Verified     what you checked yourself, and what you saw
+    \\  # Test plan    only what needs the human
+    \\  # Demo         optional: a guided tour of something new to look at
+    \\
+    \\What goes where:
+    \\
+    \\- Check everything you can yourself before you finish: builds and tests,
+    \\  commands and their output, scripts, API calls (curl), pages in a headless
+    \\  browser, a separate sandbox board. List each in # Verified with what you
+    \\  saw ("- `zig build test`: all 312 pass"). The board shows it read-only, as
+    \\  "Checked by Claude". Never hand the human a step you could run and read.
+    \\- # Test plan is for what you can't do (a real browser or phone, voice, the
+    \\  human's accounts, how it looks or feels) and anything where you want their
+    \\  judgment. Keep the step that starts what they'd try it on. With nothing
+    \\  specific to check, give just that step: the board adds "Works as expected".
+    \\- # Demo, when the change is something they'd want to see (a new feature, new
+    \\  UI, a new command): a few steps with run:/open: buttons and what to look
+    \\  at. It has no checks and never gates anything.
+    \\
+    \\Without any of these headings, the whole document is the test plan.
+    \\
+    \\The test plan and the demo walk the human through, one step at a time, like a
+    \\wizard. Each "## " heading is a step, in order, and everything in them goes in
+    \\a step (text before the first "## " is refused). In a step:
     \\
     \\  run: <command>     a button that runs it from the ticket's directory in the
     \\                     background (a server, a seed script); its output shows
     \\  wait: <url>        shows whether it answers yet (a server that is starting)
     \\  open: <url>        a button that opens the page in the browser
-    \\  - [ ] <check>      what to try and what they should see: Pass or Fail
-    \\  other lines        what to do by hand ("- " and "1. " lists too)
+    \\  - [ ] <check>      test plan only: what to try and what they should see,
+    \\                     Pass or Fail
+    \\  other lines        what to do or look at ("- " and "1. " lists too)
     \\
-    \\Nothing runs or opens until the human presses its button. A step can have
-    \\any of these; the plan needs at least one check. Keep each step one focused
-    \\task. Example:
+    \\Nothing runs or opens until the human presses its button. Keep each step one
+    \\focused task. Example:
     \\
+    \\  # Verified
+    \\  - `npm test`: 48 pass
+    \\  - `curl -s localhost:4321/ | grep -c avif`: 3, the hero's sources
+    \\  - The home page in headless Chromium: the hero is image/avif
+    \\
+    \\  # Test plan
     \\  ## Start the dev server
     \\  run: npm run dev
     \\  wait: http://localhost:4321
     \\
-    \\  ## Log in
-    \\  open: http://localhost:4321/login
-    \\  Sign in as admin@example.com (password in 1Password, "staging admin").
-    \\
-    \\  ## The hero image
+    \\  ## The hero in Safari
     \\  open: http://localhost:4321/
-    \\  - [ ] The hero loads as AVIF (Network tab shows image/avif)
-    \\  - [ ] In Safari it falls back to WebP
+    \\  - [ ] In Safari on the phone it falls back to WebP and looks as sharp
+    \\
+    \\  # Demo
+    \\  ## Start it
+    \\  run: npm run dev
+    \\  wait: http://localhost:4321
+    \\
+    \\  ## The new gallery
+    \\  open: http://localhost:4321/gallery
+    \\  Scroll down: images load as you reach them, with a blurred preview first.
     \\
 ;
 
@@ -489,17 +523,184 @@ test "parseTestPlan: the older Setup, Launch, Checks shape" {
     try std.testing.expectEqualStrings("Safari falls back to WebP", p.steps[2].checks[1]);
 }
 
-/// The ticket's own test plan, kept when its session said done; null for none.
-pub fn readTestPlan(a: std.mem.Allocator, t: board.Ticket) ?TestPlan {
-    if (t.test_plan.len == 0) return null;
-    return parseTestPlan(a, t.test_plan) catch null;
+/// The three parts of a handoff (format_help), trimmed; "" for a part it
+/// doesn't have.
+pub const Handoff = struct {
+    verified: []const u8 = "",
+    test_plan: []const u8 = "",
+    demo: []const u8 = "",
+};
+
+/// Split a handoff at its "# Verified", "# Test plan" (or "# Test", "# Tests")
+/// and "# Demo" headings, any case. Without any of them it is all test plan,
+/// as handoffs were before. Another "# " line stays in the section it is in
+/// (parseTestPlan skips it). Text before the first section goes at the start
+/// of the test plan, and a section given twice is both, one after the other:
+/// nothing is dropped here (`done` refuses text outside a step).
+pub fn splitHandoff(a: std.mem.Allocator, md: []const u8) !Handoff {
+    const Part = enum { verified, test_plan, demo };
+    var parts: [3]std.ArrayList(u8) = .{ .empty, .empty, .empty };
+    var cur: Part = .test_plan;
+    var cur_start: usize = 0;
+    var any = false;
+    var in_code = false;
+    var pos: usize = 0;
+    const add = struct {
+        fn to(al: std.mem.Allocator, buf: *std.ArrayList(u8), text: []const u8) !void {
+            const t = std.mem.trim(u8, text, " \t\r\n");
+            if (t.len == 0) return;
+            if (buf.items.len > 0) try buf.appendSlice(al, "\n\n");
+            try buf.appendSlice(al, t);
+        }
+    }.to;
+    while (pos <= md.len) {
+        const nl = std.mem.indexOfScalarPos(u8, md, pos, '\n') orelse md.len;
+        const line = std.mem.trim(u8, std.mem.trimEnd(u8, md[pos..nl], "\r"), " \t");
+        if (std.mem.startsWith(u8, line, "```")) in_code = !in_code;
+        const part: ?Part = if (in_code or !std.mem.startsWith(u8, line, "# ")) null else blk: {
+            const h = std.mem.trim(u8, line[2..], " #:");
+            if (std.ascii.eqlIgnoreCase(h, "verified")) break :blk .verified;
+            if (std.ascii.eqlIgnoreCase(h, "demo")) break :blk .demo;
+            if (std.ascii.eqlIgnoreCase(h, "test") or std.ascii.eqlIgnoreCase(h, "tests") or std.ascii.eqlIgnoreCase(h, "test plan")) break :blk .test_plan;
+            break :blk null;
+        };
+        if (part) |p| {
+            // Before the first: the test plan's (a "# CL-1: x" title, say).
+            try add(a, &parts[@intFromEnum(cur)], md[cur_start..pos]);
+            any = true;
+            cur = p;
+            cur_start = @min(nl + 1, md.len);
+        }
+        pos = nl + 1;
+    }
+    if (!any) return .{ .test_plan = std.mem.trim(u8, md, " \t\r\n") };
+    try add(a, &parts[@intFromEnum(cur)], md[cur_start..]);
+    return .{ .verified = parts[0].items, .test_plan = parts[1].items, .demo = parts[2].items };
 }
 
-/// `done`, with the test plan Claude gives for something to try: null keeps
-/// the one from an earlier round, "" drops it. The review guide Claude wrote
-/// moves into the ticket (`takeGuide`). A plan without checks is
-/// refused (error.BadTestPlan), as is one during Planning (a plan being
-/// approved has nothing to try yet). `plan`, from a planning session, is
+/// Whether a test plan or demo has text before its first "## " step, which
+/// parseTestPlan would skip (a "# " title is fine).
+pub fn textOutsideSteps(md: []const u8) bool {
+    var it = std.mem.splitScalar(u8, md, '\n');
+    while (it.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (std.mem.startsWith(u8, line, "##")) return false;
+        if (line.len > 0 and line[0] != '#') return true;
+    }
+    return false;
+}
+
+test textOutsideSteps {
+    try std.testing.expect(!textOutsideSteps("# Title\n\n## A\n- [ ] a\nanything after\n"));
+    try std.testing.expect(textOutsideSteps("- [ ] The new tab looks right\n"));
+    try std.testing.expect(textOutsideSteps("Intro\n## A\n- [ ] a\n"));
+    try std.testing.expect(!textOutsideSteps(""));
+}
+
+test splitHandoff {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const h = try splitHandoff(a,
+        \\# Verified
+        \\- `zig build test`: all pass
+        \\
+        \\# test plan
+        \\## Start it
+        \\run: x
+        \\```
+        \\# Demo inside a fence stays put
+        \\```
+        \\# Demo
+        \\## Look
+        \\open: http://localhost:1/
+    );
+    try std.testing.expectEqualStrings("- `zig build test`: all pass", h.verified);
+    try std.testing.expectEqualStrings("## Start it\nrun: x\n```\n# Demo inside a fence stays put\n```", h.test_plan);
+    try std.testing.expectEqualStrings("## Look\nopen: http://localhost:1/", h.demo);
+    // No section headings: all test plan, its "# Title" included.
+    const old = try splitHandoff(a, "# Test plan for CL-1\n## Checks\n- [ ] works\n");
+    try std.testing.expectEqualStrings("# Test plan for CL-1\n## Checks\n- [ ] works", old.test_plan);
+    try std.testing.expectEqualStrings("", old.verified);
+    // "# Tests" counts; a part left out is "".
+    const t = try splitHandoff(a, "# Tests\n## A\n- [ ] a\n");
+    try std.testing.expectEqualStrings("## A\n- [ ] a", t.test_plan);
+    try std.testing.expectEqualStrings("", t.demo);
+    const v = try splitHandoff(a, "# Verified\n- ran it\n");
+    try std.testing.expectEqualStrings("- ran it", v.verified);
+    try std.testing.expectEqualStrings("", v.test_plan);
+    // A preface goes before the test plan; a section given twice keeps both.
+    const twice = try splitHandoff(a, "Intro\n# Verified\n- one\n# Test plan\n## A\n- [ ] a\n# Verified\n- two\n");
+    try std.testing.expectEqualStrings("- one\n\n- two", twice.verified);
+    try std.testing.expectEqualStrings("Intro\n\n## A\n- [ ] a", twice.test_plan);
+}
+
+/// The step the board adds to a test plan with no checks of its own.
+pub const try_it_title = "Try it";
+pub const try_it_check = "Works as expected";
+
+/// The ticket's own test plan, from its session's handoff; null for none.
+/// A plan without checks (only the step that starts the server, or none
+/// beside a Verified list or a demo) ends with "Try it": "Works as expected", so the
+/// human still records that they tried it.
+pub fn ticketTestPlan(a: std.mem.Allocator, t: board.Ticket) ?TestPlan {
+    if (t.test_plan.len == 0 and t.verified.len == 0 and t.demo.len == 0) return null;
+    const p = if (t.test_plan.len > 0) parseTestPlan(a, t.test_plan) catch return null else TestPlan{};
+    if (p.checkCount() > 0) return p;
+    const steps = a.alloc(Step, p.steps.len + 1) catch return null;
+    @memcpy(steps[0..p.steps.len], p.steps);
+    steps[p.steps.len] = .{ .title = try_it_title, .checks = &.{try_it_check} };
+    return .{ .steps = steps };
+}
+
+/// The ticket's demo (the same steps as a test plan, without checks); null
+/// for none.
+pub fn ticketDemo(a: std.mem.Allocator, t: board.Ticket) ?TestPlan {
+    if (t.demo.len == 0) return null;
+    const p = parseTestPlan(a, t.demo) catch return null;
+    return if (p.steps.len > 0) p else null;
+}
+
+test ticketTestPlan {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const tk = struct {
+        fn of(f: anytype) board.Ticket {
+            return std.mem.zeroInit(board.Ticket, f);
+        }
+    }.of;
+    // A plan with checks is as given.
+    const full = ticketTestPlan(a, tk(.{ .test_plan = "## Start\nrun: x\n## Look\n- [ ] it works\n", .verified = "- ran it" })).?;
+    try std.testing.expectEqual(@as(usize, 2), full.steps.len);
+    try std.testing.expectEqualStrings("it works", full.steps[1].checks[0]);
+    // Only the step that starts it: "Try it" follows.
+    const start = ticketTestPlan(a, tk(.{ .test_plan = "## Start\nrun: x\nwait: http://localhost:1\n" })).?;
+    try std.testing.expectEqual(@as(usize, 2), start.steps.len);
+    try std.testing.expectEqualStrings("x", start.steps[0].run);
+    try std.testing.expectEqualStrings(try_it_title, start.steps[1].title);
+    try std.testing.expectEqualStrings(try_it_check, start.steps[1].checks[0]);
+    // Verified alone: just "Try it".
+    const ver = ticketTestPlan(a, tk(.{ .verified = "- ran it" })).?;
+    try std.testing.expectEqual(@as(usize, 1), ver.steps.len);
+    try std.testing.expectEqual(@as(usize, 1), ver.checkCount());
+    // A demo alone: just "Try it" too, so there is still a Test tab.
+    const dem = ticketTestPlan(a, tk(.{ .demo = "## Look\nopen: http://x/\n" })).?;
+    try std.testing.expectEqualStrings(try_it_title, dem.steps[0].title);
+    // Nothing: none.
+    try std.testing.expect(ticketTestPlan(a, tk(.{})) == null);
+    try std.testing.expect(ticketDemo(a, tk(.{})) == null);
+    try std.testing.expectEqualStrings("Look", ticketDemo(a, tk(.{ .demo = "## Look\nopen: http://x/\n" })).?.steps[0].title);
+}
+
+/// `done`, with the handoff Claude gives (format_help: what it verified, the
+/// test plan, a demo): null keeps the one from an earlier round, "" drops
+/// it, and otherwise it replaces all three parts. The review guide Claude
+/// wrote moves into the ticket (`takeGuide`). A handoff with nothing in it
+/// is refused (error.BadTestPlan), as is one during Planning (a plan being
+/// approved has nothing to try yet), and a demo with checks
+/// (error.DemoChecks: they belong in the test plan), and text in the test
+/// plan or demo before its first "## " step (error.TextOutsideSteps). `plan`, from a planning session, is
 /// kept for the session that builds it and shown on the board; outside
 /// Planning it is refused (error.BadPlan).
 pub fn done(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, summary: []const u8, test_plan: ?[]const u8, plan: ?[]const u8) !void {
@@ -511,26 +712,47 @@ pub fn done(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, summa
     }
     if (test_plan) |md| {
         if (t.stage == .planning) return error.BadTestPlan;
-        if (md.len > 0 and (try parseTestPlan(a, md)).checkCount() == 0) return error.BadTestPlan;
-        try board.setTestPlan(ctx, db, t.id, md);
+        const h = try splitHandoff(a, md);
+        if (md.len > 0 and h.verified.len + h.test_plan.len + h.demo.len == 0) return error.BadTestPlan;
+        // parseTestPlan would drop it, a check included, without a word.
+        if (textOutsideSteps(h.test_plan) or textOutsideSteps(h.demo)) return error.TextOutsideSteps;
+        if (h.demo.len > 0 and (try parseTestPlan(a, h.demo)).checkCount() > 0) return error.DemoChecks;
+        try board.setHandoff(ctx, db, t.id, h.verified, h.test_plan, h.demo);
     }
     if (t.stage != .planning) if (ticketDir(db, a, t)) |dir| try takeGuide(ctx, db, a, t, dir) else |_| {};
     try board.done(ctx, db, a, key, summary);
 }
 
-/// clrun_<key>_s<n>: where step `n`'s command runs.
-fn runName(a: std.mem.Allocator, key: []const u8, n: usize) ![]const u8 {
-    return std.fmt.allocPrint(a, "{s}_s{d}", .{ try sessionName(a, "clrun_", key), n });
+/// Which walk-through a launch belongs to: the test plan's steps or the demo's.
+pub const Kind = enum {
+    test_plan,
+    demo,
+
+    fn suffix(k: Kind) []const u8 {
+        return switch (k) {
+            .test_plan => "_s",
+            .demo => "_d",
+        };
+    }
+};
+
+/// clrun_<key>_s<n> (a demo step: _d<n>): where step `n`'s command runs.
+fn runName(a: std.mem.Allocator, key: []const u8, kind: Kind, n: usize) ![]const u8 {
+    return std.fmt.allocPrint(a, "{s}{s}{d}", .{ try sessionName(a, "clrun_", key), kind.suffix(), n });
 }
 
-/// Run step `n`'s command (1-based; null: the first step with one) in its
-/// own tmux session, replacing a previous run of it. Returns the step.
-pub fn launch(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, n: ?usize) !usize {
+/// Run step `n`'s command (1-based; null: the first step with one) of the
+/// test plan or the demo in its own tmux session, replacing a previous run
+/// of it. Returns the step.
+pub fn launch(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, kind: Kind, n: ?usize) !usize {
     const dir = try ticketDir(db, a, t);
-    const plan = readTestPlan(a, t) orelse return error.NoTestPlan;
+    const plan = switch (kind) {
+        .test_plan => ticketTestPlan(a, t) orelse return error.NoTestPlan,
+        .demo => ticketDemo(a, t) orelse return error.NoDemo,
+    };
     const i = plan.runStep(n) orelse return error.NoLaunch;
     const cmd = plan.steps[i - 1].run;
-    const name = try runName(a, t.key, i);
+    const name = try runName(a, t.key, kind, i);
     try killExact(ctx, a, name);
     // `cl ...` steps run this cl, as the session's own would.
     try tmux.runQuiet(ctx, &.{ "new-session", "-d", "-s", name, "-x", "200", "-y", "50", "-c", dir, "-e", try tmux.sessionPathEnv(ctx, a), "--", "sh", "-c", cmd });
@@ -549,9 +771,10 @@ fn killExact(ctx: Ctx, a: std.mem.Allocator, name: []const u8) !void {
     if (tmux.hasSession(ctx, t)) try tmux.runQuiet(ctx, &.{ "kill-session", "-t", t });
 }
 
-/// Stop step `n`'s command, or (null) every one the ticket started.
-pub fn stopLaunch(ctx: Ctx, a: std.mem.Allocator, key: []const u8, n: ?usize) !void {
-    if (n) |i| return killExact(ctx, a, try runName(a, key, i));
+/// Stop step `n`'s command (of the test plan or the demo), or (null) every
+/// one the ticket started, the demo's too.
+pub fn stopLaunch(ctx: Ctx, a: std.mem.Allocator, key: []const u8, kind: Kind, n: ?usize) !void {
+    if (n) |i| return killExact(ctx, a, try runName(a, key, kind, i));
     return stopLaunchesBut(ctx, a, key, null);
 }
 
@@ -561,7 +784,6 @@ pub fn stopLaunch(ctx: Ctx, a: std.mem.Allocator, key: []const u8, n: ?usize) !v
 /// one a minute later.
 pub fn stopLaunchesBut(ctx: Ctx, a: std.mem.Allocator, key: []const u8, spare: ?[]const u8) !void {
     const base = try sessionName(a, "clrun_", key);
-    const prefix = try std.fmt.allocPrint(a, "{s}_s", .{base});
     const names = tmux.run(ctx, &.{ "list-sessions", "-F", "#{session_name}" }) catch return;
     defer ctx.gpa.free(names);
     var it = std.mem.tokenizeScalar(u8, names, '\n');
@@ -572,12 +794,11 @@ pub fn stopLaunchesBut(ctx: Ctx, a: std.mem.Allocator, key: []const u8, spare: ?
             try killExact(ctx, a, name);
             continue;
         }
-        const rest = if (std.mem.startsWith(u8, name, prefix)) name[prefix.len..] else continue;
-        if (rest.len > 0 and std.fmt.parseInt(usize, rest, 10) catch null != null) try killExact(ctx, a, name);
+        if (std.mem.eql(u8, launchBase(name) orelse continue, base)) try killExact(ctx, a, name);
     }
 }
 
-/// The launch sessions (clrun_<key>_s<n>, or an old clrun_<key>) and
+/// The launch sessions (clrun_<key>_s<n>, a demo's _d<n>, or an old clrun_<key>) and
 /// automated reviews (clrv_<key>) of tickets not in `live`: finished or
 /// deleted ones.
 pub fn staleLaunches(ctx: Ctx, a: std.mem.Allocator, live: []const []const u8) ![]const []const u8 {
@@ -601,17 +822,29 @@ pub fn staleLaunches(ctx: Ctx, a: std.mem.Allocator, live: []const []const u8) !
 fn launchKey(name: []const u8) ?[]const u8 {
     if (std.mem.startsWith(u8, name, "clrv_")) return if (name.len > "clrv_".len) name["clrv_".len..] else null;
     if (!std.mem.startsWith(u8, name, "clrun_")) return null;
-    const rest = name["clrun_".len..];
-    if (std.mem.lastIndexOf(u8, rest, "_s")) |i| {
-        if (i + 2 < rest.len and (std.fmt.parseInt(usize, rest[i + 2 ..], 10) catch null) != null) return rest[0..i];
-    }
-    return rest;
+    return (launchBase(name) orelse return name["clrun_".len..])["clrun_".len..];
+}
+
+/// clrun_<key> of a step's session (clrun_<key>_s<n> or _d<n>), else null.
+fn launchBase(name: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, name, "clrun_")) return null;
+    const i = std.mem.lastIndexOfScalar(u8, name, '_') orelse return null;
+    if (i < "clrun_".len) return null;
+    const rest = name[i + 1 ..];
+    if (rest.len < 2 or (rest[0] != 's' and rest[0] != 'd')) return null;
+    _ = std.fmt.parseInt(usize, rest[1..], 10) catch return null;
+    return name[0..i];
 }
 
 test "launchKey" {
     try std.testing.expectEqualStrings("cl-50", launchKey("clrun_cl-50_s1").?);
     try std.testing.expectEqualStrings("cl-50", launchKey("clrun_cl-50_s12").?);
     try std.testing.expectEqualStrings("cl-50", launchKey("clrun_cl-50").?);
+    try std.testing.expectEqualStrings("cl-50", launchKey("clrun_cl-50_d2").?);
+    try std.testing.expectEqualStrings("cl-50_x", launchKey("clrun_cl-50_x").?);
+    try std.testing.expectEqualStrings("clrun_cl-50", launchBase("clrun_cl-50_d1").?);
+    try std.testing.expect(launchBase("clrun_cl-50") == null);
+    try std.testing.expect(launchBase("clrun_cl-50_s") == null);
     try std.testing.expect(launchKey("cl_cl-50_ab12") == null);
     try std.testing.expectEqualStrings("cl-50", launchKey("clrv_cl-50").?);
 }
@@ -629,12 +862,12 @@ pub const LaunchState = struct {
 
 /// Each step's run: its state, or null when it was never started (or was
 /// stopped, or the step has no command).
-pub fn launchStates(ctx: Ctx, a: std.mem.Allocator, key: []const u8, plan: TestPlan) ![]?LaunchState {
+pub fn launchStates(ctx: Ctx, a: std.mem.Allocator, key: []const u8, kind: Kind, plan: TestPlan) ![]?LaunchState {
     const out = try a.alloc(?LaunchState, plan.steps.len);
     for (plan.steps, out, 1..) |st, *o, i| {
         o.* = null;
         if (st.run.len == 0) continue;
-        const name = try exact(a, try runName(a, key, i));
+        const name = try exact(a, try runName(a, key, kind, i));
         if (!tmux.hasSession(ctx, name)) continue;
         const pane = try std.fmt.allocPrint(a, "{s}:", .{name});
         const dead = tmux.run(ctx, &.{ "display", "-p", "-t", pane, "#{pane_dead}" }) catch continue;
@@ -892,8 +1125,9 @@ test "done: each ticket keeps the test plan its own done gave" {
     const two = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Two" });
     const checks = struct {
         fn of(al: std.mem.Allocator, d: board.Db, key: []const u8) ![]const u8 {
-            const p = readTestPlan(al, try board.getTicket(d, al, key)) orelse return "";
-            return p.steps[0].checks[0];
+            const p = ticketTestPlan(al, try board.getTicket(d, al, key)) orelse return "";
+            for (p.steps) |st| if (st.checks.len > 0) return st.checks[0];
+            return "";
         }
     }.of;
 
@@ -908,13 +1142,36 @@ test "done: each ticket keeps the test plan its own done gave" {
     try std.testing.expectEqualStrings("one works", try checks(a, db, one));
     try std.testing.expectEqualStrings("two works", try checks(a, db, two));
 
-    // A later round: no plan keeps it, "" drops it, one without checks is refused.
+    // A later round: no plan keeps it, "" drops it, an empty one or a demo
+    // with checks is refused.
     try done(ctx, db, a, one, "again", null, null);
     try std.testing.expectEqualStrings("one works", try checks(a, db, one));
-    try std.testing.expectError(error.BadTestPlan, done(ctx, db, a, one, "again", "## Setup\n1. x\n", null));
+    try std.testing.expectError(error.BadTestPlan, done(ctx, db, a, one, "again", "# Verified\n\n# Demo\n", null));
+    try std.testing.expectError(error.DemoChecks, done(ctx, db, a, one, "again", "# Demo\n## Look\n- [ ] x\n", null));
+    // Text outside a "## " step would be dropped: refused instead.
+    try std.testing.expectError(error.TextOutsideSteps, done(ctx, db, a, one, "again", "# Verified\n- tests pass\n# Test plan\n- [ ] The new tab looks right\n", null));
+    try std.testing.expectError(error.TextOutsideSteps, done(ctx, db, a, one, "again", "# Demo\nLook at the new tab.\n", null));
     try std.testing.expectEqualStrings("one works", try checks(a, db, one));
     try done(ctx, db, a, one, "again", "", null);
     try std.testing.expectEqualStrings("", try checks(a, db, one));
+
+    // A plan without checks gets "Works as expected"; Verified alone is
+    // accepted and gets just that.
+    try done(ctx, db, a, one, "again", "## Setup\n1. x\n", null);
+    try std.testing.expectEqualStrings(try_it_check, try checks(a, db, one));
+    try done(ctx, db, a, one, "again", "# Verified\n- ran it\n", null);
+    const t1 = try board.getTicket(db, a, one);
+    try std.testing.expectEqualStrings("- ran it", t1.verified);
+    try std.testing.expectEqualStrings("", t1.test_plan);
+    try std.testing.expectEqualStrings(try_it_check, try checks(a, db, one));
+    // All three parts are kept, and a new handoff replaces all three.
+    try done(ctx, db, a, one, "again", "# Verified\n- ran it\n# Test plan\n## A\n- [ ] a\n# Demo\n## Look\nopen: http://x/\n", null);
+    try std.testing.expectEqualStrings("a", try checks(a, db, one));
+    try std.testing.expectEqualStrings("Look", ticketDemo(a, try board.getTicket(db, a, one)).?.steps[0].title);
+    try done(ctx, db, a, one, "again", "## B\n- [ ] b\n", null);
+    const t2 = try board.getTicket(db, a, one);
+    try std.testing.expectEqualStrings("", t2.verified);
+    try std.testing.expectEqualStrings("", t2.demo);
 }
 
 test "done: a planning session's plan is kept and shown; elsewhere it is refused" {

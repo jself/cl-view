@@ -1093,7 +1093,7 @@ pub fn testResults(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8
             o.approved = true;
         }
     }
-    review.stopLaunch(ctx, a, key, null) catch {};
+    review.stopLaunch(ctx, a, key, .test_plan, null) catch {};
     return o;
 }
 

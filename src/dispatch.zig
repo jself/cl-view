@@ -120,10 +120,19 @@ pub fn promptFor(a: std.mem.Allocator, t: board.Ticket, todo: ?board.Ticket, not
         \\     --last is the board's one-line Overview: what you did this round and where that leaves me,
         \\     like "Wrote the first version of the Overview tab; ready for review", "Made the review
         \\     changes; ready for review again" or "Fixed what failed in testing; ready to test again".
-        \\  {d}. If there is something for me to try, add `--test-plan -` and give the plan on stdin
-        \\     (a heredoc, not a file): steps the board walks me through one at a time, with buttons
-        \\     to run a command (`run:`, from this directory) and open a page (`open:`), and checks
-        \\     ("- [ ] what I should see"). `cl ticket testplan --format` shows the format.
+        \\  {d}. If there is something to try, add `--test-plan -` with the handoff on stdin (a heredoc,
+        \\     not a file), in up to three sections (`cl ticket testplan --format` shows the format):
+        \\     - `# Verified`: check everything you can yourself before you finish, and list what you
+        \\       checked and what you saw: builds and tests, commands and their output, scripts, API
+        \\       calls, pages in a headless browser. Don't hand me a step you could run and read yourself.
+        \\     - `# Test plan`: only what needs me: what you can't do (a real browser or phone, voice,
+        \\       my accounts, how it looks or feels) and anything where you want my judgment. Steps the
+        \\       board walks me through, with `run:`/`open:` buttons and checks ("- [ ] what I should
+        \\       see"). Keep the step that starts what I'd try it on; with nothing specific to check,
+        \\       give just that step, and the board adds "Works as expected".
+        \\     - `# Demo` (optional): when the change is something I'd want to see (a new feature, new
+        \\       UI, a new command), a short guided tour with `run:`/`open:` buttons and what to look
+        \\       at. No checks.
         \\{s}  Don't run it while you still need anything from me. When I send feedback, finish the same way.
         \\
     , .{
@@ -704,7 +713,7 @@ fn relocateMode(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator
     }
     review.stopGutter(ctx, a, t.key) catch {};
     autoreview.stop(ctx, db, a, t.key) catch {};
-    review.stopLaunch(ctx, a, t.key, null) catch {};
+    review.stopLaunch(ctx, a, t.key, .test_plan, null) catch {};
     const short = t.change[0..@min(t.change.len, 12)];
     var note: []const u8 = undefined;
     switch (to) {

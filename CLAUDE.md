@@ -39,6 +39,11 @@ tailscale) as what to open. Use any port other than web.listen's. Another
 ticket's test server left on 8422 is fine: the new one stops it before it
 listens (README, `CL_PORT`), so don't add a `fuser -k` step.
 
+That launch command is the first step of `# Test plan`, and of `# Demo` when
+there is one (`cl ticket testplan --format`). Checks a separate sandbox board
+can run (own HOME and `CL_TMUX_SOCKET`, below; `.claude/test-*.sh`) are yours
+to run: put what they showed in `# Verified`, not in the test plan.
+
 ## Sandboxes and tests
 
 A sandbox's tmux is never the real server: set `CL_TMUX_SOCKET` (or `tmux.socket` in the sandbox's config) to an absolute path inside the sandbox, and in scripts pass `tmux -S <socket>` (or `-L <name>`) on every tmux call, `tmux ls` and checks included. Never a bare `tmux kill-server`, and never rely on `TMUX_TMPDIR` alone. Why: when `TMUX_TMPDIR` names a directory that doesn't exist yet, tmux silently uses /tmp, so a sandbox's `kill-server` killed the real server and every cl session with it (twice, 2026-11-05).

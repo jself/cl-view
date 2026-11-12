@@ -115,9 +115,27 @@ Three sources, all local files or tmux:
 ## Test plans
 
 Like the wizard skill, but for trying a change. When there's something to try,
-Claude gives the plan to `cl ticket done <key> --test-plan -` on stdin (the
+Claude gives a handoff to `cl ticket done <key> --test-plan -` on stdin (the
 ticket prompt asks for it; `cl ticket testplan --format` shows the format), and
-the board keeps it in the ticket. Each `## ` heading is a step:
+the board keeps it in the ticket. It has up to three parts, each under a `# `
+heading:
+
+- `# Verified`: what Claude checked by itself and what it saw. Claude runs
+  every check it can (tests, commands, scripts, curl, a headless browser, a
+  sandbox board) instead of handing it to you. Shown read-only at the top of
+  the Test tab ("Checked by Claude") on the first step and on Results.
+- `# Test plan`: only what needs you: what Claude can't do (a real browser or
+  phone, voice, your accounts, how it feels) and where it wants your
+  judgment, plus the step that starts what you'd try it on. Without checks of
+  its own, the board adds a last step, "Try it", with the one check "Works
+  as expected", so testing still happens and approves the usual way.
+- `# Demo` (optional): a guided tour of something new (a feature, UI, a
+  command), in its own Demo tab: the same steps and buttons, no checks, no
+  results, never gating. Its commands run in `clrun_<key>_d<n>` (`cl t launch
+  <key> --demo`).
+
+Without those headings the whole thing is the test plan. In the test plan and
+the demo, each `## ` heading is a step:
 
     ## Start the dev server
     run: npm run dev

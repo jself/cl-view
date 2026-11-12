@@ -194,7 +194,8 @@ pub fn handle(ctx: Ctx, cfg: config.Config, req: *std.http.Server.Request, path:
             error.OperatorFailed => .{ .internal_server_error, "couldn't reach the operator; open Chat to check on it" },
             error.OpenSubtickets => .{ .conflict, "it has sub-tickets that aren't done yet; finish them or spin them off" },
             error.NoTestPlan => .{ .not_found, "no test plan" },
-            error.NoLaunch => .{ .not_found, "the test plan has no launch command" },
+            error.NoDemo => .{ .not_found, "no demo" },
+            error.NoLaunch => .{ .not_found, "that step has no run: command" },
             error.Conflicts => .{ .conflict, "merging it back conflicts (the files are on the ticket); it stays in Testing" },
             error.MergeFailed => .{ .internal_server_error, worktree.lastError() },
             error.SharedSession => .{ .conflict, "another ticket is in progress in its session, so stopping it would cut that one off; move or finish that ticket first, or kill the session for both" },
@@ -256,6 +257,8 @@ const Body = struct {
     note: ?[]const u8 = null,
     /// launch, launch-stop: the test plan step (1-based).
     step: ?usize = null,
+    /// A launch of the demo's step, not the test plan's.
+    demo: ?bool = null,
     name: ?[]const u8 = null,
     dir: ?[]const u8 = null,
     prefix: ?[]const u8 = null,
@@ -742,9 +745,9 @@ fn ticketAction(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator
         web.relayGutter(ctx, cfg, t.key, r.port);
         return ok(req, a, .{ .port = r.port, .draft = @tagName(r.draft) });
     } else if (eql(u8, action, "launch")) {
-        _ = try review.launch(ctx, db, a, try board.getTicket(db, a, key), b.step);
+        _ = try review.launch(ctx, db, a, try board.getTicket(db, a, key), launchKind(b), b.step);
     } else if (eql(u8, action, "launch-stop")) {
-        try review.stopLaunch(ctx, a, key, b.step);
+        try review.stopLaunch(ctx, a, key, launchKind(b), b.step);
     } else if (eql(u8, action, "test-progress")) {
         const json = b.progress orelse return error.BadInput;
         if (json.len > 64 * 1024) return error.BadInput;
@@ -783,6 +786,10 @@ const TicketRow = struct {
     has_plan: bool = false,
 };
 
+fn launchKind(b: Body) review.Kind {
+    return if (b.demo orelse false) .demo else .test_plan;
+}
+
 /// A ticket as the board's columns show it: the long texts only its popup
 /// shows (GET /api/ticket sends them in full) are left out. The board asks
 /// for every ticket, Done ones too, every few seconds: with them, that was
@@ -791,6 +798,8 @@ fn listTicket(a: std.mem.Allocator, t: board.Ticket, ar: ?autoreview.Review) !bo
     var out = t;
     out.review_guide = "";
     out.test_plan = "";
+    out.verified = "";
+    out.demo = "";
     out.test_progress = "";
     out.plan_md = "";
     // A card shows the summary only as what its review flag asks.
@@ -822,7 +831,7 @@ test "listTicket leaves out the popup's texts, not what a card shows" {
     defer arena.deinit();
     const a = arena.allocator();
     var review_flag = [_]board.Flag{.{ .kind = "review", .source = "auto", .detail = "", .at = 0 }};
-    var t = std.mem.zeroInit(board.Ticket, .{ .key = "CL-1", .title = "t", .body = "searchable", .summary = "did it", .plan_md = "# plan", .review_guide = "guide", .test_plan = "plan", .test_progress = "{}" });
+    var t = std.mem.zeroInit(board.Ticket, .{ .key = "CL-1", .title = "t", .body = "searchable", .summary = "did it", .plan_md = "# plan", .review_guide = "guide", .test_plan = "plan", .verified = "ran it", .demo = "## Look", .test_progress = "{}" });
     const r: autoreview.Review = .{ .status = "done", .summary = "long", .edited = "my edit", .findings = &.{ .{ .title = "a", .body = "why" }, .{ .title = "b", .body = "why" } } };
     t.autoreview = try std.fmt.allocPrint(a, "{f}", .{std.json.fmt(r, .{})});
 
@@ -832,6 +841,8 @@ test "listTicket leaves out the popup's texts, not what a card shows" {
     try std.testing.expectEqualStrings("", l.plan_md);
     try std.testing.expectEqualStrings("", l.review_guide);
     try std.testing.expectEqualStrings("", l.test_plan);
+    try std.testing.expectEqualStrings("", l.verified);
+    try std.testing.expectEqualStrings("", l.demo);
     try std.testing.expectEqualStrings("", l.test_progress);
     const back = autoreview.load(a, l).?;
     try std.testing.expectEqualStrings("done", back.status);
@@ -1247,7 +1258,8 @@ fn getTicket(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, r
         if (raw.len > 0) ctx.gpa.free(raw);
     }
     const dir = review.ticketDir(db, a, t) catch "";
-    const plan = review.readTestPlan(a, t);
+    const plan = review.ticketTestPlan(a, t);
+    const demo = review.ticketDemo(a, t);
     const ar = try autoreview.check(ctx, db, a, t);
     // gutter may have been opened elsewhere (cl t gutter): relay it too.
     const gutter_port = try review.gutterPort(ctx, a, t.key);
@@ -1257,8 +1269,10 @@ fn getTicket(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, r
     var relay_buf: [8]u8 = undefined;
     const want_relays = std.mem.eql(u8, web.queryValue(req.head.target, "relay", &relay_buf) orelse "", "1");
     var relays: std.ArrayList(struct { host: []const u8, port: u16 }) = .empty;
-    if (plan != null and want_relays) for (try review.localOrigins(a, plan.?)) |o| {
-        if (web.relayPlan(ctx, t.key, o.host, o.addr)) |port| try relays.append(a, .{ .host = o.host, .port = port });
+    if (want_relays) for ([_]?review.TestPlan{ plan, demo }) |p| if (p) |pl| for (try review.localOrigins(a, pl)) |o| {
+        for (relays.items) |r| {
+            if (std.mem.eql(u8, r.host, o.host)) break;
+        } else if (web.relayPlan(ctx, t.key, o.host, o.addr)) |port| try relays.append(a, .{ .host = o.host, .port = port });
     };
     var ip_buf: [64]u8 = undefined;
     const relay_ip = if (relays.items.len > 0) web.relayIp(ctx, &ip_buf) orelse "" else "";
@@ -1279,8 +1293,13 @@ fn getTicket(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, r
         .guide = review.hasGuide(ctx, db, a, t),
         .test_plan = plan,
         // Per step of the plan: its command's run, and whether its wait URL answers.
-        .launches = if (plan) |p| try review.launchStates(ctx, a, t.key, p) else &.{},
+        .launches = if (plan) |p| try review.launchStates(ctx, a, t.key, .test_plan, p) else &.{},
         .ready = if (plan) |p| try review.waitStates(ctx, a, p) else &.{},
+        // The demo, its runs and waits the same way (ticket.verified is the
+        // Verified list, as markdown).
+        .demo = demo,
+        .demo_launches = if (demo) |p| try review.launchStates(ctx, a, t.key, .demo, p) else &.{},
+        .demo_ready = if (demo) |p| try review.waitStates(ctx, a, p) else &.{},
         .gutter_port = gutter_port,
         .relays = relays.items,
         // Where they listen: the tailscale IP (the board uses its own host name

@@ -409,8 +409,8 @@ web.font_size = 16              # text size of the board and terminal pages, in 
 - In a ticket's test plan walk-through (its Test tab), P and F pass or fail
   the first check of the step that isn't answered yet, N goes to the next
   step, and C puts the cursor in the step's comment box (the note box on the
-  results page). They don't fire while you type in a box; Esc leaves it
-  without closing the ticket.
+  results page). In its Demo tab, N goes to the next step. They don't fire
+  while you type in a box; Esc leaves it without closing the ticket.
 - Attaching from the phone resizes that session to the phone's width
   (`window-size latest`); it switches back when you use it at the desk.
 - `CL_PORT=8422` (or `cl web --port 8422`) replaces the port of every
@@ -1027,12 +1027,32 @@ The first message tells Claude the ticket (with any notes you added before
 it started) and how to finish: write a review guide for gutter
 (`.claude/review-guide.md`, only asked for when gutter is installed; Claude
 checks it with `gutter -open=false`, so no browser tab opens), then `cl ticket done <key> --summary ...`, with
-`--test-plan -` and the plan on stdin if there is something to try: steps
-the Test tab walks you through one at a time, with buttons to run a command
-and open a page, checks to pass or fail and a comment box per step, all
-saved as you go (`cl t testplan --format`). You can send what you have to
+`--test-plan -` and the handoff on stdin if there is something to try
+(`cl t testplan --format`), in up to three sections:
+
+- `# Verified`: what Claude checked by itself (builds, tests, commands and
+  their output, API calls, pages in a headless browser) and what it saw. The
+  Test tab shows it read-only as "Checked by Claude", on the first step and
+  on Results, so you see what is covered without doing it again.
+- `# Test plan`: only what needs you (a real browser or phone, voice, your
+  accounts, how it looks or feels, Claude wanting your judgment): steps the
+  Test tab walks you through one at a time, with buttons to run a command
+  and open a page, checks to pass or fail and a comment box per step, all
+  saved as you go. A plan with no checks of its own (just the step that
+  starts the server, or nothing beside a Verified list) ends with a "Try it"
+  step whose one check is "Works as expected", so you still try it and
+  approve the usual way.
+- `# Demo` (optional): a guided tour of something new to look at, in its own
+  Demo tab after Test: the same steps and buttons, but no checks, nothing to
+  send, and it never gates anything. Its commands run in `clrun_<key>_d<n>`.
+
+A handoff without these headings is all test plan, as before. A new handoff
+replaces all three parts (one it leaves out is dropped); `done` without
+`--test-plan` keeps the last round's, and `--test-plan ""` drops them. A
+demo with checks is refused, and so is text in the test plan or demo before
+its first `## ` step (it would be dropped). You can send what you have to
 Claude from any step: checks you didn't get to go as not tested, and Claude
-is told which steps still need testing. Finishing needs every check passed. The plan is kept in the ticket on the board, not in a file,
+is told which steps still need testing. Finishing needs every check passed. The handoff is kept in the ticket on the board, not in a file,
 so each ticket's Test tab shows only what its own session gave. So is the
 review guide: `done` moves `.claude/review-guide.md` into the ticket (a
 guide older than the ticket's session is someone else's and is dropped), and
@@ -1424,8 +1444,9 @@ tell it goes in its notes.
 cl t gutter QA-1 [--stop]          review the ticket's changes in gutter's window; Submit sends it to Claude
 cl t autoreview QA-1 [--stop]      a second Claude reviews the changes; its findings wait on the ticket for you
 cl t autoreview QA-1 --send        send the findings to the ticket's session (another round)
-cl t testplan QA-1                 Claude's test plan, step by step
+cl t testplan QA-1                 what Claude verified, its test plan step by step, and the demo
 cl t launch QA-1 --step 2          run step 2's run: command (tmux session clrun_qa-1_s2; --stop ends it)
+cl t launch QA-1 --demo --step 1   the demo's step 1 (clrun_qa-1_d1); --stop without --step ends them all
 cl t test QA-1                     walk through the plan here; failures go back to Claude (s at a check stops and sends what you have)
 cl t approve QA-1                  review -> testing -> done
 ```
@@ -1457,7 +1478,7 @@ when everything passed (the board asks).
 
 #### Test plans on the phone
 
-A test plan's links usually name this machine (`http://localhost:4002/`,
+A test plan's (or demo's) links usually name this machine (`http://localhost:4002/`,
 `http://events.localhost:4002/`), which mean nothing on a phone. When the
 board is opened from another host (anything but localhost, 127.x or [::1],
 like `https://<machine>.<tailnet>.ts.net:8443`), each local `http://` app the

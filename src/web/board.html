@@ -435,6 +435,9 @@
   .wiz .results .results { margin-top: calc(6 * var(--u)); padding-left: calc(12 * var(--u)); }
   .wiz .res { display: inline-block; min-width: calc(40 * var(--u)); font-size: calc(12 * var(--u)); color: var(--muted); }
   .wiz .res.pass { color: #86efac; } .wiz .res.fail { color: #fca5a5; }
+  .wiz .verified { border: 1px solid var(--line); border-radius: calc(10 * var(--u)); padding: calc(10 * var(--u)) calc(12 * var(--u)); }
+  .wiz .verified .vh { font-size: calc(12 * var(--u)); margin-bottom: calc(4 * var(--u)); }
+  .wiz .verified .plan > :first-child { margin-top: 0; } .wiz .verified .plan > :last-child { margin-bottom: 0; }
   #toast { position: fixed; left: 50%; bottom: calc(20 * var(--u)); transform: translateX(-50%); background: #2c2e33; color: #fff; padding: calc(10 * var(--u)) calc(16 * var(--u));
            border-radius: calc(10 * var(--u)); display: none; max-width: calc(100vw - calc(32 * var(--u))); z-index: 10;
            /* a popover, so it shows in the top layer over an open dialog; undo the popover defaults */
@@ -625,7 +628,7 @@
     <tr><td><kbd>Esc</kbd></td><td>Leave a text box (it keeps what you typed); again, close the dialog.</td></tr>
     <tr><td><kbd>?</kbd></td><td>This list.</td></tr>
   </table>
-  <p class="muted">Single keys don't fire while you type in a box, and of these only <kbd>s</kbd>, <kbd>Ctrl</kbd>+<kbd>K</kbd> and <kbd>?</kbd> work with a dialog open. Dialogs have their own: <kbd>Ctrl</kbd>+<kbd>Enter</kbd> creates the ticket in New ticket, and in a ticket, <kbd>t</kbd> opens its session's terminal and, in its Test tab, <kbd>p</kbd> <kbd>f</kbd> <kbd>n</kbd> <kbd>c</kbd> walk the test plan.</p></div></dialog>
+  <p class="muted">Single keys don't fire while you type in a box, and of these only <kbd>s</kbd>, <kbd>Ctrl</kbd>+<kbd>K</kbd> and <kbd>?</kbd> work with a dialog open. Dialogs have their own: <kbd>Ctrl</kbd>+<kbd>Enter</kbd> creates the ticket in New ticket, and in a ticket, <kbd>t</kbd> opens its session's terminal and, in its Test tab, <kbd>p</kbd> <kbd>f</kbd> <kbd>n</kbd> <kbd>c</kbd> walk the test plan (and in its Demo tab, <kbd>n</kbd> goes to the next step).</p></div></dialog>
 <div id="toast" role="status" popover="manual"></div>
 <div id="voiceBar" hidden role="status"><div class="txt"><div class="heard" id="voiceHeard"></div><div id="voiceText"></div></div><a id="voiceOpen" href="/?attach=voice" title="Open the voice operator (it runs on voice.model, apart from Chat)" aria-label="Open the voice operator" hidden>&#8599;</a><button type="button" id="voiceReplay" title="Say it again" aria-label="Say it again" hidden>&#8635;</button><button type="button" id="voiceClose" title="Stop and close" aria-label="Stop and close">&times;</button></div>
 
@@ -1490,6 +1493,7 @@ function tabsFor(d) {
   if (t.flags.some((f) => f.kind === "merge-failed" || f.kind === "unmerged")) tabs.push(["landing", "Not merged"]);
   if (t.stage === "review" || d.guide || d.review || d.autoreview) tabs.push(["review", "Review"]);
   if (d.test_plan) tabs.push(["test", "Test"]);
+  if (d.demo) tabs.push(["demo", "Demo"]);
   tabs.push(["comments", `Comments${d.comments.length ? " " + d.comments.length : ""}`]);
   tabs.push(["session", "Session"]);
   if (d.subtickets.length) tabs.push(["subs", `Sub-tickets ${d.subtickets.length}`]);
@@ -1691,6 +1695,7 @@ function tabHtml(d) {
     case "plan": return planTab(d);
     case "review": return reviewTab(d);
     case "test": return testTab(d);
+    case "demo": return demoTab(d);
     case "comments": return commentsTab(d);
     case "session": return `<div class="tail"><div id="tailSlot"></div>
       ${t.tmux && d.status && d.status !== "gone" ? `<a class="maximize" href="${shellHref(t)}" title="Open the shell" aria-label="Open the shell"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 2.5h4v4M6.5 13.5h-4v-4M13.5 2.5l-4.5 4.5M2.5 13.5 7 9"/></svg></a>` : ""}
@@ -1939,22 +1944,14 @@ function testTab(d) {
       return `<li><strong>${si + 1}. ${linkify(st.title, (u) => here(u, d))}</strong><ul class="results">${own.map(([c, ci]) => { const r = state.checks["c" + ci] || {};
         return `<li><span class="res ${r.pass === true ? "pass" : r.pass === false ? "fail" : ""}">${r.pass === true ? "Pass" : r.pass === false ? "Fail" : "Not tested"}</span> ${linkify(c.text, (u) => here(u, d))}${r.note ? ` <span class="muted">— ${esc(r.note)}</span>` : ""}</li>`; }).join("")}
         ${comment ? `<li class="muted">Comment: ${esc(comment)}</li>` : ""}</ul></li>`; }).join("");
-    return `<div class="wiz">${dots}<strong>Results</strong><ul class="results">${rows}</ul>
+    return `<div class="wiz">${dots}${verifiedBox(d)}<strong>Results</strong><ul class="results">${rows}</ul>
       <label class="muted" style="display:flex;flex-direction:column;gap:calc(5 * var(--u));font-size:calc(12.5 * var(--u))">Anything else for Claude<textarea id="testNote" rows="2">${esc(state.checks.note || "")}</textarea></label>
       <div class="actions" id="submitRow">${submitButtons(d, all)}</div>${nav}<span class="keys muted">Keys: <kbd>c</kbd> comment</span></div>`;
   }
-  const st = p.steps[at]; const l = d.launches?.[at]; const ready = d.ready?.[at];
+  const st = p.steps[at];
   let ci = all.findIndex((c) => c.si === at);
-  return `<div class="wiz">${dots}
-    <div class="muted" style="font-size:calc(12 * var(--u))">Step ${at + 1} of ${n}</div><strong style="font-size:calc(16 * var(--u))">${linkify(st.title, (u) => here(u, d))}</strong>
-    ${st.do.length ? `<div class="do">${st.do.map((x) => `<p>${linkify(x, (u) => here(u, d))}</p>`).join("")}</div>` : ""}
-    ${st.run ? `<div><pre class="term">${esc(st.run)}</pre>
-      <div class="actions" style="margin-top:calc(8 * var(--u));align-items:center"><button type="button" class="btn primary" data-launch="${at + 1}">${l ? "Restart" : "Run"}</button>${l ? `<button type="button" class="btn" data-launch-stop="${at + 1}">Stop</button>` : ""}
-      ${l ? `<span class="muted">${l.running ? "Running" : "Exited"}</span>` : ""}</div>
-      ${l ? `<div class="tail" style="margin-top:calc(8 * var(--u))"><pre class="term runout" data-follow="${esc(d.ticket.key)}:${at}">${esc(l.output || "(no output yet)")}</pre>
-        <button type="button" class="tobottom" data-run-bottom="${esc(d.ticket.key)}:${at}" ${runUnfollowed[d.ticket.key + ":" + at] ? "" : "hidden"}>Scroll to bottom ↓</button></div>` : ""}</div>` : ""}
-    ${st.wait ? `<p class="wait ${ready ? "up" : ""}">${ready === true ? "✓ Answering" : ready === false ? "… Not answering yet" : "Waits for"}: ${linkify(st.wait, (u) => here(u, d))}</p>` : ""}
-    ${st.open.length ? `<div class="actions">${st.open.map((u) => here(u, d)).map((u) => `<a class="btn" href="${esc(u)}" target="_blank" rel="noopener">Open ${esc(u.replace(/^https?:\/\//, ""))} ↗</a>`).join("")}</div>` : ""}
+  return `<div class="wiz">${dots}${at === 0 ? verifiedBox(d) : ""}
+    ${stepBody(d, p, at, false)}
     ${st.checks.length ? `<div style="display:flex;flex-direction:column;gap:calc(8 * var(--u))">${st.checks.map((c) => { const i = ci++; const r = state.checks["c" + i] || {};
       return `<div class="check"><span>${linkify(c, (u) => here(u, d))}</span><div class="pf"><button type="button" class="btn pass ${r.pass === true ? "on" : ""}" data-check="${i}" data-pass="1">Pass</button>
         <button type="button" class="btn fail ${r.pass === false ? "on" : ""}" data-check="${i}" data-pass="0">Fail</button></div>
@@ -1963,6 +1960,42 @@ function testTab(d) {
     ${nav}
     <div class="actions" style="justify-content:space-between;align-items:center"><span class="keys muted">Keys: <kbd>p</kbd> pass · <kbd>f</kbd> fail · <kbd>n</kbd> next · <kbd>c</kbd> comment</span>
       <button type="button" class="btn" id="sendResults" data-send="1" title="Checks you haven't marked go as not tested">Send what I have to Claude</button></div></div>`;
+}
+// What Claude checked by itself before handing it over (the handoff's
+// # Verified), read-only: on the first step and on Results, so what is
+// covered is in view before trying it and when sending the results.
+function verifiedBox(d) {
+  const md = (d.ticket.verified || "").trim();
+  return md ? `<div class="verified"><div class="muted vh">Checked by Claude</div><div class="plan">${mdHtml(md)}</div></div>` : "";
+}
+// One step of the test plan or the demo: its title, what to do, its command
+// (Run, Restart, Stop and its output), what it waits for and pages to open.
+function stepBody(d, p, at, demo) {
+  const n = p.steps.length; const st = p.steps[at];
+  const l = (demo ? d.demo_launches : d.launches)?.[at]; const ready = (demo ? d.demo_ready : d.ready)?.[at];
+  const fk = d.ticket.key + (demo ? ":d:" : ":") + at; const dm = demo ? ` data-demo="1"` : "";
+  return `<div class="muted" style="font-size:calc(12 * var(--u))">Step ${at + 1} of ${n}</div><strong style="font-size:calc(16 * var(--u))">${linkify(st.title, (u) => here(u, d))}</strong>
+    ${st.do.length ? `<div class="do">${st.do.map((x) => `<p>${linkify(x, (u) => here(u, d))}</p>`).join("")}</div>` : ""}
+    ${st.run ? `<div><pre class="term">${esc(st.run)}</pre>
+      <div class="actions" style="margin-top:calc(8 * var(--u));align-items:center"><button type="button" class="btn primary" data-launch="${at + 1}"${dm}>${l ? "Restart" : "Run"}</button>${l ? `<button type="button" class="btn" data-launch-stop="${at + 1}"${dm}>Stop</button>` : ""}
+      ${l ? `<span class="muted">${l.running ? "Running" : "Exited"}</span>` : ""}</div>
+      ${l ? `<div class="tail" style="margin-top:calc(8 * var(--u))"><pre class="term runout" data-follow="${esc(fk)}">${esc(l.output || "(no output yet)")}</pre>
+        <button type="button" class="tobottom" data-run-bottom="${esc(fk)}" ${runUnfollowed[fk] ? "" : "hidden"}>Scroll to bottom ↓</button></div>` : ""}</div>` : ""}
+    ${st.wait ? `<p class="wait ${ready ? "up" : ""}">${ready === true ? "✓ Answering" : ready === false ? "… Not answering yet" : "Waits for"}: ${linkify(st.wait, (u) => here(u, d))}</p>` : ""}
+    ${st.open.length ? `<div class="actions">${st.open.map((u) => here(u, d)).map((u) => `<a class="btn" href="${esc(u)}" target="_blank" rel="noopener">Open ${esc(u.replace(/^https?:\/\//, ""))} ↗</a>`).join("")}</div>` : ""}`;
+}
+// The demo: a guided look at what changed, step by step like the test plan
+// but with nothing to pass or fail and nothing to send. Where you are in it
+// is kept only in this page.
+const demoAt = {};
+function demoTab(d) {
+  const p = d.demo; const n = p.steps.length; const key = d.ticket.key;
+  const at = Math.min(demoAt[key] || 0, n - 1);
+  const dots = `<div class="steps">${p.steps.map((st, i) => `<button type="button" class="dot ${i === at ? "at" : ""}" data-demo-go="${i}" title="${esc(st.title)}">${i + 1}</button>`).join("")}</div>`;
+  const nav = `<div class="actions" style="justify-content:space-between">
+    <button type="button" class="btn" data-demo-go="${at - 1}" ${at === 0 ? "disabled" : ""}>Back</button>
+    ${at < n - 1 ? `<button type="button" class="btn primary" data-demo-go="${at + 1}">Next</button>` : ""}</div>`;
+  return `<div class="wiz">${dots}${stepBody(d, p, at, true)}${nav}<span class="keys muted">Keys: <kbd>n</kbd> next</span></div>`;
 }
 // What Submit does: anything failed or not tested goes to Claude; everything passed with
 // comments lets you choose; everything passed and nothing to say approves a
@@ -2655,8 +2688,10 @@ async function onClick(e) {
     if (c.pass === pass) { delete c.pass; delete c.note; } else c.pass = pass;
     state.checks["c" + ds.check] = c; saveProgress(); renderDetail(); return; }
   if (ds.stepGo !== undefined) { state.checks.step = Math.max(0, +ds.stepGo); saveProgress(); renderDetail(); document.getElementById("ticketDlg").scrollTop = 0; return; }
-  if (ds.launch) { setRunFollow(key + ":" + (+ds.launch - 1), true); return act(key, "launch", { step: +ds.launch }, "Started"); }
-  if (ds.launchStop) return act(key, "launch-stop", { step: +ds.launchStop }, "Stopped");
+  if (ds.demoGo !== undefined) { demoAt[key] = Math.max(0, +ds.demoGo); renderDetail(); document.getElementById("ticketDlg").scrollTop = 0; return; }
+  if (ds.launch) { const demo = ds.demo === "1"; setRunFollow(key + (demo ? ":d:" : ":") + (+ds.launch - 1), true);
+    return act(key, "launch", demo ? { step: +ds.launch, demo } : { step: +ds.launch }, "Started"); }
+  if (ds.launchStop) return act(key, "launch-stop", ds.demo === "1" ? { step: +ds.launchStop, demo: true } : { step: +ds.launchStop }, "Stopped");
   if (ds.act === "gutter") {
     try { const r = await act(key, "gutter"); toast("gutter's window is open"); } catch {}
     return;
@@ -2999,13 +3034,20 @@ document.addEventListener("keydown", (e) => {
 // Not while typing: Esc leaves a box there without closing the ticket.
 document.addEventListener("keydown", (e) => {
   const dlg = document.getElementById("ticketDlg");
-  if (!dlg.open || state.tab !== "test" || !state.detail?.test_plan) return;
+  const demo = state.tab === "demo" && state.detail?.demo;
+  if (!dlg.open || !demo && (state.tab !== "test" || !state.detail?.test_plan)) return;
   if (document.querySelectorAll("dialog[open]").length > 1) return;
   const t = e.target; const typing = t.isContentEditable || t.closest?.("input, textarea, select");
   if (e.key === "Escape" && typing && t.closest(".wiz")) { e.preventDefault(); t.blur(); return; }
   if (typing || e.ctrlKey || e.metaKey || e.altKey || e.isComposing || e.repeat) return;
   const wiz = dlg.querySelector(".wiz"); if (!wiz) return;
   const k = e.key.toLowerCase();
+  // In the demo, N is all there is: the next step.
+  if (demo) {
+    const next = k === "n" && wiz.querySelector(`.actions .btn.primary[data-demo-go]`);
+    if (next) { e.preventDefault(); next.click(); }
+    return;
+  }
   if (k === "p" || k === "f") {
     const open = [...wiz.querySelectorAll(".check")].find((c) => !c.querySelector(".pf .btn.on"));
     if (!open) return;

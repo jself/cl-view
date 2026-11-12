@@ -207,11 +207,13 @@ pub const ticket_usage =
     \\  autoreview <key> --findings -
     \\                              by hand, for a running review: take these findings (JSON on
     \\                              stdin, as the reviewer writes them) as its result
-    \\  testplan <key> [--json]     the test plan Claude gave: its steps, in order
+    \\  testplan <key> [--json]     what Claude handed over: what it verified, the test plan's
+    \\                              steps in order, and the demo's
     \\  testplan --format           how to write one (for Claude)
-    \\  launch <key> [--step <n>] [--stop]
+    \\  launch <key> [--demo] [--step <n>] [--stop]
     \\                              run a step's run: command (the first one by default) in tmux
-    \\                              session clrun_<key>_s<n>; --stop: that step's, or all
+    \\                              session clrun_<key>_s<n> (a demo step's: _d<n>); --stop: that
+    \\                              step's, or all, the demo's too
     \\  test <key>                  walk through the test plan here; failures go back to Claude; s at a check stops and sends what you have
     \\  relocate <key> worktree|queue
     \\                              move it to a worktree of its own, or back to the queue; one
@@ -243,9 +245,10 @@ pub const ticket_usage =
     \\                              leaves you ("Made the review changes; ready for review
     \\                              again"); without it, the summary
     \\                              Refused for a todo: it's yours (move it to done)
-    \\                              --test-plan (- reads stdin): what to try, kept in the ticket
-    \\                              (steps; `testplan --format`); without it an
-    \\                              earlier round's stays, "" drops it
+    \\                              --test-plan (- reads stdin): the handoff, kept in the ticket:
+    \\                              # Verified (what Claude checked itself), # Test plan (only
+    \\                              what needs you) and # Demo (optional tour); `testplan
+    \\                              --format`. Without it an earlier round's stays, "" drops it
     \\  done [<key>] --summary <text> --plan
     \\                              Claude, planning: the plan is ready for approval; the plan
     \\                              (markdown on stdin) is what the session that builds it gets
@@ -1073,10 +1076,12 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         if (t0.stage == .planning and !args.has("--plan")) fail("{s} is in planning: give the plan as markdown on stdin with --plan (a heredoc); the session that builds it sees only that", .{t0.key});
         if (t0.stage != .planning and args.has("--plan")) fail("--plan is for a ticket in planning; {s} is in {s}", .{ t0.key, @tagName(t0.stage) });
         var test_plan = args.get("--test-plan");
-        if (test_plan != null and std.mem.eql(u8, test_plan.?, "-")) test_plan = readStdin(ctx, a, "the test plan");
+        if (test_plan != null and std.mem.eql(u8, test_plan.?, "-")) test_plan = readStdin(ctx, a, "the handoff");
         const plan = if (args.has("--plan")) readStdin(ctx, a, "the plan") else null;
         review.done(ctx, db, a, key, args.get("--summary") orelse "", test_plan, plan) catch |e| switch (e) {
-            error.BadTestPlan => fail("{s}", .{if (t0.stage == .planning) "a plan being approved has no test plan yet" else "the test plan needs at least one \"- [ ] ...\" check (cl ticket testplan --format)"}),
+            error.BadTestPlan => fail("{s}", .{if (t0.stage == .planning) "a plan being approved has no test plan yet" else "the handoff is empty: give # Verified, # Test plan or # Demo (cl ticket testplan --format), or --test-plan \"\" to drop it"}),
+            error.TextOutsideSteps => fail("text under # Test plan or # Demo before its first \"## \" step would be dropped: put it in a step (\"## <title>\", then its lines; cl ticket testplan --format)", .{}),
+            error.DemoChecks => fail("a demo has no checks (\"- [ ] ...\"); put them in # Test plan (cl ticket testplan --format)", .{}),
             error.BadPlan => fail("the plan on stdin is empty", .{}),
             else => boardFail(db, e, "ticket"),
         };
@@ -1419,25 +1424,33 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         if (args.has("--format")) return out(review.format_help);
         const key = keyArg(pos, 0, env_key, "cl ticket testplan <key> [--json] | --format");
         const t = board.getTicket(db, a, key) catch |e| boardFail(db, e, "ticket");
-        const plan = review.readTestPlan(a, t) orelse fail("{s} has no test plan", .{t.key});
-        if (args.has("--json")) return out(try std.fmt.allocPrint(a, "{f}\n", .{std.json.fmt(plan, .{})}));
+        const plan = review.ticketTestPlan(a, t) orelse fail("{s} has no test plan", .{t.key});
+        const demo = review.ticketDemo(a, t);
+        if (args.has("--json")) return out(try std.fmt.allocPrint(a, "{f}\n", .{std.json.fmt(.{ .verified = t.verified, .steps = plan.steps, .demo = if (demo) |d| d.steps else &.{} }, .{})}));
         var aw: std.Io.Writer.Allocating = .init(a);
+        try printVerified(&aw.writer, t.verified);
         for (plan.steps, 1..) |st, i| try printStep(&aw.writer, st, i, plan.steps.len);
+        if (demo) |d| {
+            try aw.writer.writeAll("\nDemo\n");
+            for (d.steps, 1..) |st, i| try printStep(&aw.writer, st, i, d.steps.len);
+        }
         return out(aw.writer.buffered());
     }
     if (std.mem.eql(u8, cmd, "launch")) {
-        args.only(&.{ "--stop", "--step" }, ticket_usage);
-        if (pos.len != 1) fail("usage: cl ticket launch <key> [--step <n>] [--stop]", .{});
+        args.only(&.{ "--stop", "--step", "--demo" }, ticket_usage);
+        if (pos.len != 1) fail("usage: cl ticket launch <key> [--demo] [--step <n>] [--stop]", .{});
         const t = board.getTicket(db, a, pos[0]) catch |e| boardFail(db, e, "ticket");
         const step: ?usize = if (args.get("--step")) |v| std.fmt.parseInt(usize, v, 10) catch fail("--step takes a step number", .{}) else null;
-        if (args.has("--stop")) return review.stopLaunch(ctx, a, t.key, step);
-        const i = review.launch(ctx, db, a, t, step) catch |e| switch (e) {
+        const kind: review.Kind = if (args.has("--demo")) .demo else .test_plan;
+        if (args.has("--stop")) return review.stopLaunch(ctx, a, t.key, kind, step);
+        const i = review.launch(ctx, db, a, t, kind, step) catch |e| switch (e) {
             error.NoTestPlan => fail("{s} has no test plan", .{t.key}),
-            error.NoLaunch => fail("{s}", .{if (step != null) "that step has no run: command" else "the test plan has no run: command"}),
+            error.NoDemo => fail("{s} has no demo", .{t.key}),
+            error.NoLaunch => fail("{s}", .{if (step != null) "that step has no run: command" else if (kind == .demo) "the demo has no run: command" else "the test plan has no run: command"}),
             else => boardFail(db, e, "ticket"),
         };
-        const name = try std.ascii.allocLowerString(a, t.key);
-        return out(try std.fmt.allocPrint(a, "step {d} running in tmux session clrun_{s}_s{d} (tmux attach -t clrun_{s}_s{d})\n", .{ i, name, i, name, i }));
+        const name = try std.fmt.allocPrint(a, "clrun_{s}_{s}{d}", .{ try std.ascii.allocLowerString(a, t.key), if (kind == .demo) "d" else "s", i });
+        return out(try std.fmt.allocPrint(a, "step {d} running in tmux session {s} (tmux attach -t {s})\n", .{ i, name, name }));
     }
     if (std.mem.eql(u8, cmd, "test")) {
         args.only(&.{}, ticket_usage);
@@ -1482,7 +1495,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
 /// `cl t test`: the test plan as a walk-through in the terminal.
 fn walkTest(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8) !void {
     const t = board.getTicket(db, a, key) catch |e| boardFail(db, e, "ticket");
-    const plan = review.readTestPlan(a, t) orelse fail("{s} has no test plan", .{t.key});
+    const plan = review.ticketTestPlan(a, t) orelse fail("{s} has no test plan", .{t.key});
     var in_buf: [4096]u8 = undefined;
     var in = std.Io.File.stdin().reader(ctx.io, &in_buf);
     const ask = struct {
@@ -1497,6 +1510,12 @@ fn walkTest(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8) !void
         }
     };
     try out(try std.fmt.allocPrint(a, "Testing {s}: {s}\n", .{ t.key, t.title }));
+    if (t.verified.len > 0) {
+        var vw: std.Io.Writer.Allocating = .init(a);
+        try vw.writer.writeAll("\n");
+        try printVerified(&vw.writer, t.verified);
+        try out(vw.writer.buffered());
+    }
     var results: std.ArrayList(review.StepResult) = .empty;
     const yes = struct {
         fn of(s: []const u8) bool {
@@ -1518,7 +1537,7 @@ fn walkTest(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8) !void
         try out(aw.writer.buffered());
         // Like the board's buttons: nothing runs or opens without a yes.
         if (st.run.len > 0 and yes(try ask.line(&in, a, "  Run it? [Y/n] "))) {
-            _ = review.launch(ctx, db, a, t, i) catch |e| fail("launch failed: {s}", .{@errorName(e)});
+            _ = review.launch(ctx, db, a, t, .test_plan, i) catch |e| fail("launch failed: {s}", .{@errorName(e)});
             const name = try std.ascii.allocLowerString(a, t.key);
             try out(try std.fmt.allocPrint(a, "  running in tmux session clrun_{s}_s{d}\n", .{ name, i }));
         }
@@ -1569,6 +1588,15 @@ fn walkTest(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8) !void
         "\nAll passed: Claude is finishing it; it goes to done when that's through.\n"
     else
         "\nAll passed: the ticket is done.\n");
+}
+
+/// What Claude verified itself, before the steps: `cl t testplan` and `cl t test`.
+fn printVerified(w: *std.Io.Writer, md: []const u8) !void {
+    if (md.len == 0) return;
+    try w.writeAll("Checked by Claude:\n");
+    var it = std.mem.splitScalar(u8, md, '\n');
+    while (it.next()) |l| try w.print("  {s}\n", .{std.mem.trimEnd(u8, l, "\r")});
+    try w.writeAll("\n");
 }
 
 /// A test plan step as text: `cl t testplan` and `cl t test`.
