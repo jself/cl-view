@@ -871,11 +871,27 @@ cl t show QA-1 [--json]          details, flags, comments and activity
 cl t edit QA-1 --title ... | move QA-1 testing | rm QA-1
 cl t comment QA-1 "also cover logout" --send
 cl t flag QA-1 needs-design "which layout?" | unflag QA-1 needs-design
-cl t done QA-1 --summary "Fixed the race"
+cl t overview QA-1 --last "In progress: the retry" --next "A test for it"
+cl t done QA-1 --last "Fixed the race; ready for review" --summary "Retry the lock once on EBUSY"
 ```
 
 - `done` is how Claude says a ticket is finished and needs nothing more: it
   moves to review with the `review` flag, and the summary becomes a comment.
+- `overview` sets the ticket's Overview, the board ticket view's first tab: a
+  sentence on what was done last (or "In progress: ..."), one on what comes
+  next, and its state (stage, session and whatever waits on you, which cl
+  works out itself). Its session (building, planning or resumed; not a
+  todo's) is told to keep it current as it goes. `done --last` hands in
+  Last as Claude finishes: what it did this round and where that leaves you
+  ("Made the review changes; ready for review again"), separate from the
+  longer `--summary`, which only stands in for it when `--last` is left out.
+  `done` also clears Next. Claude's Next shows only while it's Claude's turn
+  (Running or Planning with nothing asking you); otherwise, or with no Next
+  from Claude, the board says what's next from the stage and flags (answer
+  it, read the plan, review it, try it). Without `--last` or `--next` it
+  prints them; `show` has them too. A ticket opens on its Overview unless
+  something asks you for an answer now (a question, a plan ready to approve,
+  a failed merge), which opens on that tab instead.
 - `comment --send` also types the comment into the ticket's session. On a
   ticket in review or testing it means "not done yet": the ticket goes back
   to running and its round goes up. Without `--send` a comment is a note.

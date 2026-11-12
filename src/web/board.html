@@ -337,6 +337,12 @@
   .tabs { display: flex; gap: calc(18 * var(--u)); border-bottom: 1px solid var(--line); overflow-x: auto; }
   .tabs button { min-height: calc(40 * var(--u)); padding: 0 calc(2 * var(--u)); border: 0; border-bottom: calc(2 * var(--u)) solid transparent; background: none; color: var(--muted); cursor: pointer; white-space: nowrap; }
   .tabs button.on { color: #fff; border-bottom-color: #7fb2ff; }
+  /* The Overview: a label and a sentence a line. */
+  .ov { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: calc(8 * var(--u)) calc(14 * var(--u)); margin: 0; font-size: calc(15 * var(--u)); line-height: 1.45; }
+  .ov dt { color: var(--muted); font-size: calc(12.5 * var(--u)); padding-top: calc(2 * var(--u)); }
+  .ov dd { margin: 0; overflow-wrap: anywhere; }
+  .ov .who { color: var(--muted); font-size: calc(12 * var(--u)); }
+  .ov .status { display: inline-flex; }
   pre.term { margin: 0; background: #0b0b0c; border: 1px solid var(--line2); border-radius: calc(10 * var(--u)); padding: calc(10 * var(--u)) calc(12 * var(--u)); font: calc(12 * var(--u))/1.5 var(--mono);
              white-space: pre-wrap; overflow-wrap: anywhere; max-height: 50vh; overflow-y: auto; }
   .tail { position: relative; }
@@ -393,6 +399,8 @@
   .plan pre { white-space: pre-wrap; background: var(--line2); padding: calc(8 * var(--u)); border-radius: calc(6 * var(--u)); margin: 0 0 calc(8 * var(--u)); }
   .plan pre code { background: none; padding: 0; }
   .desc { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 30vh; overflow-y: auto; padding-bottom: calc(12 * var(--u)); margin-bottom: calc(12 * var(--u)); border-bottom: 1px solid var(--line2); }
+  /* Under the Overview's lines. */
+  .desc.below { margin: calc(14 * var(--u)) 0 0; padding: calc(12 * var(--u)) 0 0; border-bottom: 0; border-top: 1px solid var(--line2); }
   .form { display: grid; gap: calc(12 * var(--u)); }
   /* Images pasted into a description: thumbnails that open full size. */
   .thumb { display: inline-block; vertical-align: top; padding: 0; margin: calc(4 * var(--u)) calc(4 * var(--u)) calc(4 * var(--u)) 0; border: 1px solid var(--line2);
@@ -1474,7 +1482,7 @@ const planReady = (t) => t.stage === "planning" && (hasPlan(t) || t.flags.some((
 // The ticket's approve button (the ticket view's bar, Ctrl+K's actions): its label, or "" for none.
 const approveLabel = (t) => planReady(t) ? (emptyUmbrella(t) ? "" : "Approve plan") : t.stage === "review" ? "Approve, to testing" : t.stage === "testing" && !t.finishing ? "Tested, done" : "";
 function tabsFor(d) {
-  const t = d.ticket; const tabs = [];
+  const t = d.ticket; const tabs = [["overview", "Overview"]];
   if (t.flags.some((f) => f.kind === "question" || f.kind === "input")) tabs.push(["needs", "Needs you"]);
   if (hasPlan(t) || planReady(t)) tabs.push(["plan", "Plan"]);
   if (t.flags.some((f) => f.kind === "after-merge")) tabs.push(["after-merge", "After merge"]);
@@ -1522,10 +1530,16 @@ function setRunFollow(k, follow) {
   if (follow) delete runUnfollowed[k]; else runUnfollowed[k] = true;
   for (const b of document.querySelectorAll("[data-run-bottom]")) if (b.dataset.runBottom === k) b.hidden = follow;
 }
+// The tab a ticket opens on: one where something asks for an answer now (a question or
+// prompt, a plan ready to approve, a failed merge or after-merge run), else the Overview.
+// A kept plan, or a flag that's hidden or doesn't ask now (a parked ticket's), doesn't count.
+const ASKING_TABS = ["needs", "plan", "after-merge", "landing"];
+const askingTab = (t) => t.flags.filter((f) => !f.hidden && asksNow(t, f)).map(flagTab)
+  .find((k) => ASKING_TABS.includes(k) && (k !== "plan" || planReady(t))) || "overview";
 function renderDetailInner() {
   if (state.focus) return renderFocus();
   const d = state.detail; const t = d.ticket; const tabs = tabsFor(d);
-  if (!state.tab || !tabs.some(([k]) => k === state.tab)) state.tab = tabs[0][0];
+  if (!state.tab || !tabs.some(([k]) => k === state.tab)) { const k = askingTab(t); state.tab = tabs.some(([x]) => x === k) ? k : "overview"; }
   const liveSession = t.tmux && d.status && d.status !== "gone";
   const approve = approveLabel(t);
   // The bar holds the ticket's next steps; Open shell is the icon by its status, and the rest are in the ⋯ menu.
@@ -1586,7 +1600,7 @@ function renderDetailInner() {
       ${t.round > 1 ? `<span>round ${t.round}</span>` : ""}${planFact(t)}${parent}</div>
     ${acts.length ? `<div class="actions">${acts.join("")}</div>` : ""}${parkBox(t)}${driftBox(t, liveSession)}${depBox(d)}
     <div class="tabs" role="tablist">${tabs.map(([k, l]) => `<button type="button" role="tab" class="${state.tab === k ? "on" : ""}" aria-selected="${state.tab === k}" data-tab="${k}">${esc(l)}</button>`).join("")}</div>
-    <div id="tabBody">${state.tab === tabs[0][0] && (t.body || "").trim() ? `<div class="desc">${descHtml(t.body)}</div>` : ""}${tabHtml(d)}</div>`;
+    <div id="tabBody">${tabHtml(d)}${state.tab === "overview" && (t.body || "").trim() ? `<div class="desc below">${descHtml(t.body)}</div>` : ""}</div>`;
 }
 // ---- the compact view ----
 // A tapped notification opens just its item (/board?open=CL-3&tab=plan&focus=1):
@@ -1670,6 +1684,7 @@ function parkBox(t) {
 function tabHtml(d) {
   const t = d.ticket;
   switch (state.tab) {
+    case "overview": return overviewTab(d);
     case "needs": return needsTab(d);
     case "plan": return planTab(d);
     case "review": return reviewTab(d);
@@ -1686,6 +1701,44 @@ function tabHtml(d) {
     case "details": return detailsTab(d);
     case "after-merge": return afterMergeTab(d);
     case "landing": return landingTab(d);
+  }
+  return "";
+}
+// The Overview: what was done last (or what's in progress), what comes next, and where it
+// stands, a sentence each. Last and Next are Claude's (`cl ticket overview`; done puts its
+// summary in Last and clears Next); without a Next of Claude's, it's worked out from the
+// stage and flags, as State always is.
+function overviewTab(d) {
+  const t = d.ticket; const last = t.overview_last || t.summary; const mine = t.overview_next;
+  const since = t.overview_at ? (ago(t.overview_at) === "now" ? "just now" : ago(t.overview_at) + " ago") : "";
+  const asking = t.flags.filter((f) => asksNow(t, f) && !f.hidden).map((f) => askLine(t, f));
+  const stat = statusHtml({ ticket: t, status: d.status });
+  const now = [stageBadge(t.stage), stat, ...asking.map(esc)].filter(Boolean).join(" · ");
+  // Claude's Next only while it's Claude's turn; what waits on you comes first, and it can't go stale past a stage change.
+  const next = claudesTurn(t) && mine ? mine : nextStep(d);
+  return `<dl class="ov">
+    <dt>Last</dt><dd>${last ? esc(last) : `<span class="muted">Nothing yet</span>`}${last && since && t.overview_last ? ` <span class="who">· ${since}</span>` : ""}</dd>
+    <dt>Next</dt><dd>${next ? esc(next) : `<span class="muted">Nothing said</span>`}${next && next !== mine ? ` <span class="who" title="Worked out from its stage and flags, not said by Claude">· from its stage</span>` : ""}</dd>
+    <dt>State</dt><dd>${now}</dd></dl>`;
+}
+// Claude is the one working on it: Running or Planning, with nothing asking you, no park and no finish.
+const claudesTurn = (t) => ["running", "planning"].includes(t.stage) && !t.park && !t.finishing && !planReady(t) && !t.flags.some((f) => !f.hidden && asksNow(t, f));
+// What comes next when it isn't Claude's turn or Claude hasn't said: whoever it waits on, and for what.
+function nextStep(d) {
+  const t = d.ticket; const asks = (k) => t.flags.some((f) => f.kind === k && asksNow(t, f));
+  if (t.todo) return t.stage === "done" ? "" : t.park ? "Waiting on: " + t.park.reason : "";
+  if (asks("question") || asks("input")) return "You: answer Claude (Needs you tab)";
+  if (asks("idle") && ["running", "planning"].includes(t.stage)) return "You: Claude is idle at its prompt; tell it what's next (Session tab)";
+  if (t.park) return "Waits on: " + t.park.reason;
+  if (t.finishing) return t.finishing === "merge" ? "Claude merges it, then it goes to Done" : t.finishing === "pr" ? "Claude opens its PR, then it goes to Done" : "Claude finishes it, then it goes to Done";
+  switch (t.stage) {
+    case "backlog": return t.umbrella ? "Queue it: its sub-tickets run in order" : "Queue it, or Start now";
+    case "planning": return planReady(t) ? "You: read the plan, then approve it or say what to change" : "Claude writes the plan";
+    case "queued": return waitingOn(t).length ? "Starts once " + waitingOn(t).map((x) => x.key).join(", ") + (waitingOn(t).length > 1 ? " are" : " is") + " done" : "Starts when a session is free";
+    case "running": return t.umbrella ? "Its sub-tickets finish" : "Claude finishes it and hands it to you for review";
+    case "review": return "You: review it (Review tab), then approve it or send it back";
+    case "testing": return d.test_plan ? "You: try it (Test tab), then Tested, done" : "You: try it, then Tested, done";
+    case "done": return t.flags.some((f) => asksNow(t, f)) ? "You: see its alert" : "Nothing: it's done";
   }
   return "";
 }
@@ -1734,7 +1787,7 @@ function sessionLive(d) { return d.ticket.tmux && d.status && d.status !== "gone
 function reviewTab(d) {
   const t = d.ticket;
   return `<div style="display:flex;flex-direction:column;gap:calc(10 * var(--u))">
-    ${t.summary ? `<div class="comment claude"><div class="who">Claude's summary</div><div class="body">${esc(t.summary)}</div></div>` : ""}
+    ${t.summary && state.focus ? `<div class="comment claude"><div class="who">Claude's summary</div><div class="body">${esc(t.summary)}</div></div>` : ""}
     ${d.gutter || d.gutter_port ? `<p class="muted" style="margin:0">${d.guide ? "Claude wrote a review guide for gutter." : "No review guide yet; gutter still shows the diff."}
       ${d.gutter_port ? " gutter's window is open: submit your review there and it goes straight to Claude." : sessionLive(d) ? " gutter opens in a window; the review you submit there goes straight to Claude." : " Start the session again to review in gutter."}</p>` : ""}
     <div class="actions">${d.gutter_port ? `<a class="btn primary" target="_blank" rel="noopener" href="http://${location.hostname}:${d.gutter_port}/">Open gutter in the browser</a>

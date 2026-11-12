@@ -112,8 +112,14 @@ pub fn promptFor(a: std.mem.Allocator, t: board.Ticket, todo: ?board.Ticket, not
         \\How tickets work here (cl board):
         \\- Ask me with AskUserQuestion when you need a decision; the board shows it.
         \\- To split off a separate piece of work: `cl ticket new --parent {s} "<title>" -m "<details>"`.
+        \\- Keep the board's Overview current, a short line each, when you start and as each step
+        \\  finishes: `cl ticket overview {s} --last "In progress: <what you're on>" --next "<what comes after>"`.
+        \\  It's what I read to know where things stand, so say it plainly ("In progress: the review changes").
         \\- When the work is finished and you need nothing more from me:
-        \\{s}  {d}. {s}Run `cl ticket done {s} --summary "<what changed, in a sentence or two>"`.
+        \\{s}  {d}. {s}Run `cl ticket done {s} --last "<one line>" --summary "<what changed, in a sentence or two>"`.
+        \\     --last is the board's one-line Overview: what you did this round and where that leaves me,
+        \\     like "Wrote the first version of the Overview tab; ready for review", "Made the review
+        \\     changes; ready for review again" or "Fixed what failed in testing; ready to test again".
         \\  {d}. If there is something for me to try, add `--test-plan -` and give the plan on stdin
         \\     (a heredoc, not a file): steps the board walks me through one at a time, with buttons
         \\     to run a command (`run:`, from this directory) and open a page (`open:`), and checks
@@ -121,6 +127,7 @@ pub fn promptFor(a: std.mem.Allocator, t: board.Ticket, todo: ?board.Ticket, not
         \\{s}  Don't run it while you still need anything from me. When I send feedback, finish the same way.
         \\
     , .{
+        t.key,
         t.key,
         if (gutter_rev) |rev| try guideStep(a, rev) else "",
         @as(u8, if (gutter_rev != null) 2 else 1),
@@ -181,6 +188,11 @@ pub const PlanDir = union(enum) {
     folder,
 };
 
+/// The command that sets a ticket's Overview (`cl ticket overview`), as sessions are told it.
+fn overviewCmd(a: std.mem.Allocator, key: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(a, "`cl ticket overview {s} --last \"In progress: <what you're on>\" --next \"<what comes after>\"`", .{key});
+}
+
 /// What a planning session is told first: plan only, then hand the plan in
 /// for the session that builds it.
 pub fn planPrompt(a: std.mem.Allocator, t: board.Ticket, notes: []const board.Comment, where: PlanDir) ![]const u8 {
@@ -203,6 +215,7 @@ pub fn planPrompt(a: std.mem.Allocator, t: board.Ticket, notes: []const board.Co
         .checkout => try w.writeAll("You're in the project's checkout, which may hold another ticket's unfinished work: read it as the code to plan against, but its files may not be what is merged.\n"),
         .folder => try w.writeAll("You're in the project's folder (it isn't a code repo); read what's there as you need.\n"),
     }
+    try w.print("\nKeep the board's Overview current as the plan takes shape, a short sentence each: {s}.\n", .{try overviewCmd(a, t.key)});
     try w.writeAll("\nAsk me with AskUserQuestion until the plan is clear");
     if (t.skill.len > 0) try w.print(" (use the {s} skill for the interview)", .{t.skill});
     if (t.umbrella) {
@@ -216,7 +229,7 @@ pub fn planPrompt(a: std.mem.Allocator, t: board.Ticket, notes: []const board.Co
             \\rank` and `cl ticket rm` and hand the plan in again.
             \\
             \\Then hand in the plan with
-            \\`cl ticket done {s} --summary "<the plan in a sentence>" --plan` and the plan as markdown on
+            \\`cl ticket done {s} --last "<one line, like 'Plan ready for approval'>" --summary "<the plan in a sentence>" --plan` and the plan as markdown on
             \\stdin (a heredoc, not a file): the sub-tickets by key, in order, what each is for, and what
             \\we decided and why. The board shows it to me for approval; approving queues the sub-tickets
             \\and this ticket follows them (running when one starts, done when all are). That is the end of
@@ -231,7 +244,8 @@ pub fn planPrompt(a: std.mem.Allocator, t: board.Ticket, notes: []const board.Co
         \\we made and why, the files and functions to change, what to test, and what is still open.
         \\
         \\When the plan is ready, hand it in with
-        \\`cl ticket done {s} --summary "<the plan in a sentence>" --plan` and the plan as markdown on
+        \\`cl ticket done {s} --last "<one line, like 'Plan ready for approval' or 'Revised the plan
+        \\after your feedback; ready to approve again'>" --summary "<the plan in a sentence>" --plan` and the plan as markdown on
         \\stdin (a heredoc, not a file). The board shows it to me for approval; that is the end of your
         \\part. Don't call ExitPlanMode. If I send feedback on the plan, revise it and hand it in the
         \\same way. To split off a separate piece of work: `cl ticket new --parent {s} "<title>" -m "<details>"`
@@ -265,7 +279,9 @@ fn resumePrompt(a: std.mem.Allocator, t: board.Ticket, notes: []const board.Comm
         try w.writeAll("\nNotes on the ticket:\n");
         for (notes) |n| try w.print("- {s}\n", .{n.body});
     }
-    try w.print("\nPick it up where you left off, and finish the same way as before (`cl ticket done {s}`).\n", .{t.key});
+    try w.print("\nPick it up where you left off, and finish the same way as before (`cl ticket done {s}`{s}).\n", .{ t.key, if (t.todo) "" else ", with --last \"<one line: what you did and where that leaves me>\"" });
+    // A conversation from before the Overview doesn't know the command.
+    if (!t.todo) try w.print("Keep the board's Overview current as you go, a short sentence each: {s}.\n", .{try overviewCmd(a, t.key)});
     return aw.written();
 }
 
@@ -1632,6 +1648,10 @@ test prompt {
     try std.testing.expect(std.mem.indexOf(u8, text, "`timeout 5 gutter -open=false -port 0 -r 'abc::'`") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "pass -open=false and never -window") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "  2. Run `cl ticket done QA-3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "`cl ticket overview QA-3 --last \"In progress:") != null);
+    // done hands in the Overview's Last: what it did and where that leaves me, in a line.
+    try std.testing.expect(std.mem.indexOf(u8, text, "Run `cl ticket done QA-3 --last \"<one line>\" --summary") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "\"Made the review\n     changes; ready for review again\"") != null);
     // No revision to give: gutter's default.
     const no_rev = try prompt(arena_state.allocator(), t, &.{}, "");
     try std.testing.expect(std.mem.indexOf(u8, no_rev, "`timeout 5 gutter -open=false -port 0`") != null);
@@ -1686,10 +1706,12 @@ test planPrompt {
     try std.testing.expect(std.mem.indexOf(u8, text, "Ticket QA-3: Retry") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "sub-ticket of QA-1") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "- keep it small") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "`cl ticket overview QA-3 --last \"In progress:") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "grilling skill") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "don't build it") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "read-only copy of the project at master") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "`cl ticket done QA-3 --summary \"<the plan in a sentence>\" --plan`") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "`cl ticket done QA-3 --last \"<one line, like 'Plan ready for approval' or") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "--summary \"<the plan in a sentence>\" --plan`") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "Don't call ExitPlanMode") != null);
     // Nothing about building: no review guide, test plan, or jj change.
     try std.testing.expect(std.mem.indexOf(u8, text, "review guide") == null);
@@ -1706,7 +1728,7 @@ test planPrompt {
     const ut = try planPrompt(a, u, &.{}, .{ .trunk = "master" });
     try std.testing.expect(std.mem.indexOf(u8, ut, "planning session for an umbrella") != null);
     try std.testing.expect(std.mem.indexOf(u8, ut, "`cl ticket new --parent QA-3 \"<title>\" -m \"<details>\"`") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ut, "`cl ticket done QA-3 --summary \"<the plan in a sentence>\" --plan`") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ut, "`cl ticket done QA-3 --last \"<one line, like 'Plan ready for approval'>\" --summary \"<the plan in a sentence>\" --plan`") != null);
     try std.testing.expect(std.mem.indexOf(u8, ut, "approving queues the sub-tickets") != null);
     try std.testing.expect(std.mem.indexOf(u8, ut, "a new session builds it") == null);
 }
@@ -1851,6 +1873,8 @@ test resumePrompt {
     const text = try resumePrompt(arena_state.allocator(), t, &.{.{ .author = "you", .body = "also retry on 503", .sent = false, .at = 0 }});
     try std.testing.expect(std.mem.indexOf(u8, text, "Ticket QA-3 is back on: Retry") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "- also retry on 503") != null);
+    // A conversation from before the Overview is told the command too.
+    try std.testing.expect(std.mem.indexOf(u8, text, "`cl ticket overview QA-3 --last") != null);
     // The resumed conversation already has the body and the instructions.
     try std.testing.expect(std.mem.indexOf(u8, text, "wrap fetch") == null);
 }

@@ -222,6 +222,15 @@ pub const Ticket = struct {
     session_id: []const u8,
     /// Claude's summary from `done`.
     summary: []const u8,
+    /// The Overview tab's two lines, from Claude (`cl ticket overview`):
+    /// what it did last (or "In progress: ..."), and what comes next; ""
+    /// for none. `done` puts its summary in `overview_last` and clears
+    /// `overview_next` (what's next is then the human's, which the board
+    /// works out from the stage and flags). `overview_at`: when they were
+    /// last set, 0 for never.
+    overview_last: []const u8 = "",
+    overview_next: []const u8 = "",
+    overview_at: i64 = 0,
     /// The test plan Claude gave with `done` (markdown: Setup, Launch,
     /// Checks), "" for none.
     test_plan: []const u8 = "",
@@ -414,6 +423,9 @@ const schema =
     \\  remind_at INTEGER NOT NULL DEFAULT 0,
     \\  onto TEXT NOT NULL DEFAULT '',
     \\  pr_then TEXT NOT NULL DEFAULT '',
+    \\  overview_last TEXT NOT NULL DEFAULT '',
+    \\  overview_next TEXT NOT NULL DEFAULT '',
+    \\  overview_at INTEGER NOT NULL DEFAULT 0,
     \\  created INTEGER NOT NULL,
     \\  updated INTEGER NOT NULL
     \\);
@@ -601,6 +613,10 @@ pub fn migrate(db: Db) !void {
         _ = try addColumn(db, "tickets", "due_time", "INTEGER NOT NULL DEFAULT 0");
         _ = try addColumn(db, "tickets", "remind_at", "INTEGER NOT NULL DEFAULT 0");
         try db.execMulti(dates_schema);
+        // The Overview tab's lines.
+        _ = try addColumn(db, "tickets", "overview_last", "TEXT NOT NULL DEFAULT ''");
+        _ = try addColumn(db, "tickets", "overview_next", "TEXT NOT NULL DEFAULT ''");
+        _ = try addColumn(db, "tickets", "overview_at", "INTEGER NOT NULL DEFAULT 0");
     }
     if (have >= version) return;
     // Version 1 had no sub-tickets, version 2 no planning skill.
@@ -654,6 +670,48 @@ test "an approved plan queues, and the plan is kept" {
     try std.testing.expectEqual(Stage.queued, after.stage);
     try std.testing.expectEqualStrings("## Steps\n1. do it\n", after.plan_md);
     try std.testing.expectEqual(@as(usize, 0), after.flags.len);
+}
+
+test "overview: Claude's lines, and done puts its summary in Last and clears Next" {
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = Ctx.testEnv(), .home = "/tmp" };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try Db.open(":memory:");
+    defer db.close();
+    try migrate(db);
+    try addProject(db, .{ .name = "qa", .dir = "/x/qa" });
+    const k = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Build it" });
+    const id = (try getTicket(db, a, k)).id;
+    try setOverview(ctx, db, id, "In progress: the schema", "The CLI");
+    const at = (try getTicket(db, a, k)).overview_at;
+    try std.testing.expect(at > 0);
+    // Only what's given changes, and only a new Last moves its date.
+    try db.exec("UPDATE tickets SET overview_at = 1 WHERE id = ?1", .{id});
+    try setOverview(ctx, db, id, null, "The tab");
+    var t = try getTicket(db, a, k);
+    try std.testing.expectEqual(@as(i64, 1), t.overview_at);
+    try std.testing.expectEqualStrings("In progress: the schema", t.overview_last);
+    try std.testing.expectEqualStrings("The tab", t.overview_next);
+    try done(ctx, db, a, k, "Added the tab");
+    t = try getTicket(db, a, k);
+    try std.testing.expectEqualStrings("Added the tab", t.overview_last);
+    try std.testing.expectEqualStrings("", t.overview_next);
+    // Done without a summary keeps the last line.
+    try setOverview(ctx, db, id, null, "Tests");
+    try done(ctx, db, a, k, "");
+    t = try getTicket(db, a, k);
+    try std.testing.expectEqualStrings("Added the tab", t.overview_last);
+    try std.testing.expectEqualStrings("", t.overview_next);
+}
+
+test "migrate: a board from before the Overview gets its columns" {
+    const db = try Db.open(":memory:");
+    defer db.close();
+    try migrate(db);
+    try db.execMulti("ALTER TABLE tickets DROP COLUMN overview_last; ALTER TABLE tickets DROP COLUMN overview_next; ALTER TABLE tickets DROP COLUMN overview_at");
+    try migrate(db);
+    try std.testing.expect((try db.int("SELECT 1 FROM pragma_table_info('tickets') WHERE name = 'overview_at'", .{})) != null);
 }
 
 test "feedback on a ready plan keeps it ready to approve" {
@@ -1163,7 +1221,7 @@ const ticket_cols = "t.id, t.key, t.project, t.title, t.body, t.stage, t.mode, t
     "EXISTS (SELECT 1 FROM events e WHERE e.ticket = t.id AND e.kind = 'started'), " ++
     "(SELECT count(*) FROM tickets c WHERE c.parent = t.id AND c.stage = 'done'), t.umbrella, " ++
     "t.onto, coalesce((SELECT p.onto FROM projects p WHERE p.name = t.project), ''), t.autoreview, t.pr_then, " ++
-    "coalesce((SELECT p.repo FROM projects p WHERE p.name = t.project), 1), t.todo, t.link, t.due_at, t.due_time, t.remind_at";
+    "coalesce((SELECT p.repo FROM projects p WHERE p.name = t.project), 1), t.todo, t.link, t.due_at, t.due_time, t.remind_at, t.overview_last, t.overview_next, t.overview_at";
 
 fn readTicket(st: sqlite.Stmt, a: std.mem.Allocator) !Ticket {
     return .{
@@ -1213,6 +1271,9 @@ fn readTicket(st: sqlite.Stmt, a: std.mem.Allocator) !Ticket {
         .due_at = st.int(43),
         .due_time = st.int(44) != 0,
         .remind_at = st.int(45),
+        .overview_last = try st.dupe(a, 46),
+        .overview_next = try st.dupe(a, 47),
+        .overview_at = st.int(48),
     };
 }
 
@@ -1688,6 +1749,18 @@ pub fn setPrThen(ctx: Ctx, db: Db, id: i64, text: []const u8) Error!void {
     try db.exec("UPDATE tickets SET pr_then = ?2 WHERE id = ?1", .{ id, text });
     try logEvent(ctx, db, id, if (text.len > 0) "after the PR" else "after the PR cleared", text);
     try touch(ctx, db, id);
+}
+
+/// The Overview tab's lines (see Ticket.overview_last): each one given
+/// replaces what was there ("" clears it); null leaves it. `overview_at`
+/// dates Last (the board shows it beside it), so only a new Last moves it.
+/// Not `touch`ed: Claude sets them as it goes, and that isn't news for the
+/// board's order.
+pub fn setOverview(ctx: Ctx, db: Db, id: i64, last: ?[]const u8, next: ?[]const u8) Error!void {
+    try db.exec(
+        \\UPDATE tickets SET overview_last = coalesce(?2, overview_last), overview_next = coalesce(?3, overview_next),
+        \\  overview_at = CASE WHEN ?2 IS NULL THEN overview_at ELSE ?4 END WHERE id = ?1
+    , .{ id, last, next, now(ctx) });
 }
 
 /// Claude's custom close (see Ticket.custom_close); "" clears it.
@@ -2306,10 +2379,13 @@ pub fn done(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, summary: []
         try clearFlagId(ctx, db, t.id, flag_question);
         try clearFlagId(ctx, db, t.id, flag_input);
         try setFlagId(ctx, db, t.id, flag_review, "auto", "plan");
+        try setOverview(ctx, db, t.id, if (summary.len > 0) summary else null, "");
         try logEvent(ctx, db, t.id, "plan ready", "");
         return;
     }
     try db.exec("UPDATE tickets SET summary = ?2 WHERE id = ?1", .{ t.id, summary });
+    // What's next is the human's now: the board says what from the stage.
+    try setOverview(ctx, db, t.id, if (summary.len > 0) summary else null, "");
     if (summary.len > 0) try db.exec("INSERT INTO comments (ticket, author, body, sent, at) VALUES (?1, 'claude', ?2, 0, ?3)", .{ t.id, summary, now(ctx) });
     try clearFlagId(ctx, db, t.id, flag_question);
     try clearFlagId(ctx, db, t.id, flag_input);

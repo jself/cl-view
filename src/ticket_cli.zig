@@ -220,6 +220,11 @@ pub const ticket_usage =
     \\                              ticket in review or testing that starts another round
     \\  flag <key> <kind> [detail]  set a flag (input question review testing, or your own)
     \\  unflag <key> <kind>
+    \\  overview [<key>] [--last <text>] [--next <text>]
+    \\                              Claude: the board's Overview, a sentence each: what it did
+    \\                              last (or "In progress: ..."), and what comes next; "" clears
+    \\                              one. Without either, prints them. done sets Last to its --last
+    \\                              (else its summary) and clears Next (what's next is then yours)
     \\  custom-close [<key>] <what to do instead> | --clear
     \\                              Claude: this ticket shouldn't be finished the usual way
     \\                              (merged or a PR); the board offers only this instead
@@ -227,8 +232,11 @@ pub const ticket_usage =
     \\                              Claude: what's left to do once its PR merges, should it be
     \\                              finished with one (the board's Done dialog offers it, and
     \\                              move --pr takes it); "" drops it. Not a custom close
-    \\  done [<key>] [--summary <text>] [--test-plan <markdown> | -]
+    \\  done [<key>] [--last <line>] [--summary <text>] [--test-plan <markdown> | -]
     \\                              Claude: finished, nothing more needed; moves to review.
+    \\                              --last: the Overview's Last, what it did and where that
+    \\                              leaves you ("Made the review changes; ready for review
+    \\                              again"); without it, the summary
     \\                              Refused for a todo: it's yours (move it to done)
     \\                              --test-plan (- reads stdin): what to try, kept in the ticket
     \\                              (steps; `testplan --format`); without it an
@@ -741,6 +749,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
     const valued = [_][]const u8{
         "--body", "--target", "--stage", "--profile", "--project", "--flag", "--search", "--title", "--as", "--summary", "--test-plan", "--step", "--parent", "--skill", "--pr-url", "--before", "--after", "--tell", "--then",
         "--reason", "--until", "--every", "--max", "--at", "--change", "--not-after", "--onto", "--findings", "--link",
+        "--last", "--next",
     };
     // park's --pr names the PR; elsewhere (move, approve) it's a finish.
     // list's --due is a switch (todos with a due date); new's and edit's
@@ -973,6 +982,16 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         if (r.sent_back) return out(try std.fmt.allocPrint(a, "{s} is back in running (round {d})\n", .{ key, r.round }));
         return;
     }
+    if (std.mem.eql(u8, cmd, "overview")) {
+        args.only(&.{ "--last", "--next" }, ticket_usage);
+        const key = keyArg(pos, 0, env_key, "cl ticket overview [<key>] [--last <text>] [--next <text>]");
+        const t = board.getTicket(db, a, key) catch |e| boardFail(db, e, "ticket");
+        const last = overviewArg(args.get("--last"));
+        const next = overviewArg(args.get("--next"));
+        if (last == null and next == null) return out(try overviewText(a, t));
+        board.setOverview(ctx, db, t.id, last, next) catch |e| boardFail(db, e, "ticket");
+        return;
+    }
     if (std.mem.eql(u8, cmd, "custom-close") and args.has("--then")) {
         // Claude's suggestion for after the PR merges, should it be finished
         // with one: the board offers it, and `move done --pr` takes it.
@@ -1011,10 +1030,12 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         return;
     }
     if (std.mem.eql(u8, cmd, "done")) {
-        args.only(&.{ "--summary", "--test-plan", "--close", "--pr-url", "--plan" }, ticket_usage);
-        const key = keyArg(pos, 0, env_key, "cl ticket done [<key>] [--summary <text>] [--test-plan <markdown> | -] [--plan] [--close [--pr-url <url>]]");
+        args.only(&.{ "--summary", "--last", "--test-plan", "--close", "--pr-url", "--plan" }, ticket_usage);
+        const key = keyArg(pos, 0, env_key, "cl ticket done [<key>] [--last <line>] [--summary <text>] [--test-plan <markdown> | -] [--plan] [--close [--pr-url <url>]]");
         const t0 = board.getTicket(db, a, key) catch |e| boardFail(db, e, "ticket");
         if (t0.todo) fail("{s} is a todo: it's yours, and it closes when you move it to Done (`cl ticket move {s} done`)", .{ t0.key, t0.key });
+        // The Overview's Last: what Claude did and where that leaves the human, in a line.
+        const last = overviewArg(args.get("--last"));
         // While finishing, a plain `done` means the merge or PR is done too.
         if (args.has("--close") or t0.finishing.len > 0) {
             if (t0.finishing.len == 0) fail("{s} isn't finishing (--close is for after a merge or PR the board asked for); use done without it", .{t0.key});
@@ -1029,6 +1050,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
                 const pr = args.get("--pr-url") orelse fail("{s} has steps for after its PR merges: give the PR with --pr-url <url>, so cl can park the follow-up on it", .{t0.key});
                 _ = park.parsePr(a, pr, null) catch fail("--pr-url takes the PR's URL (https://github.com/<owner>/<repo>/pull/<n>): {s}", .{pr});
             }
+            if (last) |l| if (l.len > 0) board.setOverview(ctx, db, t0.id, l, null) catch |e| boardFail(db, e, "ticket");
             // Printed first: closing kills the session this may be running in.
             try out(try std.fmt.allocPrint(a, "{s}: done{s}; its session closes now.\n", .{ t0.key, if (actions.followsUp(t0)) ", and a follow-up sub-ticket is parked on the PR" else "" }));
             actions.finished(ctx, db, a, key, args.get("--summary") orelse "", args.get("--pr-url") orelse "") catch |e| boardFail(db, e, "ticket");
@@ -1047,6 +1069,8 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
             error.BadPlan => fail("the plan on stdin is empty", .{}),
             else => boardFail(db, e, "ticket"),
         };
+        // Its line replaces the summary `done` put in Last.
+        if (last) |l| if (l.len > 0) board.setOverview(ctx, db, t0.id, l, null) catch |e| boardFail(db, e, "ticket");
         // Findings sent to it are handled now (before a new review replaces them).
         if (t0.stage != .planning) autoreview.answered(ctx, db, a, key, args.get("--summary") orelse "") catch {};
         // The project reviews what reaches Review by itself (--auto-review).
@@ -1651,6 +1675,35 @@ fn applyDeps(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, args
     }
 }
 
+/// The Overview's Last: Claude's line, else (a ticket from before the
+/// Overview) its `done` summary.
+fn overviewLast(t: board.Ticket) []const u8 {
+    return if (t.overview_last.len > 0) t.overview_last else t.summary;
+}
+
+/// An option of `cl ticket overview`, trimmed; null when not given ("" clears the line).
+fn overviewArg(x: ?[]const u8) ?[]const u8 {
+    return if (x) |v| std.mem.trim(u8, v, " \t\r\n") else null;
+}
+
+/// What `cl ticket overview` prints with neither option.
+fn overviewText(a: std.mem.Allocator, t: board.Ticket) ![]const u8 {
+    return std.fmt.allocPrint(a, "last: {s}\nnext: {s}\n", .{ overviewLast(t), t.overview_next });
+}
+
+test "cl ticket overview: trims, clears with \"\", and prints Last falling back to the summary" {
+    try std.testing.expectEqual(@as(?[]const u8, null), overviewArg(null));
+    try std.testing.expectEqualStrings("Wire the tab", overviewArg("  Wire the tab\n").?);
+    try std.testing.expectEqualStrings("", overviewArg("").?);
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var t = std.mem.zeroInit(board.Ticket, .{ .key = "CL-1", .title = "t", .summary = "Fixed it" });
+    try std.testing.expectEqualStrings("last: Fixed it\nnext: \n", try overviewText(arena_state.allocator(), t));
+    t.overview_last = "In progress: tests";
+    t.overview_next = "The guide";
+    try std.testing.expectEqualStrings("last: In progress: tests\nnext: The guide\n", try overviewText(arena_state.allocator(), t));
+}
+
 fn keyArg(pos: []const []const u8, i: usize, env_key: ?[]const u8, usage: []const u8) []const u8 {
     if (pos.len == i + 1) return pos[i];
     if (pos.len == i) if (env_key) |k| return k;
@@ -1789,6 +1842,8 @@ fn showText(ctx: Ctx, a: std.mem.Allocator, t: board.Ticket, dates: TodoDates, b
             try w.print("  next check: {s}\n", .{try stamp(a, p.next)});
         }
     } else if (t.killed) try w.print("session: killed; `cl ticket start {s}` restarts it\n", .{t.key});
+    if (overviewLast(t).len > 0) try w.print("last: {s}\n", .{overviewLast(t)});
+    if (t.overview_next.len > 0) try w.print("next: {s}\n", .{t.overview_next});
     if (t.custom_close.len > 0) try w.print("custom close: {s}\n", .{t.custom_close});
     if (t.pr_then.len > 0 and t.stage != .done) try w.print("after its PR merges: {s}\n", .{t.pr_then});
     if (t.finishing.len > 0) try w.print("finishing: {s} (Claude is {s}; it goes to done after)\n", .{ t.finishing, finishingWhat(t.finishing) });
