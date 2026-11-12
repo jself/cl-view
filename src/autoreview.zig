@@ -555,10 +555,12 @@ test "startOnReview: only when the project says so, and only the ticket's first 
     const db = try board.Db.open(":memory:");
     defer db.close();
     try board.migrate(db);
-    try board.addProject(db, .{ .name = "qa", .dir = cfg.board.dir });
+    // A project whose auto review is off (a new one would get send), so the
+    // first check below can show that off starts nothing.
+    try board.addProject(db, .{ .name = "qa", .dir = cfg.board.dir, .auto_review = .off });
     const k = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "T", .stage = .review });
     const id = (try board.getTicket(db, a, k)).id;
-    // Off (the default): nothing.
+    // Off: nothing.
     try std.testing.expect(startOnReview(ctx, cfg, db, a, k) == .off);
     try board.updateProject(db, "qa", .{ .name = "", .dir = "", .auto_review = .send });
     try std.testing.expectEqual(board.AutoReview.send, (try board.getProject(db, a, "qa")).auto_review);

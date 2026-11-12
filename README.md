@@ -1556,9 +1556,12 @@ running.
 
 A project can have it run by itself when a ticket reaches Review: `cl project
 set <p> --auto-review on` (or the project's "When a ticket reaches Review" on
-the board). When Claude says it's done (`cl ticket done`, or the board's
-done for it), the review starts right away, so the ticket reaches Needs You with its findings already there
-instead of waiting for you to press Auto review. `--auto-review send` also
+the board). A new code project starts with `send` (below) unless `cl project
+add` is given `--auto-review off|on`; a `--no-repo` project has no automated
+review. A project keeps the setting it was added with until you change it.
+When Claude says it's done (`cl ticket done`, or the board's done for it), the
+review starts right away, so the ticket reaches Needs You with its findings
+already there instead of waiting for you to press Auto review. `--auto-review send` also
 sends what it finds to Claude, as Send findings would, for one round; when
 Claude finishes that round, the ticket waits for you with the old findings and
 Claude's answer. A review with no findings sends nothing.

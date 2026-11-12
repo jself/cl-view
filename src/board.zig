@@ -949,6 +949,15 @@ fn repoOnly(in: ProjectInput) bool {
     return in.mode == .worktree or (in.auto_review orelse .off) != .off or set(in.onto) or set(in.push_after_merge) or set(in.after_merge);
 }
 
+/// What a new project reviews by itself when it isn't told: a code repo runs
+/// the automated review and sends its findings to Claude for one round; a
+/// repo-less project has no automated review. Only new projects: the
+/// `auto_review` column's DEFAULT stays 'off' so a migration never turns it on
+/// for a project that's already there.
+pub fn defaultAutoReview(repo: bool) AutoReview {
+    return if (repo) .send else .off;
+}
+
 pub fn addProject(db: Db, in: ProjectInput) Error!void {
     if (in.dir.len == 0) return error.BadInput;
     try checkNewProject(db, in);
@@ -957,7 +966,7 @@ pub fn addProject(db: Db, in: ProjectInput) Error!void {
     try db.exec("INSERT INTO projects (name, dir, prefix, slots, mode, profile, after_merge, after_merge_claude, planners, onto, review_skill, auto_review, push_after_merge, repo) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)", .{
         in.name,                             in.dir,               prefix,                    in.slots orelse default_slots,
         @tagName(in.mode orelse .queue),     in.profile orelse "", in.after_merge orelse "",  in.after_merge_claude orelse "",
-        in.planners orelse default_planners, in.onto orelse "",    in.review_skill orelse "", @tagName(in.auto_review orelse .off),
+        in.planners orelse default_planners, in.onto orelse "",    in.review_skill orelse "", @tagName(in.auto_review orelse defaultAutoReview(in.repo orelse true)),
         in.push_after_merge orelse "",       in.repo orelse true,
     });
 }
@@ -2849,6 +2858,25 @@ test "projects, tickets, flags, comments, done" {
     _ = try removeTicket(ctx, db, a, k1);
     _ = try removeTicket(ctx, db, a, k2);
     try removeProject(db, "qa-tool");
+}
+
+test "a new code repo reviews by itself and sends the findings; a repo-less one, and one already there, don't" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try Db.open(":memory:");
+    defer db.close();
+    try migrate(db);
+    try addProject(db, .{ .name = "qa", .dir = "/x/qa" });
+    try testing.expectEqual(AutoReview.send, (try getProject(db, a, "qa")).auto_review);
+    try addProject(db, .{ .name = "me", .dir = "/x/me", .repo = false });
+    try testing.expectEqual(AutoReview.off, (try getProject(db, a, "me")).auto_review);
+    try addProject(db, .{ .name = "web", .dir = "/x/web", .auto_review = .off });
+    try testing.expectEqual(AutoReview.off, (try getProject(db, a, "web")).auto_review);
+    // A board from before the column: its projects stay off.
+    try db.execMulti("ALTER TABLE projects DROP COLUMN auto_review");
+    try migrate(db);
+    try testing.expectEqual(AutoReview.off, (try getProject(db, a, "qa")).auto_review);
 }
 
 test "a project that isn't a code repo runs its tickets in the queue, with no automated review" {

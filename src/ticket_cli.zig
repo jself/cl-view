@@ -317,8 +317,9 @@ pub const project_usage =
     \\--auto-review: run the automated review by itself when a ticket reaches review
     \\  (Claude's `cl ticket done`; only its first time there, not for one without
     \\  changes), so it reaches Needs You with the findings there. send: also send
-    \\  what it finds to Claude for one round (like Send findings). off (the
-    \\  default): only when you start it. You can start one any time either way.
+    \\  what it finds to Claude for one round (like Send findings); the default for
+    \\  a new project (off for --no-repo). off: only when you start it. You can
+    \\  start one any time either way.
     \\--after-merge-claude: what Claude is asked to do after a merge when there is no
     \\  command (the ticket's Claude, or the operator once its session is gone), and
     \\  what the operator is asked to sort out when the command fails. "" (the
