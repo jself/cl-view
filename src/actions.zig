@@ -215,10 +215,10 @@ fn startFinish(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, fi
         .close, .tell => unreachable,
         .merge => try std.fmt.allocPrint(a, "This ticket is approved. Finish it by merging its branch {s} into {s}: commit anything left here first, then merge it in the project's checkout at {s} (it may have uncommitted work of its own; leave that alone). If it conflicts in a way you can't settle with confidence, or anything is unclear, ask me. {s} `cl ticket done {s} --close`.", .{ t.branch, main, dir, restart, t.key }),
         .pr => try std.fmt.allocPrint(a, "{s}{s}", .{ if (t.change.len > 0)
-            try std.fmt.allocPrint(a, "This ticket is approved. Finish it with a pull request: push its jj bookmark {s} (`jj git push -b {s}`) and open a PR against {s} (gh pr create --head {s} --base {s}) with a title and description of the change. If anything is unclear, ask me. Then run `cl ticket done {s} --close --pr-url <the PR's URL>`.", .{ t.branch, t.branch, main, t.branch, main, t.key })
+            try std.fmt.allocPrint(a, "This ticket is approved. Finish it with a pull request: push its jj bookmark {s} (`jj git push -b {s}`) and open a PR against {s} (gh pr create --head {s} --base {s}) with a title and description of the change. If anything is unclear, ask me. Then run `cl ticket done {s} --close --pr-url <the PR's URL>`: the ticket waits on the PR, parked, and comes back to you if it gets review comments.", .{ t.branch, t.branch, main, t.branch, main, t.key })
         else
-            try std.fmt.allocPrint(a, "This ticket is approved. Finish it with a pull request: commit anything left, push its branch {s} and open a PR against {s} (gh pr create --base {s}) with a title and description of the change. If anything is unclear, ask me. Then run `cl ticket done {s} --close --pr-url <the PR's URL>`.", .{ t.branch, main, main, t.key }), if (t.pr_then.len > 0)
-            try std.fmt.allocPrint(a, " Don't do what's left for after it merges ({s}): with the PR's URL, cl makes a follow-up ticket that does it once the PR merges.", .{t.pr_then})
+            try std.fmt.allocPrint(a, "This ticket is approved. Finish it with a pull request: commit anything left, push its branch {s} and open a PR against {s} (gh pr create --base {s}) with a title and description of the change. If anything is unclear, ask me. Then run `cl ticket done {s} --close --pr-url <the PR's URL>`: the ticket waits on the PR, parked, and comes back to you if it gets review comments.", .{ t.branch, main, main, t.key }), if (t.pr_then.len > 0)
+            try std.fmt.allocPrint(a, " Don't do what's left for after it merges ({s}): cl makes a follow-up ticket that does it once the PR merges.", .{t.pr_then})
         else
             "" }),
     };
@@ -397,16 +397,14 @@ pub fn mergeSettled(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticke
     };
 }
 
-/// Claude has merged or opened the PR (`cl ticket done --close`): the ticket
-/// goes to Done, the PR link is kept as a comment, and its session closes. A
-/// change whose conflicts Claude settled is merged now.
-pub fn finished(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, summary: []const u8, pr: []const u8) !void {
+/// Claude has merged or opened the PR (`cl ticket done --close`). Merged
+/// (or anything else): the ticket goes to Done and its session closes; a
+/// change whose conflicts Claude settled is merged now. A PR: it stays in
+/// its stage, parked on the PR (see `waitOnPr`).
+pub fn finished(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, key: []const u8, summary: []const u8, pr: []const u8) !void {
     const t = try board.getTicket(db, a, key);
     if (t.finishing.len == 0) return error.NotFinishing;
-    // Steps for after the PR merges: they need the PR to wait on.
-    const then = followsUp(t);
-    if (then and pr.len == 0) return error.NoPrUrl;
-    if (then) _ = try park.parsePr(a, pr, null);
+    if (std.mem.eql(u8, t.finishing, "pr")) return waitOnPr(ctx, cfg, db, a, t, summary, pr);
     _ = try mergeSettled(ctx, db, a, t);
     // A git branch Claude merged into the main branch: it is there now.
     // Into another branch (its target): nothing runs from that.
@@ -417,27 +415,61 @@ pub fn finished(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, s
     if (pr.len > 0) _ = try board.addComment(ctx, db, a, key, "claude", try std.fmt.allocPrint(a, "Pull request: {s}", .{pr}), false);
     try board.logEvent(ctx, db, t.id, "finished", t.finishing);
     try board.move(ctx, db, a, key, .done);
-    // A PR lands through the PR; anything else should have put it on trunk.
-    // Checked before the session closes: this runs in it.
-    if (!std.mem.eql(u8, t.finishing, "pr") and pr.len == 0)
-        try checkLanded(ctx, db, a, key, if (std.mem.eql(u8, t.finishing, "tell")) "Claude finished what you told it without merging it" else "Claude said it was merged, but it isn't");
-    // It is Done already: a follow-up that couldn't be made is flagged with
-    // its steps, rather than leaving the session open too.
-    if (then) if (park.followUp(ctx, db, a, t, pr, t.pr_then)) |k| {
-        _ = try board.addComment(ctx, db, a, key, "claude", try std.fmt.allocPrint(a, "Follow-up {s} is parked on the PR: it does what's left once the PR merges.", .{k}), false);
-    } else |e| {
-        try board.setFlagId(ctx, db, t.id, flag_follow_up_failed, "auto", try std.fmt.allocPrint(a, "cl couldn't make the follow-up for {s} ({s}). What was left for after it merges: {s}", .{ pr, @errorName(e), t.pr_then }));
-    };
+    // Anything but a PR should have put it on trunk (a PR Tell asked for
+    // lands through the PR). Checked before the session closes: this runs in it.
+    if (pr.len == 0) try checkLanded(ctx, db, a, key, if (std.mem.eql(u8, t.finishing, "tell")) "Claude finished what you told it without merging it" else "Claude said it was merged, but it isn't");
     try closeSession(ctx, db, a, key);
 }
 
-/// Finishing with a PR, with steps for after it merges: `finished` makes a
-/// follow-up for them, parked on the PR.
-pub const flag_follow_up_failed = "follow-up-failed";
-
-pub fn followsUp(t: board.Ticket) bool {
-    return std.mem.eql(u8, t.finishing, "pr") and std.mem.trim(u8, t.pr_then, " \t\r\n").len > 0;
+/// Claude opened the PR: the ticket stays in its stage (it isn't Done until
+/// the PR merges, so nothing calls it unmerged), parked on the PR, and its
+/// session stops with its conversation and worktree kept. Feedback on the
+/// PR wakes it; the merge moves it to Done (park.zig).
+fn waitOnPr(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: board.Ticket, summary: []const u8, pr_in: []const u8) !void {
+    if (pr_in.len == 0) return error.NoPrUrl;
+    const the = try park.parsePr(a, pr_in, null);
+    if (summary.len > 0) _ = try board.addComment(ctx, db, a, t.key, "claude", summary, false);
+    _ = try board.addComment(ctx, db, a, t.key, "claude", try std.fmt.allocPrint(a, "Pull request: {s}", .{the.url}), false);
+    try board.logEvent(ctx, db, t.id, "finished", "pr");
+    try board.setFinishing(ctx, db, t.id, "");
+    try board.setPr(ctx, db, t.id, the.url, t.stage);
+    _ = try park.park(ctx, db, a, t.key, .{ .pr = the.url, .review = true });
+    try stopForPark(ctx, cfg, db, a, t.key);
 }
+
+/// A parked ticket's session stops, as `park.stopSession` does, and what
+/// ran for it (gutter, reviews, test launches) with it. Its own session
+/// goes last: this may run in it.
+pub fn stopForPark(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, key: []const u8) !void {
+    const me = tmux.ownSession(ctx, a);
+    review.stopGutter(ctx, a, key) catch {};
+    autoreview.stop(ctx, db, a, key) catch {};
+    review.stopLaunchesBut(ctx, a, key, me) catch {};
+    try park.stopSession(ctx, cfg, db, a, key);
+}
+
+/// The PR a ticket was finished with merged (its park saw it): it goes to
+/// Done, the session it may still have closes, and what's left for after
+/// the merge (`pr_then`) gets a follow-up sub-ticket that starts now.
+pub fn prMerged(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, pr: []const u8) !void {
+    const t = try board.getTicket(db, a, key);
+    if (t.stage == .done) return;
+    _ = try board.addComment(ctx, db, a, key, "claude", try std.fmt.allocPrint(a, "The pull request merged: {s}", .{pr}), false);
+    try board.logEvent(ctx, db, t.id, "pr merged", pr);
+    try board.move(ctx, db, a, key, .done);
+    if (std.mem.trim(u8, t.pr_then, " \t\r\n").len > 0) {
+        if (park.followUp(ctx, db, a, t, pr, t.pr_then, true)) |k| {
+            _ = try board.addComment(ctx, db, a, key, "claude", try std.fmt.allocPrint(a, "Follow-up {s} does what's left now that the PR merged.", .{k}), false);
+        } else |e| {
+            try board.setFlagId(ctx, db, t.id, flag_follow_up_failed, "auto", try std.fmt.allocPrint(a, "cl couldn't make the follow-up for {s} ({s}). What was left for after it merges: {s}", .{ pr, @errorName(e), t.pr_then }));
+        }
+    }
+    try closeSession(ctx, db, a, key);
+}
+
+/// Finished with a PR, with steps for after it merges: `prMerged` makes a
+/// follow-up for them once it merges.
+pub const flag_follow_up_failed = "follow-up-failed";
 
 /// What Claude is doing for a ticket finishing `how`.
 pub fn finishingWhat(how: []const u8) []const u8 {
@@ -1404,7 +1436,7 @@ test "going to Done closes the ticket's session, even when a test server of its 
     try std.testing.expectError(error.NotFound, board.getTicket(db, a, six));
 }
 
-test "finished with a PR and steps for after it: done, plus a follow-up parked on the PR" {
+test "finished with a PR: it stays in its stage parked on the PR; the merge moves it to Done and starts the follow-up" {
     const gpa = std.testing.allocator;
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
@@ -1414,6 +1446,7 @@ test "finished with a PR and steps for after it: done, plus a follow-up parked o
     // A socket of the test's own with no server: closing its (missing)
     // session never reaches the real tmux.
     const ctx: Ctx = .{ .io = std.testing.io, .gpa = gpa, .perm = a, .env = &env, .home = "/tmp", .tmux_socket = "/tmp/cl-test-followup-none" };
+    const cfg: config.Config = .{ .profiles = &.{}, .default = "", .operator = "" };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
@@ -1425,28 +1458,47 @@ test "finished with a PR and steps for after it: done, plus a follow-up parked o
     const t = try board.getTicket(db, a, k);
     try board.setPrThen(ctx, db, t.id, "Deploy, then run the backfill.");
     try board.setFinishing(ctx, db, t.id, "pr");
-    try std.testing.expect(followsUp(try board.getTicket(db, a, k)));
 
-    // Without the PR there's nothing to park the follow-up on.
-    try std.testing.expectError(error.NoPrUrl, finished(ctx, db, a, k, "", ""));
+    // Without the PR there's nothing to wait on.
+    try std.testing.expectError(error.NoPrUrl, finished(ctx, cfg, db, a, k, "", ""));
     try std.testing.expectEqual(board.Stage.testing, (try board.getTicket(db, a, k)).stage);
 
-    try finished(ctx, db, a, k, "Opened the PR", "https://github.com/o/r/pull/31");
+    try finished(ctx, cfg, db, a, k, "Opened the PR", "https://github.com/o/r/pull/31");
+    const p = try board.getTicket(db, a, k);
+    // The stage it was in, not Done: no unmerged flag, out of Needs You.
+    try std.testing.expectEqual(board.Stage.testing, p.stage);
+    try std.testing.expectEqualStrings("", p.finishing);
+    try std.testing.expectEqualStrings("https://github.com/o/r/pull/31", p.pr_url);
+    try std.testing.expectEqual(board.Stage.testing, board.prStage(p).?);
+    try std.testing.expect(p.park.?.review);
+    try std.testing.expectEqualStrings("Waiting on PR #31", p.park.?.reason);
+    try std.testing.expectEqualStrings("https://github.com/o/r/pull/31", p.park.?.pr);
+    try std.testing.expect(flagOf(p, board.flag_unmerged) == null);
+    try std.testing.expectEqual(@as(usize, 0), (try board.listTickets(db, a, .{ .needs = true })).len);
+    // The follow-up waits for the merge.
+    try std.testing.expectEqual(@as(i64, 0), p.children);
+
+    try prMerged(ctx, db, a, k, "https://github.com/o/r/pull/31");
     const done = try board.getTicket(db, a, k);
     try std.testing.expectEqual(board.Stage.done, done.stage);
+    try std.testing.expect(flagOf(done, board.flag_unmerged) == null);
     try std.testing.expectEqual(@as(i64, 1), done.children);
     const fk = (try board.listTickets(db, a, .{ .parent = k }))[0].key;
     const f = try board.getTicket(db, a, fk);
+    // Merged already: queued to start, not parked.
     try std.testing.expectEqual(board.Stage.queued, f.stage);
-    try std.testing.expectEqualStrings("https://github.com/o/r/pull/31", f.park.?.pr);
+    try std.testing.expect(f.park == null);
+    try std.testing.expect(!f.killed);
     try std.testing.expect(std.mem.indexOf(u8, f.body, "Deploy, then run the backfill.") != null);
     const comments = try board.comments(db, a, done.id);
     try std.testing.expect(std.mem.indexOf(u8, comments[comments.len - 1].body, fk) != null);
 
     // Finished with a PR and no steps: nothing follows.
-    const k2 = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Plain PR", .stage = .testing });
+    const k2 = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Plain PR", .stage = .review });
     try board.setFinishing(ctx, db, (try board.getTicket(db, a, k2)).id, "pr");
-    try finished(ctx, db, a, k2, "", "https://github.com/o/r/pull/32");
+    try finished(ctx, cfg, db, a, k2, "", "https://github.com/o/r/pull/32");
+    try std.testing.expectEqual(board.Stage.review, (try board.getTicket(db, a, k2)).stage);
+    try prMerged(ctx, db, a, k2, "https://github.com/o/r/pull/32");
     try std.testing.expectEqual(@as(i64, 0), (try board.getTicket(db, a, k2)).children);
 }
 

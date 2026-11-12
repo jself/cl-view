@@ -17,6 +17,13 @@
 //! park with a `pr-closed` flag rather than checking until it gives up. A
 //! ticket finished with a PR and steps for after it merges (`pr_then`) gets
 //! a follow-up sub-ticket parked that way (`followUp`).
+//!
+//! A ticket finished with a PR (`done --close --pr-url`) waits on it parked
+//! in the stage it was in (`Options.review`, `board.Ticket.pr_url`): its
+//! check asks gh about the PR itself (pr_feedback.zig). New feedback from
+//! someone else (reviews, comments, a required check that failed) wakes it
+//! to address that; when its session is done it is parked on the PR again
+//! (`reparkOnPr`). The merge moves it to Done, without resuming it.
 const std = @import("std");
 const Ctx = @import("ctx.zig");
 const config = @import("config.zig");
@@ -24,6 +31,7 @@ const board = @import("board.zig");
 const actions = @import("actions.zig");
 const dispatch = @import("dispatch.zig");
 const review = @import("review.zig");
+const pr_feedback = @import("pr_feedback.zig");
 
 pub const default_every = 3600;
 pub const default_max = 7 * 86400;
@@ -98,6 +106,8 @@ pub const Options = struct {
     every: i64 = default_every,
     /// null: default_max, or default_max_pr on a PR.
     max: ?i64 = null,
+    /// With `pr`: the PR the ticket was finished with (board.Park.review).
+    review: bool = false,
 };
 
 /// A pull request on a GitHub host.
@@ -252,8 +262,11 @@ pub fn park(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, o: Op
         const origin = if (std.mem.indexOfScalar(u8, pr_spec, '/') == null) originRepo(ctx, a, try review.ticketDir(db, a, t)) else null;
         the_pr = try parsePr(a, pr_spec, origin);
         until = try the_pr.?.check(a);
-        if (reason.len == 0) reason = try std.fmt.allocPrint(a, "PR #{d}: waiting to merge", .{the_pr.?.number});
-    }
+        if (reason.len == 0) reason = if (o.review)
+            try std.fmt.allocPrint(a, "Waiting on PR #{d}", .{the_pr.?.number})
+        else
+            try std.fmt.allocPrint(a, "PR #{d}: waiting to merge", .{the_pr.?.number});
+    } else if (o.review) return error.BadInput;
     if (reason.len == 0) return error.BadInput;
     const now = ctx.nowSeconds();
     try board.setPark(ctx, db, t.id, .{
@@ -266,6 +279,7 @@ pub fn park(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, o: Op
         // command shows at once.
         .next = now,
         .pr = if (the_pr) |x| x.url else "",
+        .review = o.review,
     });
     // What an earlier park left is settled by this one.
     try board.clearFlagId(ctx, db, t.id, board.flag_unparked);
@@ -388,11 +402,17 @@ pub fn runCheck(ctx: Ctx, cfg: config.Config, db: board.Db, key: []const u8, at:
     if (p.at != at or p.until.len == 0) return;
     const result = check(ctx, db, a, t, p);
     board.recordParkCheck(db, t.id, at, ctx.nowSeconds(), result.text) catch {};
-    if (result.ok) wake(ctx, cfg, db, a, t, p) else if (result.closed) prClosed(ctx, db, a, t, p) catch {};
+    if (result.ok and p.review) {
+        merged(ctx, db, a, t, p) catch |e| {
+            board.setFlagId(ctx, db, t.id, board.flag_unparked, "auto", std.fmt.allocPrint(a, "{s} merged, but cl couldn't move it to Done: {s}", .{ p.pr, @errorName(e) }) catch p.pr) catch {};
+        };
+    } else if (result.ok) wake(ctx, cfg, db, a, t, p) else if (result.closed) prClosed(ctx, db, a, t, p) catch {} else if (result.feedback) |fb| wakeFeedback(ctx, cfg, db, a, t, p, fb);
 }
 
 /// `closed`: a park on a PR whose PR was closed without merging.
-const CheckResult = struct { ok: bool, closed: bool = false, text: []const u8 };
+/// `feedback`: a park on the PR it was finished with, which has feedback
+/// for its session.
+const CheckResult = struct { ok: bool, closed: bool = false, feedback: ?pr_feedback.Assessment = null, text: []const u8 };
 
 fn check(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, p: board.Park) CheckResult {
     return checkIn(ctx, db, a, t, p) catch |e| .{ .ok = false, .text = std.fmt.allocPrint(a, "cl couldn't run it: {s}", .{@errorName(e)}) catch "cl couldn't run it" };
@@ -407,6 +427,7 @@ fn checkIn(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, p: boa
     try env.put("CL_TICKET", t.key);
     try env.put("CL_PARK_UNTIL", p.until);
     const limit = @min(@max(p.every, 1), max_check);
+    if (p.review and p.pr.len > 0) return reviewCheck(ctx, a, t, p, dir, &env, limit);
     // Not `exec sh -c`: this shell keeps the output open until the check
     // ends, so a check that closes its own (`exec >/dev/null`) is still
     // timed out (`runLimited` times the output). `exit` keeps it from
@@ -428,6 +449,50 @@ fn checkIn(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, p: boa
         .closed = p.pr.len > 0 and code == pr_closed_exit and !res.timed_out,
         .text = if (last.len > 0) try std.fmt.allocPrint(a, "{s}: {s}", .{ what, last }) else what,
     };
+}
+
+/// The check of a park on the PR the ticket was finished with: merged,
+/// closed, or open with feedback for it (or not).
+fn reviewCheck(ctx: Ctx, a: std.mem.Allocator, t: board.Ticket, p: board.Park, dir: []const u8, env: *const std.process.Environ.Map, limit: i64) !CheckResult {
+    const the = try parsePr(a, p.pr, null);
+    const n = try std.fmt.allocPrint(a, "{d}", .{the.number});
+    const view = try gh(ctx, a, dir, env, limit, &.{ "pr", "view", n, "-R", the.repo, "--json", pr_feedback.view_fields });
+    if (!view.ok) return .{ .ok = false, .text = try std.fmt.allocPrint(a, "gh pr view failed: {s}", .{lastLine(view.out)}) };
+    const state = pr_feedback.assess(a, view.out, "", "", t.pr_seen, t.pr_seen_sha) catch
+        return .{ .ok = false, .text = try std.fmt.allocPrint(a, "gh pr view said: {s}", .{lastLine(view.out)}) };
+    switch (state.state) {
+        .merged => return .{ .ok = true, .text = try std.fmt.allocPrint(a, "PR #{d}: MERGED", .{the.number}) },
+        .closed => return .{ .ok = false, .closed = true, .text = try std.fmt.allocPrint(a, "PR #{d}: CLOSED", .{the.number}) },
+        .open => {},
+    }
+    // Inline comments come from the REST API: "host/owner/repo" off github.com.
+    var api: std.ArrayList([]const u8) = .empty;
+    try api.append(a, "api");
+    var path = the.repo;
+    if (std.mem.count(u8, the.repo, "/") == 2) {
+        const i = std.mem.indexOfScalar(u8, the.repo, '/').?;
+        try api.appendSlice(a, &.{ "--hostname", the.repo[0..i] });
+        path = the.repo[i + 1 ..];
+    }
+    try api.appendSlice(a, &.{ "--paginate", try std.fmt.allocPrint(a, "repos/{s}/pulls/{d}/comments?per_page=100", .{ path, the.number }), "--jq", ".[] | " ++ pr_feedback.inline_jq });
+    const inline_comments = try gh(ctx, a, dir, env, limit, api.items);
+    if (!inline_comments.ok) return .{ .ok = false, .text = try std.fmt.allocPrint(a, "gh api (the PR's review comments) failed: {s}", .{lastLine(inline_comments.out)}) };
+    // It fails when checks failed (or none are required): the output says which.
+    const checks = try gh(ctx, a, dir, env, limit, &.{ "pr", "checks", n, "-R", the.repo, "--required", "--json", pr_feedback.check_fields });
+    const r = pr_feedback.assess(a, view.out, inline_comments.out, checks.out, t.pr_seen, t.pr_seen_sha) catch
+        return .{ .ok = false, .text = try std.fmt.allocPrint(a, "gh api said: {s}", .{lastLine(inline_comments.out)}) };
+    if (r.wakes()) return .{ .ok = false, .feedback = r, .text = try std.fmt.allocPrint(a, "PR #{d}: OPEN; {s}", .{ the.number, try pr_feedback.headline(a, r) }) };
+    return .{ .ok = false, .text = try std.fmt.allocPrint(a, "PR #{d}: OPEN; no new feedback{s}", .{ the.number, if (r.changes_requested) " (changes requested earlier)" else "" }) };
+}
+
+/// Run gh with `args` (stderr with its output); `ok` when it exited 0.
+fn gh(ctx: Ctx, a: std.mem.Allocator, dir: []const u8, env: *const std.process.Environ.Map, limit: i64, args: []const []const u8) !struct { ok: bool, out: []const u8 } {
+    var argv: std.ArrayList([]const u8) = .empty;
+    try argv.appendSlice(a, &.{ "sh", "-c", "exec </dev/null 2>&1; gh \"$@\"; exit $?", "sh" });
+    try argv.appendSlice(a, args);
+    const res = try runLimited(ctx, a, argv.items, dir, env, limit);
+    const ok = !res.timed_out and res.term == .exited and res.term.exited == 0;
+    return .{ .ok = ok, .out = if (res.timed_out) try std.fmt.allocPrint(a, "{s}\ntimed out after {s}", .{ res.out, try formatDuration(a, limit) }) else res.out };
 }
 
 const Limited = struct { term: std.process.Child.Term, out: []const u8, timed_out: bool };
@@ -542,6 +607,9 @@ test lastLine {
 /// `pr-closed` flag (it won't merge now), and the session stays stopped.
 fn prClosed(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, p: board.Park) !void {
     _ = try board.takePark(ctx, db, a, t.id, p.at) orelse return;
+    // The PR it was finished with is over: it no longer waits on it, so its
+    // next `done` takes the usual path rather than parking on the closed PR.
+    if (p.review) try board.clearPr(ctx, db, t.id);
     try board.logEvent(ctx, db, t.id, "pr closed", p.pr);
     try board.setFlagId(ctx, db, t.id, board.flag_pr_closed, "auto", try std.fmt.allocPrint(a, "{s} was closed without merging, so the park ended; its session stays stopped{s}.", .{
         p.pr, if (t.started) "" else " (it never started: `cl ticket start` runs it anyway, `cl ticket rm` drops it)",
@@ -565,7 +633,11 @@ fn wake(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: boa
     board.setFlagId(ctx, db, t.id, board.flag_unparked, "auto", (if (p.pr.len > 0) std.fmt.allocPrint(a, "PR merged: {s}", .{p.pr}) else std.fmt.allocPrint(a, "Parked condition met: {s}", .{p.reason})) catch p.reason) catch {};
     // A todo is yours: the flag tells you, and there is no session to resume.
     if (t.todo) return;
-    const note = metNote(a, t, p) catch return;
+    resumeOrHold(ctx, cfg, db, a, t, metNote(a, t, p) catch return);
+}
+
+/// A woken park's session resumes with `note`, unless it is to wait.
+fn resumeOrHold(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: board.Ticket, note: []const u8) void {
     // Shelved in Backlog: it isn't to start now. The note waits for whenever
     // it is queued again.
     if (t.stage == .backlog) {
@@ -585,10 +657,46 @@ fn wake(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: boa
     };
 }
 
+/// New feedback on the PR it was finished with: the park ends, flagged,
+/// and its session resumes with the feedback. What it was told is kept, so
+/// the same feedback never wakes it twice.
+fn wakeFeedback(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: board.Ticket, p: board.Park, fb: pr_feedback.Assessment) void {
+    const took = board.takePark(ctx, db, a, t.id, p.at) catch return;
+    if (took == null) return;
+    board.setPrSeen(db, t.id, fb.handed(), if (fb.failed.len > 0) fb.head else t.pr_seen_sha) catch {};
+    const line = pr_feedback.headline(a, fb) catch "feedback";
+    board.logEvent(ctx, db, t.id, "pr feedback", line) catch {};
+    board.setFlagId(ctx, db, t.id, board.flag_unparked, "auto", std.fmt.allocPrint(a, "Feedback on {s}: {s}", .{ p.pr, line }) catch line) catch {};
+    const push = if (t.change.len > 0)
+        std.fmt.allocPrint(a, "its jj bookmark {s}: `jj git push -b {s}`", .{ t.branch, t.branch }) catch return
+    else
+        std.fmt.allocPrint(a, "{s}: commit, then `git push`", .{t.branch}) catch return;
+    resumeOrHold(ctx, cfg, db, a, t, pr_feedback.note(a, t.key, p.pr, push, fb) catch return);
+}
+
+/// The PR it was finished with merged: it goes to Done (its session isn't
+/// resumed) and what's left for after the merge gets a follow-up.
+fn merged(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, p: board.Park) !void {
+    _ = try board.takePark(ctx, db, a, t.id, p.at) orelse return;
+    try actions.prMerged(ctx, db, a, t.key, p.pr);
+}
+
+/// A round that woke for feedback on the PR it was finished with is done:
+/// it waits on the PR again, parked as before (a push may need a new
+/// approval). null when it has no PR to wait on (or is parked already).
+/// The session goes on until `stopSession`, as with `park`.
+pub fn reparkOnPr(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8) !?Parked {
+    const t = try board.getTicket(db, a, key);
+    if (t.park != null or t.todo) return null;
+    _ = board.prStage(t) orelse return null;
+    return try park(ctx, db, a, key, .{ .pr = t.pr_url, .review = true });
+}
+
 /// A ticket finished with a PR (`pr_url`) and steps for after it merges
-/// (`steps`): a sub-ticket that does them, in Queued and parked on the PR,
-/// so a fresh session starts on it once the PR merges. Returns its key.
-pub fn followUp(ctx: Ctx, db: board.Db, a: std.mem.Allocator, parent: board.Ticket, pr_url: []const u8, steps: []const u8) ![]const u8 {
+/// (`steps`): a sub-ticket that does them, in Queued, so a session starts on
+/// it once the PR merges: parked on the PR until then, unless it has
+/// `merged` already. Returns its key.
+pub fn followUp(ctx: Ctx, db: board.Db, a: std.mem.Allocator, parent: board.Ticket, pr_url: []const u8, steps: []const u8, has_merged: bool) ![]const u8 {
     const the_pr = try parsePr(a, pr_url, null);
     const title = try std.fmt.allocPrint(a, "After PR #{d} merges: {s}", .{ the_pr.number, parent.title });
     const body = try std.fmt.allocPrint(a,
@@ -601,7 +709,7 @@ pub fn followUp(ctx: Ctx, db: board.Db, a: std.mem.Allocator, parent: board.Tick
     // Made in Backlog and queued only once parked: a dispatcher pass in
     // between would otherwise start it before the PR merged.
     const key = try board.createTicket(ctx, db, a, .{ .project = parent.project, .parent = parent.key, .title = title, .body = body, .stage = .backlog });
-    _ = try park(ctx, db, a, key, .{ .pr = the_pr.url });
+    if (!has_merged) _ = try park(ctx, db, a, key, .{ .pr = the_pr.url });
     // Queued and not killed: once the park ends, it starts there or waits its turn.
     try board.requeue(ctx, db, try board.getTicket(db, a, key));
     return key;
@@ -788,7 +896,7 @@ test "a follow-up is a queued sub-ticket parked on the PR, told the parent, the 
     try board.addProject(db, .{ .name = "qa", .dir = "/x/qa" });
     const kp = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Redact metadata", .stage = .done });
     const parent = try board.getTicket(db, a, kp);
-    const k = try followUp(ctx, db, a, parent, "https://github.com/epoch/qa/pull/30", "Deploy, back up, dry run, then run metadata:redact on prod.\n");
+    const k = try followUp(ctx, db, a, parent, "https://github.com/epoch/qa/pull/30", "Deploy, back up, dry run, then run metadata:redact on prod.\n", false);
     const t = try board.getTicket(db, a, k);
     try testing.expectEqualStrings(kp, t.parent);
     try testing.expectEqual(board.Stage.queued, t.stage);
@@ -1000,4 +1108,155 @@ test "parking a todo leaves its talk session open, from the board or from inside
     try testing.expectEqualStrings("cl_me-1", t.tmux);
     try testing.expect(!t.killed);
     try testing.expect(actions.liveSession(ctx, t) != null);
+}
+
+test "finished with a PR: outside feedback wakes it once, its round re-parks it in the same stage, the merge moves it to Done" {
+    const gpa = testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realPathFileAlloc(testing.io, ".", a);
+    // A gh that answers from files in `dir`: the PR, its inline comments, its required checks.
+    try tmp.dir.createDirPath(testing.io, "bin");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "bin/gh", .data =
+        \\#!/bin/sh
+        \\case "$1 $2" in
+        \\"pr view") cat "$FAKE_GH/view" ;;
+        \\"pr checks") cat "$FAKE_GH/checks"; exit 1 ;;
+        \\api*) cat "$FAKE_GH/inline" ;;
+        \\*) echo "unexpected: $*"; exit 2 ;;
+        \\esac
+        \\
+    });
+    const gh_path = try std.fmt.allocPrint(a, "{s}/bin/gh", .{dir});
+    _ = try std.process.run(a, testing.io, .{ .argv = &.{ "chmod", "+x", gh_path } });
+    var env: std.process.Environ.Map = .init(gpa);
+    defer env.deinit();
+    try env.put("PATH", try std.fmt.allocPrint(a, "{s}/bin:/usr/bin:/bin", .{dir}));
+    try env.put("FAKE_GH", dir);
+    // No tmux at all: resuming its session fails (flagged), nothing reaches a real server.
+    const ctx: Ctx = .{ .io = testing.io, .gpa = gpa, .perm = a, .env = &env, .home = "/tmp", .tmux_blocked = true };
+    const cfg: config.Config = .{ .profiles = &.{}, .default = "", .operator = "" };
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "qa", .dir = dir });
+    const k = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Assignable members", .stage = .review });
+    const id = (try board.getTicket(db, a, k)).id;
+    try board.setChange(db, id, "zzzz", "qa-1-assignable");
+    try board.setPrThen(ctx, db, id, "Retry the parked syncs.");
+    try board.setFinishing(ctx, db, id, "pr");
+    try actions.finished(ctx, cfg, db, a, k, "Opened the PR", "https://github.com/o/r/pull/31");
+    var t = try board.getTicket(db, a, k);
+    try testing.expectEqual(board.Stage.review, t.stage);
+    try testing.expect(t.park.?.review);
+
+    // Open, with comments from others since the last push: it wakes, told them.
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "view", .data = pr_feedback.fake_view });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "inline", .data = pr_feedback.fake_inline });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "checks", .data = pr_feedback.fake_checks });
+    runCheck(ctx, cfg, db, k, t.park.?.at);
+    t = try board.getTicket(db, a, k);
+    try testing.expect(t.park == null);
+    var woke = false;
+    for (t.flags) |f| if (std.mem.eql(u8, f.kind, board.flag_unparked)) {
+        woke = true;
+        try testing.expect(std.mem.indexOf(u8, f.detail, "4 new review comments from hryanjones, sam") != null);
+    };
+    try testing.expect(woke);
+    const notes = try board.unsentNotes(db, a, t.id);
+    try testing.expect(notes.len >= 1);
+    const n = notes[notes.len - 1].body;
+    for ([_][]const u8{ "Fires on adoption too.", "snapshot.ts:196", "https://github.com/o/r/pull/31#discussion_r2", "jj git push -b qa-1-assignable", "Don't merge the PR" }) |s| try testing.expect(std.mem.indexOf(u8, n, s) != null);
+    try testing.expectEqual(pr_feedback.parseTime("2026-11-10T18:30:00Z").?, t.pr_seen);
+    try testing.expectEqualStrings("e8e708df549eba172bb197f9ea04e8e002a5bc0c", t.pr_seen_sha);
+
+    // Its round is done (resumed, it may have been sent to Running): back in
+    // the stage it waited in, and parked on the PR again.
+    try board.moveTicket(ctx, db, t, .running);
+    try board.done(ctx, db, a, k, "Fixed both; proposed replies: ...");
+    try testing.expectEqual(board.Stage.review, (try board.getTicket(db, a, k)).stage);
+    try testing.expect((try reparkOnPr(ctx, db, a, k)) != null);
+    t = try board.getTicket(db, a, k);
+    try testing.expect(t.park.?.review);
+    try testing.expectEqualStrings("https://github.com/o/r/pull/31", t.park.?.pr);
+    try testing.expectEqual(@as(?Parked, null), try reparkOnPr(ctx, db, a, k));
+
+    // The same comments and the same commit's failed check don't wake it again.
+    runCheck(ctx, cfg, db, k, t.park.?.at);
+    t = try board.getTicket(db, a, k);
+    try testing.expect(t.park != null);
+    try testing.expectEqualStrings("PR #31: OPEN; no new feedback (changes requested earlier)", t.park.?.result);
+
+    // Merged (by anyone): Done, not resumed, not called unmerged; the follow-up starts.
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "view", .data = "{\"state\":\"MERGED\",\"headRefOid\":\"e8e7\"}" });
+    runCheck(ctx, cfg, db, k, t.park.?.at);
+    t = try board.getTicket(db, a, k);
+    try testing.expectEqual(board.Stage.done, t.stage);
+    try testing.expect(t.park == null);
+    for (t.flags) |f| try testing.expect(!std.mem.eql(u8, f.kind, board.flag_unmerged));
+    try testing.expectEqual(@as(i64, 1), t.children);
+}
+
+test "a review park: its PR closed ends the wait on it for good; one that expires keeps it; the same PR again keeps what was handed over" {
+    const gpa = testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var env: std.process.Environ.Map = .init(gpa);
+    defer env.deinit();
+    const ctx: Ctx = .{ .io = testing.io, .gpa = gpa, .perm = a, .env = &env, .home = "/tmp", .tmux_blocked = true };
+    const cfg: config.Config = .{ .profiles = &.{}, .default = "", .operator = "" };
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "qa", .dir = try tmp.dir.realPathFileAlloc(testing.io, ".", a) });
+
+    // Closed without merging: pr-closed, and it no longer waits on that PR,
+    // so resumed and done again it lands in Review the usual way, unparked.
+    const k = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Closed PR", .stage = .testing });
+    try board.setFinishing(ctx, db, (try board.getTicket(db, a, k)).id, "pr");
+    try actions.finished(ctx, cfg, db, a, k, "", "https://github.com/o/r/pull/31");
+    var t = try board.getTicket(db, a, k);
+    try testing.expect(t.park.?.review);
+    try prClosed(ctx, db, a, t, t.park.?);
+    t = try board.getTicket(db, a, k);
+    try testing.expect(t.park == null);
+    try testing.expectEqualStrings(board.flag_pr_closed, t.flags[0].kind);
+    try testing.expectEqualStrings("", t.pr_url);
+    try testing.expectEqual(@as(?board.Stage, null), board.prStage(t));
+    try board.moveTicket(ctx, db, t, .running);
+    try board.done(ctx, db, a, k, "Reworked it");
+    try testing.expectEqual(board.Stage.review, (try board.getTicket(db, a, k)).stage);
+    try testing.expectEqual(@as(?Parked, null), try reparkOnPr(ctx, db, a, k));
+    try testing.expect((try board.getTicket(db, a, k)).park == null);
+
+    // Not merged in time: park-expired, still in its stage and still on its
+    // PR (open, so its next done waits on it again).
+    const k2 = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Slow PR", .stage = .testing });
+    try board.setFinishing(ctx, db, (try board.getTicket(db, a, k2)).id, "pr");
+    try actions.finished(ctx, cfg, db, a, k2, "", "https://github.com/o/r/pull/32");
+    const p2 = (try board.getTicket(db, a, k2)).park.?;
+    const due = try board.dueParks(db, a, p2.deadline);
+    for (due) |d| if (std.mem.eql(u8, d.key, k2)) try expire(ctx, db, a, d);
+    t = try board.getTicket(db, a, k2);
+    try testing.expect(t.park == null);
+    try testing.expectEqual(board.Stage.testing, t.stage);
+    try testing.expectEqualStrings(board.flag_park_expired, t.flags[0].kind);
+    try testing.expectEqual(board.Stage.testing, board.prStage(t).?);
+
+    // Finished with the same PR again, what was handed over stays; another PR starts afresh.
+    try board.setPrSeen(db, t.id, 1000, "abc");
+    try board.setPr(ctx, db, t.id, "https://github.com/o/r/pull/32", .testing);
+    t = try board.getTicket(db, a, k2);
+    try testing.expectEqual(@as(i64, 1000), t.pr_seen);
+    try testing.expectEqualStrings("abc", t.pr_seen_sha);
+    try board.setPr(ctx, db, t.id, "https://github.com/o/r/pull/33", .testing);
+    t = try board.getTicket(db, a, k2);
+    try testing.expectEqual(@as(i64, 0), t.pr_seen);
+    try testing.expectEqualStrings("", t.pr_seen_sha);
 }

@@ -164,6 +164,9 @@ pub const Park = struct {
     /// Parked on a pull request (`park --pr`): its URL. `until` is the gh
     /// check cl wrote for it, and a PR closed without merging ends the park.
     pr: []const u8 = "",
+    /// Parked on the PR it was finished with (`Ticket.pr_url`): feedback on
+    /// the PR wakes it to address it, and the merge moves it to Done.
+    review: bool = false,
 };
 
 pub const Event = struct {
@@ -245,6 +248,18 @@ pub const Ticket = struct {
     /// PR URL, it becomes a follow-up sub-ticket parked on that PR; "" for
     /// none.
     pr_then: []const u8 = "",
+    /// The pull request it was finished with (`done --close --pr-url`), ""
+    /// for none. Until it merges, the ticket stays in `pr_stage`, parked on
+    /// it, and a round that woke for feedback on the PR goes back there and
+    /// is parked on it again (`park.reparkOnPr`).
+    pr_url: []const u8 = "",
+    /// The stage it was in when it was parked on `pr_url`.
+    pr_stage: []const u8 = "",
+    /// Feedback on `pr_url` already handed to its session: outside reviews
+    /// and comments up to this time, and the head commit whose failed
+    /// required checks it was told about ("" for none). See pr_feedback.zig.
+    pr_seen: i64 = 0,
+    pr_seen_sha: []const u8 = "",
     /// The plan its planning session gave with `done` (markdown), "" for
     /// none: what the session that builds it is told.
     plan_md: []const u8 = "",
@@ -423,6 +438,10 @@ const schema =
     \\  remind_at INTEGER NOT NULL DEFAULT 0,
     \\  onto TEXT NOT NULL DEFAULT '',
     \\  pr_then TEXT NOT NULL DEFAULT '',
+    \\  pr_url TEXT NOT NULL DEFAULT '',
+    \\  pr_stage TEXT NOT NULL DEFAULT '',
+    \\  pr_seen INTEGER NOT NULL DEFAULT 0,
+    \\  pr_seen_sha TEXT NOT NULL DEFAULT '',
     \\  overview_last TEXT NOT NULL DEFAULT '',
     \\  overview_next TEXT NOT NULL DEFAULT '',
     \\  overview_at INTEGER NOT NULL DEFAULT 0,
@@ -514,7 +533,8 @@ const parks_schema =
     \\  next INTEGER NOT NULL DEFAULT 0,
     \\  checked INTEGER NOT NULL DEFAULT 0,
     \\  result TEXT NOT NULL DEFAULT '',
-    \\  pr TEXT NOT NULL DEFAULT ''
+    \\  pr TEXT NOT NULL DEFAULT '',
+    \\  review INTEGER NOT NULL DEFAULT 0
     \\);
 ;
 
@@ -617,6 +637,12 @@ pub fn migrate(db: Db) !void {
         _ = try addColumn(db, "tickets", "overview_last", "TEXT NOT NULL DEFAULT ''");
         _ = try addColumn(db, "tickets", "overview_next", "TEXT NOT NULL DEFAULT ''");
         _ = try addColumn(db, "tickets", "overview_at", "INTEGER NOT NULL DEFAULT 0");
+        // Tickets finished with a PR wait on it parked, woken by its feedback.
+        _ = try addColumn(db, "tickets", "pr_url", "TEXT NOT NULL DEFAULT ''");
+        _ = try addColumn(db, "tickets", "pr_stage", "TEXT NOT NULL DEFAULT ''");
+        _ = try addColumn(db, "tickets", "pr_seen", "INTEGER NOT NULL DEFAULT 0");
+        _ = try addColumn(db, "tickets", "pr_seen_sha", "TEXT NOT NULL DEFAULT ''");
+        _ = try addColumn(db, "parks", "review", "INTEGER NOT NULL DEFAULT 0");
     }
     if (have >= version) return;
     // Version 1 had no sub-tickets, version 2 no planning skill.
@@ -1221,7 +1247,8 @@ const ticket_cols = "t.id, t.key, t.project, t.title, t.body, t.stage, t.mode, t
     "EXISTS (SELECT 1 FROM events e WHERE e.ticket = t.id AND e.kind = 'started'), " ++
     "(SELECT count(*) FROM tickets c WHERE c.parent = t.id AND c.stage = 'done'), t.umbrella, " ++
     "t.onto, coalesce((SELECT p.onto FROM projects p WHERE p.name = t.project), ''), t.autoreview, t.pr_then, " ++
-    "coalesce((SELECT p.repo FROM projects p WHERE p.name = t.project), 1), t.todo, t.link, t.due_at, t.due_time, t.remind_at, t.overview_last, t.overview_next, t.overview_at";
+    "coalesce((SELECT p.repo FROM projects p WHERE p.name = t.project), 1), t.todo, t.link, t.due_at, t.due_time, t.remind_at, t.overview_last, t.overview_next, t.overview_at, " ++
+    "t.pr_url, t.pr_stage, t.pr_seen, t.pr_seen_sha";
 
 fn readTicket(st: sqlite.Stmt, a: std.mem.Allocator) !Ticket {
     return .{
@@ -1274,6 +1301,10 @@ fn readTicket(st: sqlite.Stmt, a: std.mem.Allocator) !Ticket {
         .overview_last = try st.dupe(a, 46),
         .overview_next = try st.dupe(a, 47),
         .overview_at = st.int(48),
+        .pr_url = try st.dupe(a, 49),
+        .pr_stage = try st.dupe(a, 50),
+        .pr_seen = st.int(51),
+        .pr_seen_sha = try st.dupe(a, 52),
     };
 }
 
@@ -2391,9 +2422,43 @@ pub fn done(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, summary: []
     try clearFlagId(ctx, db, t.id, flag_input);
     // Woken from a park and finished since: the review flag says it now.
     try clearFlagId(ctx, db, t.id, flag_unparked);
-    if (t.stage != .review) try moveId(ctx, db, t.id, t.stage, .review);
+    // A round on its PR's feedback goes back where it waited on the PR,
+    // not through the stages before it again.
+    const back = prStage(t) orelse .review;
+    if (t.stage != back) try moveId(ctx, db, t.id, t.stage, back);
     try setFlagId(ctx, db, t.id, flag_review, "auto", "");
     try logEvent(ctx, db, t.id, "done", "");
+}
+
+/// The stage a ticket finished with a PR waits in, parked on it; null when
+/// it has no PR (or is Done).
+pub fn prStage(t: Ticket) ?Stage {
+    if (t.pr_url.len == 0 or t.stage == .done) return null;
+    const s = Stage.parse(t.pr_stage) orelse return null;
+    return if (s == .done) null else s;
+}
+
+/// The ticket was finished with the pull request `url` and waits in
+/// `stage` for it. What its feedback rounds handed over starts afresh for
+/// another PR, and is kept for the same one (finished with it again).
+pub fn setPr(ctx: Ctx, db: Db, id: i64, url: []const u8, stage: Stage) Error!void {
+    try db.exec(
+        \\UPDATE tickets SET pr_seen = CASE WHEN pr_url = ?2 THEN pr_seen ELSE 0 END,
+        \\  pr_seen_sha = CASE WHEN pr_url = ?2 THEN pr_seen_sha ELSE '' END,
+        \\  pr_url = ?2, pr_stage = ?3 WHERE id = ?1
+    , .{ id, url, @as([]const u8, @tagName(stage)) });
+    try touch(ctx, db, id);
+}
+
+/// It no longer waits on a PR (closed without merging): `prStage` is null.
+pub fn clearPr(ctx: Ctx, db: Db, id: i64) Error!void {
+    try db.exec("UPDATE tickets SET pr_url = '', pr_stage = '', pr_seen = 0, pr_seen_sha = '' WHERE id = ?1", .{id});
+    try touch(ctx, db, id);
+}
+
+/// What of its PR's feedback has been handed to its session (Ticket.pr_seen).
+pub fn setPrSeen(db: Db, id: i64, at: i64, sha: []const u8) Error!void {
+    try db.exec("UPDATE tickets SET pr_seen = max(pr_seen, ?2), pr_seen_sha = ?3 WHERE id = ?1", .{ id, at, sha });
 }
 
 /// The stage `approve` moves a ticket to: an approved plan goes to Queued
@@ -2588,7 +2653,7 @@ pub fn pruneDrift(db: Db) Error!void {
 // ---- parks ----
 
 fn parkOf(db: Db, a: std.mem.Allocator, id: i64) Error!?Park {
-    var st = try db.query("SELECT reason, until_cmd, every, at, deadline, next, checked, result, pr FROM parks WHERE ticket = ?1", .{id});
+    var st = try db.query("SELECT reason, until_cmd, every, at, deadline, next, checked, result, pr, review FROM parks WHERE ticket = ?1", .{id});
     defer st.finalize();
     if (!try st.step()) return null;
     return .{
@@ -2601,6 +2666,7 @@ fn parkOf(db: Db, a: std.mem.Allocator, id: i64) Error!?Park {
         .checked = st.int(6),
         .result = try st.dupe(a, 7),
         .pr = try st.dupe(a, 8),
+        .review = st.int(9) != 0,
     };
 }
 
@@ -2608,9 +2674,9 @@ fn parkOf(db: Db, a: std.mem.Allocator, id: i64) Error!?Park {
 /// first one is due at once.
 pub fn setPark(ctx: Ctx, db: Db, id: i64, p: Park) Error!void {
     try db.exec(
-        \\INSERT OR REPLACE INTO parks (ticket, reason, until_cmd, every, at, deadline, next, checked, result, pr)
-        \\VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, '', ?8)
-    , .{ id, p.reason, p.until, p.every, p.at, p.deadline, p.next, p.pr });
+        \\INSERT OR REPLACE INTO parks (ticket, reason, until_cmd, every, at, deadline, next, checked, result, pr, review)
+        \\VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, '', ?8, ?9)
+    , .{ id, p.reason, p.until, p.every, p.at, p.deadline, p.next, p.pr, p.review });
     try logEvent(ctx, db, id, "parked", p.reason);
     try touch(ctx, db, id);
 }

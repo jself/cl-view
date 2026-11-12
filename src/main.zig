@@ -451,6 +451,7 @@ test {
     std.testing.refAllDecls(@import("ci.zig"));
     std.testing.refAllDecls(@import("web_service.zig"));
     std.testing.refAllDecls(@import("park.zig"));
+    std.testing.refAllDecls(@import("pr_feedback.zig"));
     std.testing.refAllDecls(@import("when.zig"));
     std.testing.refAllDecls(@import("reminders.zig"));
     std.testing.refAllDecls(@import("ticket_watch.zig"));

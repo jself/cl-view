@@ -117,13 +117,14 @@ pub const ticket_usage =
     \\                              backlog planning queued running review testing done
     \\                              (done also closes the ticket's session; it's refused while
     \\                              sub-tickets are unfinished, --spin-off makes them top-level;
-    \\                              --merge / --pr: Claude first merges the ticket's branch or
-    \\                              opens a PR, then it goes to done (a jj change cl merges
-    \\                              itself; Claude settles conflicts); --close, the default, and
-    \\                              tickets without a branch of their own go straight there;
-    \\                              --pr --then: what's left once the PR merges; the ticket still
-    \\                              closes when the PR is open, and a follow-up sub-ticket parked
-    \\                              on the PR does it after the merge (without --then, Claude's
+    \\                              --merge: Claude first merges the ticket's branch, then it goes
+    \\                              to done (a jj change cl merges itself; Claude settles
+    \\                              conflicts); --close, the default, and tickets without a branch
+    \\                              of their own go straight there; --pr: Claude opens a PR, and
+    \\                              the ticket stays in its stage parked on it: review comments
+    \\                              wake it, the merge moves it to done (see park);
+    \\                              --pr --then: what's left once the PR merges, done by a
+    \\                              follow-up sub-ticket after the merge (without --then, Claude's
     \\                              suggestion from custom-close --then, if any; "" for none);
     \\                              --tell: Claude first does what <text> says, branch or not;
     \\                              queued or backlog stops one in progress: its session ends as
@@ -166,7 +167,11 @@ pub const ticket_usage =
     \\                              --pr: cl writes the check (gh pr view): merged wakes it, closed
     \\                              without merging ends the park, flagged pr-closed. #n is a PR of
     \\                              the ticket's origin remote; --reason defaults to "PR #n: waiting
-    \\                              to merge", --max to 14d.
+    \\                              to merge", --max to 14d. A ticket finished with a PR (move
+    \\                              --pr) is parked on it so by cl, and its check also wakes it
+    \\                              for new reviews or comments from others since the last push,
+    \\                              or a failed required check; its round's done parks it on the
+    \\                              PR again; the merge moves it to done instead of resuming it.
     \\                              The dispatcher never starts a parked ticket, even in Queued
     \\  snooze <key> <when>          a todo: remind you then (see new's --due for <when>), and
     \\                              out of Needs You until then: its reminder goes, and its due
@@ -245,10 +250,10 @@ pub const ticket_usage =
     \\                              Claude, planning: the plan is ready for approval; the plan
     \\                              (markdown on stdin) is what the session that builds it gets
     \\  done [<key>] --close [--pr-url <url>]
-    \\                              Claude: merged or opened the PR it was asked to; moves to
-    \\                              done (the PR link becomes a comment) and closes the session.
-    \\                              With steps for after the PR merges (move --pr --then), a
-    \\                              follow-up sub-ticket does them, parked on --pr-url's PR
+    \\                              Claude: merged or opened the PR it was asked to. Merged: moves
+    \\                              to done and closes the session. A PR (--pr-url required): it
+    \\                              stays in its stage, parked on the PR (the link becomes a
+    \\                              comment), and the session closes until feedback wakes it
     \\  rm <key>                    (refused while it has sub-tickets); tickets that waited
     \\                              on it (--after) go on without it, and it says which
     \\
@@ -1046,14 +1051,19 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
                 if (args.get("--summary")) |sum| _ = board.addComment(ctx, db, a, key, "claude", sum, false) catch {};
                 return out(try std.fmt.allocPrint(a, "{s}: {s}\n", .{ t0.key, steps }));
             };
-            if (actions.followsUp(t0)) {
-                const pr = args.get("--pr-url") orelse fail("{s} has steps for after its PR merges: give the PR with --pr-url <url>, so cl can park the follow-up on it", .{t0.key});
-                _ = park.parsePr(a, pr, null) catch fail("--pr-url takes the PR's URL (https://github.com/<owner>/<repo>/pull/<n>): {s}", .{pr});
+            const pr_url = args.get("--pr-url") orelse "";
+            const on_pr = std.mem.eql(u8, t0.finishing, "pr");
+            if (on_pr) {
+                if (pr_url.len == 0) fail("{s} is finishing with a PR: give it with --pr-url <url>, so cl can park the ticket on it", .{t0.key});
+                _ = park.parsePr(a, pr_url, null) catch fail("--pr-url takes the PR's URL (https://github.com/<owner>/<repo>/pull/<n>): {s}", .{pr_url});
             }
             if (last) |l| if (l.len > 0) board.setOverview(ctx, db, t0.id, l, null) catch |e| boardFail(db, e, "ticket");
             // Printed first: closing kills the session this may be running in.
-            try out(try std.fmt.allocPrint(a, "{s}: done{s}; its session closes now.\n", .{ t0.key, if (actions.followsUp(t0)) ", and a follow-up sub-ticket is parked on the PR" else "" }));
-            actions.finished(ctx, db, a, key, args.get("--summary") orelse "", args.get("--pr-url") orelse "") catch |e| boardFail(db, e, "ticket");
+            if (on_pr)
+                try out(try std.fmt.allocPrint(a, "{s}: the PR is open; it stays in {s}, parked on the PR, and its session closes now (its conversation resumes if the PR gets review comments). The merge moves it to Done{s}.\n", .{ t0.key, @tagName(t0.stage), if (std.mem.trim(u8, t0.pr_then, " \t\r\n").len > 0) ", and a follow-up sub-ticket does what's left then" else "" }))
+            else
+                try out(try std.fmt.allocPrint(a, "{s}: done; its session closes now.\n", .{t0.key}));
+            actions.finished(ctx, cfg, db, a, key, args.get("--summary") orelse "", pr_url) catch |e| boardFail(db, e, "ticket");
             return;
         }
         if (args.get("--pr-url") != null) fail("--pr-url goes with --close", .{});
@@ -1073,6 +1083,16 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         if (last) |l| if (l.len > 0) board.setOverview(ctx, db, t0.id, l, null) catch |e| boardFail(db, e, "ticket");
         // Findings sent to it are handled now (before a new review replaces them).
         if (t0.stage != .planning) autoreview.answered(ctx, db, a, key, args.get("--summary") orelse "") catch {};
+        // A round on its PR's feedback: back where it waited, parked on the
+        // PR again (a push may need a new approval). Its work goes to the
+        // PR's reviewers, not through the board's stages (or review) again.
+        if (t0.stage != .planning) if (park.reparkOnPr(ctx, db, a, key) catch |e| boardFail(db, e, "ticket")) |_| {
+            const t = board.getTicket(db, a, key) catch |e| boardFail(db, e, "ticket");
+            // Said first: from inside the session, this process goes with it.
+            try out(try std.fmt.allocPrint(a, "{s}: back in {s}, parked on {s} again; its session closes now. New feedback on the PR wakes it again; the merge moves it to Done.\n", .{ t.key, @tagName(t.stage), t.pr_url }));
+            actions.stopForPark(ctx, cfg, db, a, key) catch |e| boardFail(db, e, "ticket");
+            return;
+        };
         // The project reviews what reaches Review by itself (--auto-review).
         const auto: []const u8 = if (t0.stage == .planning) "" else switch (autoreview.startOnReview(ctx, cfg, db, a, key)) {
             .off, .skipped => "",
@@ -1609,7 +1629,7 @@ fn finishNote(db: board.Db, a: std.mem.Allocator, key: []const u8) !void {
     const t = board.getTicket(db, a, key) catch return;
     if (t.finishing.len == 0) return;
     try out(try std.fmt.allocPrint(a, "{s}: Claude is {s}; it moves to done when that's through.{s}\n", .{
-        t.key, finishingWhat(t.finishing), if (actions.followsUp(t)) " Then a follow-up sub-ticket, parked on the PR, does what's left once it merges." else "",
+        t.key, finishingWhat(t.finishing), if (std.mem.eql(u8, t.finishing, "pr")) " With a PR, it waits on the PR parked instead, until it merges." else "",
     }));
 }
 
@@ -1835,7 +1855,7 @@ fn showText(ctx: Ctx, a: std.mem.Allocator, t: board.Ticket, dates: TodoDates, b
     if (t.tmux.len > 0) try w.print("session: {s}\n", .{t.tmux});
     if (t.park) |p| {
         try w.print("parked: {s} (since {s}; `cl ticket unpark {s}` resumes it)\n", .{ p.reason, try stamp(a, p.at), t.key });
-        if (p.pr.len > 0) try w.print("  pr: {s} (merged wakes it; closed without merging ends the park)\n", .{p.pr});
+        if (p.pr.len > 0 and p.review) try w.print("  pr: {s} (finished with it: new review comments wake it; merged moves it to done; closed without merging ends the park)\n", .{p.pr}) else if (p.pr.len > 0) try w.print("  pr: {s} (merged wakes it; closed without merging ends the park)\n", .{p.pr});
         if (p.until.len > 0) {
             try w.print("  until: {s}\n  every {s}, until {s}\n", .{ p.until, try park.formatDuration(a, p.every), try stamp(a, p.deadline) });
             if (p.checked > 0) try w.print("  last check: {s}: {s}\n", .{ try stamp(a, p.checked), p.result }) else try w.writeAll("  last check: none yet\n");
@@ -1846,6 +1866,7 @@ fn showText(ctx: Ctx, a: std.mem.Allocator, t: board.Ticket, dates: TodoDates, b
     if (t.overview_next.len > 0) try w.print("next: {s}\n", .{t.overview_next});
     if (t.custom_close.len > 0) try w.print("custom close: {s}\n", .{t.custom_close});
     if (t.pr_then.len > 0 and t.stage != .done) try w.print("after its PR merges: {s}\n", .{t.pr_then});
+    if (t.pr_url.len > 0) try w.print("pull request: {s}{s}\n", .{ t.pr_url, if (board.prStage(t) != null) " (it waits on it; the merge moves it to done)" else "" });
     if (t.finishing.len > 0) try w.print("finishing: {s} (Claude is {s}; it goes to done after)\n", .{ t.finishing, finishingWhat(t.finishing) });
     if (t.worktree.len > 0) try w.print("worktree: {s}   branch: {s}\n", .{ try ctx.shortenHomeIn(a, t.worktree), t.branch });
     if (t.change.len > 0) try w.print("change: {s}{s}{s}\n", .{ t.change[0..@min(t.change.len, 12)], if (t.branch.len > 0) "   bookmark: " else "", t.branch });

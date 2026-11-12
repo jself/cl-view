@@ -1152,6 +1152,49 @@ rather than being checked until `--max`; the session stays stopped. Merged,
 its session resumes told "The PR it waited on has merged: <url>.". The
 board's Park form has a PR field that does the same.
 
+#### Waiting on the PR it was finished with
+
+A ticket finished with a PR (Done → Open a PR, below) isn't Done while the
+PR is open: once Claude has opened it, the ticket stays in the stage it was
+in, parked on the PR, and its session stops (conversation and worktree
+kept). Its card says "Waiting on PR #31", and its popup links the PR. It
+isn't called unmerged (it isn't Done), and stays out of Needs You.
+
+Its check (hourly, on the dispatcher's park schedule: GitHub can't reach
+`cl web`, so cl asks) does more than look for the merge. It asks gh for the
+PR's reviews, comments, inline review comments and required checks, and
+wakes the ticket when one of these is new:
+
+- a review or comment from someone other than the PR's author (bots left
+  out) that is new: before it first wakes, made after the PR's last commit
+  (what came before is in the code already); after that, made after the
+  feedback its session was last given, however recent its commits.
+  "Changes requested" is such a review; an approval with no text isn't one.
+- a required check that failed on the PR's head commit.
+
+Woken, it gets the `unparked` flag ("Feedback on <PR>: 2 new review
+comments from sam; …") and its session resumes with the feedback: each
+comment's text, file and line, and link, and the failed checks' links. It is
+told to fix what is real and push to the PR's branch, not to merge the PR,
+and to put proposed replies in its summary rather than posting them on
+GitHub (unless you've said otherwise), then to finish with `cl t done` as
+usual. That `done` puts it back in the stage it waited in (not through the
+stages before it) and parks it on the PR again (a push can dismiss
+approvals, so it waits for the next round); no automated review runs on
+it. What it was told is kept on the ticket (the newest comment's time, and
+the commit whose failed checks it saw), so the same feedback never wakes it
+twice, even when the round pushed nothing or it is finished with the same
+PR again.
+
+The merge, by anyone (on GitHub, by hand), moves it to Done at the next
+check, without resuming it: its session closes, and steps for after the
+merge get their follow-up then (below). Closed without merging, the park
+ends with `pr-closed` as above and the ticket no longer waits on that PR:
+its next `done` goes to Review the usual way. No merge within 14 days,
+`park-expired`; the PR is still open, so its next `done` waits on it again.
+Unpark it to talk to it; its next `done` parks it on the PR again. Moving it
+to Done by hand ends the wait.
+
 ### Todos
 
 A todo is a ticket that is yours rather than Claude's: a reply to write, a
@@ -1556,7 +1599,7 @@ testing), and the CLI takes a flag:
 
 ```
 cl t move QA-1 done --merge        merge it into the main branch, or its --onto branch (see below)
-cl t move QA-1 done --pr           Claude pushes it and opens a PR
+cl t move QA-1 done --pr           Claude pushes it and opens a PR, then it waits on the PR, parked
 cl t move QA-1 done --tell "<text>"  Claude does what you say first (anything)
 cl t move QA-1 done [--close]      just close (the default; also approve and test)
 ```
@@ -1571,8 +1614,9 @@ words.
 
 #### Work left for after a PR merges
 
-A ticket finished with a PR closes when the PR is open; whatever is left
-for after the merge (a deploy, a backfill on prod) goes in a follow-up:
+A ticket finished with a PR waits on it parked (Waiting on the PR it was
+finished with, above); whatever is left for after the merge (a deploy, a
+backfill on prod) goes in a follow-up:
 
 ```
 cl t move QA-3 done --pr --then "Deploy, back up, dry run, then run metadata:redact on prod"
@@ -1580,11 +1624,11 @@ cl t move QA-3 done --pr --then "Deploy, back up, dry run, then run metadata:red
 
 (`approve --pr --then` too; on the board, the box under Open a PR in the
 Done dialog.) When Claude runs `cl t done QA-3 --close --pr-url <url>`
-(refused without the URL while there are steps), QA-3 goes to Done as usual,
-and cl creates a sub-ticket of it, "After PR #30 merges: <title>", in Queued
-and parked on that PR (`--pr` above). Its description names the parent, the
-PR and the steps. When the PR merges, it starts with a fresh session that
-does them; closed without merging, it gets `pr-closed` and waits for you.
+QA-3 waits on the PR. When it merges, QA-3 goes to Done, and cl creates a
+sub-ticket of it, "After PR #30 merges: <title>", in Queued, which starts
+with a fresh session that does them. Its description names the parent, the
+PR and the steps. Closed without merging, QA-3 gets `pr-closed` and nothing
+follows.
 Claude can suggest the steps from its session with `cl t custom-close --then
 "<steps>"` (not a custom close: Merge and PR stay on): the Done dialog fills
 the box in with them, and `move --pr` without `--then` takes them (`--then
@@ -1593,8 +1637,10 @@ the box in with them, and `move --pr` without `--then` takes them (`--then
 With `--merge` or `--pr` the instruction is typed into the ticket's session
 and the ticket stays where it is with a Finishing pill; questions and
 conflicts come back through the board as usual. When Claude is through it
-runs `cl t done QA-1 --close [--pr-url <url>]`: the ticket moves to done, the
-PR link becomes a comment, and then the session closes.
+runs `cl t done QA-1 --close`: the ticket moves to done and then the session
+closes. After a PR it runs `cl t done QA-1 --close --pr-url <url>` (the URL is
+required): the PR link becomes a comment, and the ticket waits on the PR,
+parked in its stage, as above.
 
 A jj change is merged by cl itself: it rebases the change onto trunk and,
 with no conflicts, moves trunk to it and drops the bookmark (a change with no

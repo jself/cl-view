@@ -1102,7 +1102,7 @@ pub const View = struct {
         }
         switch (f) {
             .merge => self.setMsg(false, "{s}: Claude is merging it; it goes to Done after", .{t.key}),
-            .pr => self.setMsg(false, "{s}: Claude is opening a PR; it goes to Done after", .{t.key}),
+            .pr => self.setMsg(false, "{s}: Claude is opening a PR; then it waits on the PR, parked", .{t.key}),
             .tell => self.setMsg(false, "{s}: Claude got your instructions; it goes to Done after", .{t.key}),
             .close => self.setMsg(false, "{s} is done", .{t.key}),
         }

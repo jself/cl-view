@@ -787,7 +787,7 @@ const retries = (t) => (t.stage === "queued" || t.stage === "planning") && !t.tm
 const flagLabel = (f) => f.kind === "review" && f.detail === "plan" ? "Plan ready" : (FLAG_NAME[f.kind] || f.kind);
 const flagClass = (k) => ["after-merge", "push-failed", "ci-failed", "park-expired", "pr-closed", "follow-up-failed", "merge-failed", "unmerged"].includes(k) ? "f-conflict" : k === "unparked" || k === "ready-to-close" ? "f-review" : ["input", "question", "review", "testing", "conflict"].includes(k) ? "f-" + k : "";
 // Finishing: Claude is merging the branch or opening a PR before it goes to Done.
-const finishPill = (t) => t.finishing ? `<span class="pill f-finishing" title="${t.finishing === "pr" ? `Claude is opening a PR${t.pr_then ? esc("; a follow-up ticket, parked on it, does what's left once it merges: " + t.pr_then) : ""}` : t.finishing === "after-merge" ? "It's merged; Claude is doing the after-merge steps (rebuilding, restarting)" : t.finishing === "tell" ? "Claude is doing what you told it" : "Claude is merging its branch"}; it goes to Done after">Finishing</span>` : "";
+const finishPill = (t) => t.finishing ? `<span class="pill f-finishing" title="${t.finishing === "pr" ? `Claude is opening a PR; then it waits on the PR here, parked, until it merges${t.pr_then ? esc("; a follow-up ticket does what's left then: " + t.pr_then) : ""}` : t.finishing === "after-merge" ? "It's merged; Claude is doing the after-merge steps (rebuilding, restarting)" : t.finishing === "tell" ? "Claude is doing what you told it" : "Claude is merging its branch"}; it goes to Done after">Finishing</span>` : "";
 // Claude asked to close it its own way (cl ticket custom-close).
 const customPill = (t) => t.custom_close ? `<span class="pill f-review" title="Claude: ${esc(t.custom_close)}">Custom close</span>` : "";
 // Parked (cl ticket park): what it waits on, and how it's checked.
@@ -795,7 +795,8 @@ const dur = (s) => { const u = [[86400, "d"], [3600, "h"], [60, "m"], [1, "s"]];
 const until = (t) => { if (!t) return ""; const d = t - (state.data?.now || Date.now() / 1000);
   return d <= 0 ? "now" : "in " + (d < 3600 ? Math.max(1, Math.round(d / 60)) + "m" : d < 86400 ? Math.round(d / 3600) + "h" : Math.round(d / 86400) + "d"); };
 const parkTitle = (p) => p.until ? `Checks every ${dur(p.every)}${p.checked ? `; last ${ago(p.checked)} ago: ${p.result}` : "; not checked yet"}; next ${until(p.next)}; gives up ${until(p.deadline)}` : "Nothing checks it: Resume brings it back";
-const parkPill = (t) => t.park ? `<span class="pill f-parked" title="${esc(parkTitle(t.park))}"><span>Parked: ${esc(t.park.reason)}</span></span>` : "";
+// Parked on the PR it was finished with, the reason says it all ("Waiting on PR #31").
+const parkPill = (t) => t.park ? `<span class="pill f-parked" title="${esc(parkTitle(t.park))}"><span>${t.park.review ? "" : "Parked: "}${esc(t.park.reason)}</span></span>` : "";
 // The idle flag isn't repeated on the card: its status already says Idle.
 const cardFlags = (t) => t.flags.filter((f) => f.kind !== "idle");
 // Where its automated review stands (the server's autoreview.standing, t.ar): one pill, so findings
@@ -1676,7 +1677,8 @@ function parkBox(t) {
   const p = t.park; if (!p) return "";
   const stamp = (s) => new Date(s * 1000).toLocaleString();
   return `<div class="parkbox"><div><strong>Parked</strong> ${ago(p.at)} ago: ${esc(p.reason)}</div>
-    ${p.pr ? `<div>Wakes when <a href="${esc(p.pr)}" target="_blank" rel="noopener">${esc(p.pr.replace(/^https:\/\/(github\.com\/)?/, ""))}</a> merges; closed without merging, the park ends with a flag.</div>` : ""}
+    ${p.pr && p.review ? `<div>Finished with <a href="${esc(p.pr)}" target="_blank" rel="noopener">${esc(p.pr.replace(/^https:\/\/(github\.com\/)?/, ""))}</a>. New reviews or comments from others since its last push, or a failed required check, wake it to address them (it pushes to the PR, doesn't merge it, and is parked here again). The merge moves it to Done; closed without merging, the park ends with a flag.</div>`
+      : p.pr ? `<div>Wakes when <a href="${esc(p.pr)}" target="_blank" rel="noopener">${esc(p.pr.replace(/^https:\/\/(github\.com\/)?/, ""))}</a> merges; closed without merging, the park ends with a flag.</div>` : ""}
     ${p.until ? `<div class="muted">Wakes when this passes (exit 0), checked every ${dur(p.every)} until ${esc(stamp(p.deadline))}:</div><code>${esc(p.until)}</code>
       <div class="muted">${p.checked ? `Last check ${ago(p.checked)} ago: <span class="mono">${esc(p.result)}</span>` : "Not checked yet"} · next ${until(p.next)}</div>`
     : `<div class="muted">Nothing checks it; Resume now brings it back.</div>`}</div>`;
@@ -2383,7 +2385,7 @@ async function chooseFinish(key) {
       <div style="display:flex;gap:calc(8 * var(--u))"><input type="text" id="finishTell" style="flex:1;min-width:0" aria-label="What Claude should do first" placeholder="Tell Claude what to do: …" value="${esc(custom)}">
         <button type="button" class="btn ${custom ? "primary" : ""}" data-finish="tell">Tell Claude</button></div>
       <button type="button" class="btn" data-finish="">Cancel</button></div>
-    <p class="muted" style="margin:0;font-size:calc(12.5 * var(--u))">${t.change ? "Merge: cl rebases its jj change onto " + esc(main) + " and moves " + esc(main) + " to it; Claude settles any conflicts" + (t.onto ? " (" + esc(t.onto) + " isn't trunk, so nothing is rebuilt or restarted)" : " and restarts what runs from the checkout") + ". PR: Claude pushes it and opens the PR." : "Merge and PR ask Claude to do it in the ticket's session."} ${t.branch || t.change ? "With steps for once the PR merges, the ticket still closes when the PR is open, and a follow-up sub-ticket parked on the PR does them after it merges. " : ""}Tell Claude: it gets your words in its session instead, for anything else. It stays where it is, marked Finishing, until Claude is through; then it goes to Done and the session closes.</p>`;
+    <p class="muted" style="margin:0;font-size:calc(12.5 * var(--u))">${t.change ? "Merge: cl rebases its jj change onto " + esc(main) + " and moves " + esc(main) + " to it; Claude settles any conflicts" + (t.onto ? " (" + esc(t.onto) + " isn't trunk, so nothing is rebuilt or restarted)" : " and restarts what runs from the checkout") + ". PR: Claude pushes it and opens the PR." : "Merge and PR ask Claude to do it in the ticket's session."} ${t.branch || t.change ? `Once the PR is open, the ticket stays in ${esc(STAGE_NAME[t.stage] || t.stage)}, parked on it: review comments wake it to address them, and the merge moves it to Done (steps for once it merges go to a follow-up sub-ticket then). ` : ""}Tell Claude: it gets your words in its session instead, for anything else. It stays where it is, marked Finishing, until Claude is through; then it goes to Done (with a PR: waits on it) and the session closes.</p>`;
   dlg.returnValue = ""; dlg.dataset.tell = ""; dlg.dataset.then = ""; dlg.showModal();
   return new Promise((res) => { dlg.onclose = () => res(dlg.returnValue || null); });
 }
