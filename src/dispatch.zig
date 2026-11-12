@@ -118,8 +118,8 @@ pub fn promptFor(a: std.mem.Allocator, t: board.Ticket, todo: ?board.Ticket, not
         \\- When the work is finished and you need nothing more from me:
         \\{s}  {d}. {s}Run `cl ticket done {s} --last "<one line>" --summary "<what changed, in a sentence or two>"`.
         \\     --last is the board's one-line Overview: what you did this round and where that leaves me,
-        \\     like "Wrote the first version of the Overview tab; ready for review", "Made the review
-        \\     changes; ready for review again" or "Fixed what failed in testing; ready to test again".
+        \\     like "Wrote the first version of the Overview tab; ready to test", "Fixed what failed in
+        \\     testing; ready to test again" or "Made the review changes; ready for review again".
         \\  {d}. If there is something to try, add `--test-plan -` with the handoff on stdin (a heredoc,
         \\     not a file), in up to three sections (`cl ticket testplan --format` shows the format):
         \\     - `# Verified`: check everything you can yourself before you finish, and list what you
@@ -133,6 +133,7 @@ pub fn promptFor(a: std.mem.Allocator, t: board.Ticket, todo: ?board.Ticket, not
         \\     - `# Demo` (optional): when the change is something I'd want to see (a new feature, new
         \\       UI, a new command), a short guided tour with `run:`/`open:` buttons and what to look
         \\       at. No checks.
+        \\     I test first and review after; without a handoff the ticket skips testing.
         \\{s}  Don't run it while you still need anything from me. When I send feedback, finish the same way.
         \\
     , .{
@@ -1457,8 +1458,9 @@ pub const Interrupted = struct {
 /// (CL-70): each Running ticket's session is killed, its conversation and
 /// change kept, and it waits in Queued, keeping its rank, to resume. Planning
 /// sessions end too; their tickets stay in Planning and are started again
-/// (resuming the conversation) on resume. Review and Testing tickets wait
-/// on you, not Claude, and are left alone.
+/// (resuming the conversation) on resume. Testing and Review tickets wait
+/// on you, not Claude, and are left alone, as is a Running ticket held for
+/// its automated review (Claude has finished; `autoreview.holds`).
 pub fn interrupt(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, project: []const u8) !Interrupted {
     var queued: std.ArrayList([]const u8) = .empty;
     var planning: std.ArrayList([]const u8) = .empty;
@@ -1467,6 +1469,9 @@ pub fn interrupt(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocato
         if (t.tmux.len == 0) continue;
         switch (t.stage) {
             .running => {
+                // Claude has finished; only its automated review runs, and
+                // the ticket moves on when that's done (autoreview.startOnDone).
+                if (autoreview.holds(a, t)) continue;
                 actions.move(ctx, cfg, db, a, t.key, .queued, false, .close) catch |err| switch (err) {
                     error.SharedSession, error.Starting => {
                         try left.append(a, t.key);
@@ -1660,7 +1665,8 @@ test prompt {
     try std.testing.expect(std.mem.indexOf(u8, text, "`cl ticket overview QA-3 --last \"In progress:") != null);
     // done hands in the Overview's Last: what it did and where that leaves me, in a line.
     try std.testing.expect(std.mem.indexOf(u8, text, "Run `cl ticket done QA-3 --last \"<one line>\" --summary") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "\"Made the review\n     changes; ready for review again\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "\"Made the review changes; ready for review again\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "without a handoff the ticket skips testing") != null);
     // No revision to give: gutter's default.
     const no_rev = try prompt(arena_state.allocator(), t, &.{}, "");
     try std.testing.expect(std.mem.indexOf(u8, no_rev, "`timeout 5 gutter -open=false -port 0`") != null);
@@ -2795,4 +2801,27 @@ test "a todo's task is told the todo's title, body and link; other tickets aren'
     const plain = try promptFor(a, t, null, &.{}, null);
     try std.testing.expect(std.mem.indexOf(u8, plain, "a todo of mine") == null);
     try std.testing.expect(std.mem.indexOf(u8, plain, "There is no code here") == null);
+}
+
+test "pause now leaves a ticket held in Running for its automated review alone" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env: std.process.Environ.Map = .init(a);
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = a, .env = &env, .home = "/tmp", .tmux_blocked = true };
+    const cfg: config.Config = .{ .profiles = &.{}, .default = "", .operator = "" };
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "qa", .dir = "/x" });
+    const k = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Held", .stage = .running });
+    const id = (try board.getTicket(db, a, k)).id;
+    try db.exec("UPDATE tickets SET tmux = 'cl_qa' WHERE id = ?1", .{id});
+    try board.setAutoreview(db, id, "{\"status\":\"running\",\"started\":1,\"round\":1,\"auto\":\"send\",\"held\":true}");
+    const r = try interrupt(ctx, cfg, db, a, "qa");
+    try std.testing.expectEqual(@as(usize, 0), r.queued.len);
+    try std.testing.expectEqual(@as(usize, 0), r.left.len);
+    const t = try board.getTicket(db, a, k);
+    try std.testing.expectEqual(board.Stage.running, t.stage);
+    try std.testing.expect(autoreview.holds(a, t));
 }

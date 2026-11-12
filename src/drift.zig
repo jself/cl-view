@@ -305,9 +305,9 @@ pub const Error = error{
 
 /// Rebase now: ask the ticket's Claude to rebase its change onto its target
 /// and settle the conflicts. Only into an idle session that is on this
-/// ticket, so nothing is cut off or answered by accident. A ticket in Review
-/// or Testing goes back to Running (a sent comment), and is told to say done
-/// again after.
+/// ticket, so nothing is cut off or answered by accident. A ticket in Testing
+/// or Review goes back to Running (a sent comment), and is told to say done
+/// again after, which returns it to that stage (`board.nextAfterDone`).
 pub fn rebase(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, key: []const u8) !void {
     const t = try board.getTicket(db, a, key);
     const d = t.drift orelse return error.NoDrift;

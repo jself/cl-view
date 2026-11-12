@@ -22,8 +22,8 @@ pub const Stage = enum {
     planning,
     queued,
     running,
-    review,
     testing,
+    review,
     done,
 
     pub fn parse(s: []const u8) ?Stage {
@@ -42,9 +42,10 @@ pub const Mode = enum {
     }
 };
 
-/// What a project does when one of its tickets reaches Review (`cl project
-/// set --auto-review`): nothing, run the automated review (autoreview.zig),
-/// or run it and send what it finds to the ticket's Claude for one round.
+/// What a project does when Claude finishes one of its tickets in Running
+/// (`cl project set --auto-review`): nothing, run the automated review
+/// (autoreview.zig) while the ticket waits there, or run it and send what it
+/// finds to the ticket's Claude for one round first.
 pub const AutoReview = enum {
     off,
     on,
@@ -266,6 +267,10 @@ pub const Ticket = struct {
     /// required checks it was told about ("" for none). See pr_feedback.zig.
     pr_seen: i64 = 0,
     pr_seen_sha: []const u8 = "",
+    /// The stage a round of work was sent back from ("review" or
+    /// "testing"; "" for none): Claude's `done` returns it there
+    /// (`nextAfterDone`). Set as it moves from Testing or Review to Running.
+    back_to: []const u8 = "",
     /// The plan its planning session gave with `done` (markdown), "" for
     /// none: what the session that builds it is told.
     plan_md: []const u8 = "",
@@ -448,6 +453,7 @@ const schema =
     \\  pr_stage TEXT NOT NULL DEFAULT '',
     \\  pr_seen INTEGER NOT NULL DEFAULT 0,
     \\  pr_seen_sha TEXT NOT NULL DEFAULT '',
+    \\  back_to TEXT NOT NULL DEFAULT '',
     \\  overview_last TEXT NOT NULL DEFAULT '',
     \\  overview_next TEXT NOT NULL DEFAULT '',
     \\  overview_at INTEGER NOT NULL DEFAULT 0,
@@ -654,6 +660,10 @@ pub fn migrate(db: Db) !void {
         // The handoff's other two parts, next to the test plan.
         _ = try addColumn(db, "tickets", "verified", "TEXT NOT NULL DEFAULT ''");
         _ = try addColumn(db, "tickets", "demo", "TEXT NOT NULL DEFAULT ''");
+        // CL-168 reversed Review and Testing (test first, review last). The
+        // column comes with a one-time swap of the open tickets, so nobody
+        // changes position in the flow: see `reverse_stages`.
+        if (!try hasBackTo(db)) try reverseStages(db);
     }
     if (have >= version) return;
     // Version 1 had no sub-tickets, version 2 no planning skill.
@@ -677,6 +687,46 @@ pub fn migrate(db: Db) !void {
     try db.execMulti(dates_schema);
     try db.execMulti(std.fmt.comptimePrint("PRAGMA user_version = {d}", .{version}));
 }
+
+fn hasBackTo(db: Db) !bool {
+    return (try db.int("SELECT 1 FROM pragma_table_info('tickets') WHERE name = 'back_to'", .{})) != null;
+}
+
+/// The one-time migration that came with `Ticket.back_to` (CL-168): the
+/// order went from Running, Review, Testing to Running, Testing, Review, so
+/// a ticket in Review goes to Testing and one in Testing to Review, and
+/// their open stage flags are renamed to match (a Planning ticket's plan
+/// flag isn't touched), as is the stage a ticket waits on its PR in
+/// (`pr_stage`). One write transaction, column and all, with the column
+/// checked again inside it: two cl processes starting at once (cl web, a
+/// hook) don't both run it, and a failure rolls it all back. Running the
+/// stage and pr_stage UPDATEs again by hand undoes it.
+fn reverseStages(db: Db) !void {
+    try db.execMulti("BEGIN IMMEDIATE");
+    errdefer db.execMulti("ROLLBACK") catch {};
+    if (!try hasBackTo(db)) try db.execMulti(reverse_stages);
+    try db.execMulti("COMMIT");
+}
+
+/// `reverseStages`' SQL. A ticket can have both stage flags open (a PR
+/// feedback round, or one set by hand): one is kept (the oldest) before the
+/// rename, since open flags are unique per kind (`flags_active`).
+const reverse_stages =
+    \\ALTER TABLE tickets ADD COLUMN back_to TEXT NOT NULL DEFAULT '';
+    \\UPDATE flags SET cleared = CAST(strftime('%s', 'now') AS INTEGER)
+    \\  WHERE cleared IS NULL AND kind IN ('review', 'testing')
+    \\  AND ticket IN (SELECT id FROM tickets WHERE stage IN ('review', 'testing'))
+    \\  AND id NOT IN (SELECT min(f.id) FROM flags f JOIN tickets t ON t.id = f.ticket
+    \\    WHERE f.cleared IS NULL AND f.kind IN ('review', 'testing') AND t.stage IN ('review', 'testing') GROUP BY f.ticket);
+    \\UPDATE tickets SET stage = CASE stage WHEN 'review' THEN 'testing' ELSE 'review' END WHERE stage IN ('review', 'testing');
+    \\UPDATE tickets SET pr_stage = CASE pr_stage WHEN 'review' THEN 'testing' ELSE 'review' END WHERE pr_stage IN ('review', 'testing') AND stage != 'done';
+    \\UPDATE flags SET kind = (SELECT t.stage FROM tickets t WHERE t.id = flags.ticket)
+    \\  WHERE cleared IS NULL AND kind IN ('review', 'testing') AND NOT (kind = 'review' AND detail = 'plan')
+    \\  AND ticket IN (SELECT id FROM tickets WHERE stage IN ('review', 'testing'));
+    \\INSERT INTO events (ticket, kind, detail, at)
+    \\  SELECT id, 'moved', CASE stage WHEN 'testing' THEN 'review -> testing' ELSE 'testing -> review' END || ' (stages reversed, CL-168)', CAST(strftime('%s', 'now') AS INTEGER)
+    \\  FROM tickets WHERE stage IN ('review', 'testing');
+;
 
 /// Add a column unless the table has it; true when it was added.
 fn addColumn(db: Db, comptime table: []const u8, comptime column: []const u8, comptime decl: []const u8) !bool {
@@ -844,6 +894,124 @@ test "migrate: a board another branch moved to a later version still gets the te
     try std.testing.expect((try db.int("SELECT 1 FROM pragma_table_info('tickets') WHERE name = 'demo'", .{})) != null);
     try std.testing.expect((try db.int("SELECT 1 FROM pragma_table_info('projects') WHERE name = 'after_merge'", .{})) != null);
     try std.testing.expectEqual(@as(?i64, version), try db.int("PRAGMA user_version", .{}));
+}
+
+test "migrate: the stages reversed (CL-168) swap open tickets' Review and Testing once, flags and all" {
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = Ctx.testEnv(), .home = "/tmp" };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try Db.open(":memory:");
+    defer db.close();
+    try migrate(db);
+    try addProject(db, .{ .name = "qa", .dir = "/x/qa" });
+    // A board from before: no back_to, tickets in the old order's stages.
+    const rv = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Reviewed next", .stage = .running });
+    const ts = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Tested next", .stage = .running });
+    const pl = try createTicket(ctx, db, a, .{ .project = "qa", .title = "A plan", .plan = true });
+    const rn = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Running", .stage = .running });
+    const rv_id = (try getTicket(db, a, rv)).id;
+    const ts_id = (try getTicket(db, a, ts)).id;
+    const pl_id = (try getTicket(db, a, pl)).id;
+    try db.execMulti("ALTER TABLE tickets DROP COLUMN back_to");
+    try db.exec("UPDATE tickets SET stage = 'review' WHERE id = ?1", .{rv_id});
+    try db.exec("INSERT INTO flags (ticket, kind, source, detail, at) VALUES (?1, 'review', 'auto', '', 1)", .{rv_id});
+    try db.exec("UPDATE tickets SET stage = 'testing', pr_url = 'https://github.com/o/r/pull/1', pr_stage = 'testing' WHERE id = ?1", .{ts_id});
+    try db.exec("INSERT INTO flags (ticket, kind, source, detail, at) VALUES (?1, 'testing', 'auto', '', 1)", .{ts_id});
+    // Both stage flags open (a PR feedback round left them): one stays.
+    try db.exec("INSERT INTO flags (ticket, kind, source, detail, at) VALUES (?1, 'review', 'auto', '', 2)", .{ts_id});
+    try db.exec("INSERT INTO flags (ticket, kind, source, detail, at) VALUES (?1, 'review', 'auto', 'plan', 1)", .{pl_id});
+    try migrate(db);
+    // Nobody changes position: the old Review is the new Testing.
+    var t = try getTicket(db, a, rv);
+    try std.testing.expectEqual(Stage.testing, t.stage);
+    try std.testing.expectEqual(@as(usize, 1), t.flags.len);
+    try std.testing.expectEqualStrings(flag_testing, t.flags[0].kind);
+    t = try getTicket(db, a, ts);
+    try std.testing.expectEqual(Stage.review, t.stage);
+    // Waiting on its PR there: it waits in Review now.
+    try std.testing.expectEqual(Stage.review, prStage(t).?);
+    try std.testing.expectEqualStrings(flag_review, t.flags[0].kind);
+    try std.testing.expectEqual(@as(usize, 1), t.flags.len);
+    var logged = false;
+    for (try events(db, a, t.id)) |e| logged = logged or std.mem.indexOf(u8, e.detail, "stages reversed") != null;
+    try std.testing.expect(logged);
+    // The plan's flag and Running are untouched.
+    t = try getTicket(db, a, pl);
+    try std.testing.expectEqual(Stage.planning, t.stage);
+    try std.testing.expectEqualStrings(flag_review, t.flags[0].kind);
+    try std.testing.expectEqualStrings("plan", t.flags[0].detail);
+    try std.testing.expectEqual(Stage.running, (try getTicket(db, a, rn)).stage);
+    // Once: migrating again swaps nothing back.
+    try migrate(db);
+    try std.testing.expectEqual(Stage.testing, (try getTicket(db, a, rv)).stage);
+    try std.testing.expectEqual(Stage.review, (try getTicket(db, a, ts)).stage);
+}
+
+test "done: to Testing with a test plan, Review without; a round sent back returns where it came from; approve goes Testing, Review, Done" {
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = Ctx.testEnv(), .home = "/tmp" };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try Db.open(":memory:");
+    defer db.close();
+    try migrate(db);
+    try addProject(db, .{ .name = "qa", .dir = "/x/qa" });
+    const k = try createTicket(ctx, db, a, .{ .project = "qa", .title = "T", .stage = .running });
+    const id = (try getTicket(db, a, k)).id;
+    const only = struct {
+        fn flag(d: Db, al: std.mem.Allocator, key: []const u8, stage: Stage, kind: []const u8) !void {
+            const t = try getTicket(d, al, key);
+            try std.testing.expectEqual(stage, t.stage);
+            try std.testing.expectEqual(@as(usize, 1), t.flags.len);
+            try std.testing.expectEqualStrings(kind, t.flags[0].kind);
+        }
+    }.flag;
+    // Nothing to test: straight to Review.
+    try done(ctx, db, a, k, "Done");
+    try only(db, a, k, .review, flag_review);
+    // Done again while there: it stays, flag and all.
+    try done(ctx, db, a, k, "Done again");
+    try only(db, a, k, .review, flag_review);
+    // Sent back from Review: done returns it to Review, even with a test plan now.
+    _ = try addComment(ctx, db, a, k, "you", "Rename it", true);
+    try std.testing.expectEqualStrings("review", (try getTicket(db, a, k)).back_to);
+    try setHandoff(ctx, db, id, "", "- [ ] it works", "");
+    try done(ctx, db, a, k, "Renamed");
+    try only(db, a, k, .review, flag_review);
+    try std.testing.expectEqualStrings("", (try getTicket(db, a, k)).back_to);
+    // A Verified list alone is something to test too ("Try it").
+    const kv = try createTicket(ctx, db, a, .{ .project = "qa", .title = "V", .stage = .running });
+    try setHandoff(ctx, db, (try getTicket(db, a, kv)).id, "- ran it", "", "");
+    try done(ctx, db, a, kv, "Done");
+    try only(db, a, kv, .testing, flag_testing);
+    // Moved back to Running by hand from Testing: done returns to Testing.
+    try move(ctx, db, a, k, .testing);
+    try only(db, a, k, .testing, flag_testing);
+    _ = try addComment(ctx, db, a, k, "you", "Step 2 fails", true);
+    try std.testing.expectEqual(Stage.running, (try getTicket(db, a, k)).stage);
+    try done(ctx, db, a, k, "Fixed step 2");
+    try only(db, a, k, .testing, flag_testing);
+    // Approve: Testing to Review (its flag), Review to Done.
+    try std.testing.expectEqual(Stage.testing, try approve(ctx, db, a, k));
+    try only(db, a, k, .review, flag_review);
+    try std.testing.expectEqual(Stage.review, try approve(ctx, db, a, k));
+    try std.testing.expectEqual(Stage.done, (try getTicket(db, a, k)).stage);
+    // A fresh ticket with a test plan goes to Testing first; sent back from
+    // Testing without one any more, there's nothing to test: Review.
+    const k2 = try createTicket(ctx, db, a, .{ .project = "qa", .title = "U", .stage = .running });
+    const id2 = (try getTicket(db, a, k2)).id;
+    try setHandoff(ctx, db, id2, "", "- [ ] it works", "");
+    try done(ctx, db, a, k2, "Done");
+    try only(db, a, k2, .testing, flag_testing);
+    _ = try addComment(ctx, db, a, k2, "you", "No, redo it", true);
+    try setHandoff(ctx, db, id2, "", "", "");
+    try done(ctx, db, a, k2, "Redone");
+    try only(db, a, k2, .review, flag_review);
+    // Queued again, where it was sent back from no longer counts.
+    _ = try addComment(ctx, db, a, k2, "you", "Again", true);
+    try move(ctx, db, a, k2, .queued);
+    try std.testing.expectEqualStrings("", (try getTicket(db, a, k2)).back_to);
 }
 
 fn now(ctx: Ctx) i64 {
@@ -1270,7 +1438,7 @@ const ticket_cols = "t.id, t.key, t.project, t.title, t.body, t.stage, t.mode, t
     "(SELECT count(*) FROM tickets c WHERE c.parent = t.id AND c.stage = 'done'), t.umbrella, " ++
     "t.onto, coalesce((SELECT p.onto FROM projects p WHERE p.name = t.project), ''), t.autoreview, t.pr_then, " ++
     "coalesce((SELECT p.repo FROM projects p WHERE p.name = t.project), 1), t.todo, t.link, t.due_at, t.due_time, t.remind_at, t.overview_last, t.overview_next, t.overview_at, " ++
-    "t.pr_url, t.pr_stage, t.pr_seen, t.pr_seen_sha, t.verified, t.demo";
+    "t.pr_url, t.pr_stage, t.pr_seen, t.pr_seen_sha, t.verified, t.demo, t.back_to";
 
 fn readTicket(st: sqlite.Stmt, a: std.mem.Allocator) !Ticket {
     return .{
@@ -1329,6 +1497,7 @@ fn readTicket(st: sqlite.Stmt, a: std.mem.Allocator) !Ticket {
         .pr_seen_sha = try st.dupe(a, 52),
         .verified = try st.dupe(a, 53),
         .demo = try st.dupe(a, 54),
+        .back_to = try st.dupe(a, 55),
     };
 }
 
@@ -1605,7 +1774,7 @@ pub fn reviewing(t: Ticket) bool {
 pub const reviewing_json = "\"status\":\"running\"";
 
 /// An automated review of the ticket finished: it is back in Needs You with
-/// its stage's flag (Ready for review, or Needs testing), raised again or
+/// its stage's flag (Ready to test, or Ready for review), raised again or
 /// brought back if it was dismissed or hidden while it ran.
 pub fn raiseAfterReview(ctx: Ctx, db: Db, id: i64, stage: Stage) Error!void {
     const kind = switch (stage) {
@@ -2125,8 +2294,9 @@ pub fn logEvent(ctx: Ctx, db: Db, id: i64, kind: []const u8, detail: []const u8)
 }
 
 /// Move a ticket to `stage`. Flags follow the workflow: entering Testing sets
-/// `testing`, leaving Planning, Review or Testing clears its flag, Done clears
-/// them all.
+/// `testing`, entering Review sets `review`, leaving Planning, Review or
+/// Testing clears its flag, Done clears them all. Sent back from Testing or
+/// Review to Running, it remembers where from (`Ticket.back_to`).
 /// Any move ends finishing.
 pub fn move(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, stage: Stage) Error!void {
     const t = try getTicket(db, a, key);
@@ -2138,6 +2308,12 @@ fn moveId(ctx: Ctx, db: Db, id: i64, from: Stage, to: Stage) Error!void {
     if (!todoStage(to) and (try db.int("SELECT 1 FROM tickets WHERE id = ?1 AND todo != 0", .{id})) != null) return error.Todo;
     // Queued again, a killed ticket waits for the dispatcher like any other.
     try db.exec("UPDATE tickets SET stage = ?2, finishing = '', killed = killed AND ?2 != 'queued' WHERE id = ?1", .{ id, @as([]const u8, @tagName(to)) });
+    // A round sent back from Testing or Review returns there when Claude is
+    // done (`nextAfterDone`); shelved, queued again or Done, that's over.
+    if (to == .running and (from == .testing or from == .review))
+        try db.exec("UPDATE tickets SET back_to = ?2 WHERE id = ?1", .{ id, @as([]const u8, @tagName(from)) })
+    else if (to == .queued or to == .backlog or to == .done)
+        try db.exec("UPDATE tickets SET back_to = '' WHERE id = ?1", .{id});
     var buf: [64]u8 = undefined;
     try logEvent(ctx, db, id, "moved", std.fmt.bufPrint(&buf, "{s} -> {s}", .{ @tagName(from), @tagName(to) }) catch "");
     // Out of Planning by any path (approved, queued or shelved by hand), the
@@ -2148,6 +2324,7 @@ fn moveId(ctx: Ctx, db: Db, id: i64, from: Stage, to: Stage) Error!void {
     // again if it's still in progress and idle).
     try setIdle(ctx, db, id, false);
     if (to == .testing) try setFlagId(ctx, db, id, flag_testing, "auto", "");
+    if (to == .review) try setFlagId(ctx, db, id, flag_review, "auto", "");
     // Done, nothing waits on its park any more: it ends without resuming.
     // (Shelved in Backlog it stays parked: queued again, it still waits.)
     if (to == .done) {
@@ -2422,11 +2599,26 @@ pub fn addComment(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, autho
     return r;
 }
 
-/// Claude says the ticket is finished and needs nothing more: it moves to
-/// Review with the `review` flag, and the summary is kept as its comment.
-/// During Planning it means the plan is ready: the ticket stays in Planning
-/// with `review` (detail "plan") until the plan is approved.
+/// Start another round without moving the ticket (a send back from Review
+/// does it as it moves to Running: `addComment`).
+pub fn nextRound(db: Db, id: i64) Error!void {
+    try db.exec("UPDATE tickets SET round = round + 1 WHERE id = ?1", .{id});
+}
+
+/// Claude says the ticket is finished and needs nothing more: it moves on
+/// (`advance`: to Testing, or Review without a test plan), and the summary
+/// is kept as its comment. During Planning it means the plan is ready: the
+/// ticket stays in Planning with `review` (detail "plan") until the plan is
+/// approved.
 pub fn done(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, summary: []const u8) Error!void {
+    try finishRound(ctx, db, a, key, summary);
+    if ((try getTicket(db, a, key)).stage != .planning) _ = try advance(ctx, db, a, key);
+}
+
+/// `done` without the move: what Claude said is kept and what it waited on
+/// is cleared, but the ticket stays where it is, so an automated review can
+/// run on it in Running first (autoreview.startOnDone); `advance` moves it.
+pub fn finishRound(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, summary: []const u8) Error!void {
     const t = try getTicket(db, a, key);
     // Yours: it closes when you move it to Done.
     if (t.todo) return error.Todo;
@@ -2445,14 +2637,33 @@ pub fn done(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, summary: []
     if (summary.len > 0) try db.exec("INSERT INTO comments (ticket, author, body, sent, at) VALUES (?1, 'claude', ?2, 0, ?3)", .{ t.id, summary, now(ctx) });
     try clearFlagId(ctx, db, t.id, flag_question);
     try clearFlagId(ctx, db, t.id, flag_input);
-    // Woken from a park and finished since: the review flag says it now.
+    // Woken from a park and finished since: its stage's flag says it now.
     try clearFlagId(ctx, db, t.id, flag_unparked);
-    // A round on its PR's feedback goes back where it waited on the PR,
-    // not through the stages before it again.
-    const back = prStage(t) orelse .review;
-    if (t.stage != back) try moveId(ctx, db, t.id, t.stage, back);
-    try setFlagId(ctx, db, t.id, flag_review, "auto", "");
     try logEvent(ctx, db, t.id, "done", "");
+}
+
+/// Where a ticket goes when Claude is done with a round. A round on its PR's
+/// feedback goes back where it waited on the PR, not through the stages
+/// before it again; one sent back from Testing or Review returns there
+/// (`back_to`); otherwise Testing, or Review when it has nothing to test (no
+/// handoff: a Verified list or a demo alone still gets a "Try it" step,
+/// review.ticketTestPlan). Already in Testing or Review, it stays.
+pub fn nextAfterDone(t: Ticket) Stage {
+    if (prStage(t)) |s| return s;
+    if (t.stage == .testing or t.stage == .review) return t.stage;
+    const has_plan = t.test_plan.len > 0 or t.verified.len > 0 or t.demo.len > 0;
+    if (std.mem.eql(u8, t.back_to, "review")) return .review;
+    return if (has_plan) .testing else .review;
+}
+
+/// Move the ticket on after a round (`nextAfterDone`), with that stage's
+/// flag: raised again if it was there already. Returns where it went.
+pub fn advance(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8) Error!Stage {
+    const t = try getTicket(db, a, key);
+    const to = nextAfterDone(t);
+    if (t.stage != to) try moveId(ctx, db, t.id, t.stage, to) else try raiseAfterReview(ctx, db, t.id, to);
+    try db.exec("UPDATE tickets SET back_to = '' WHERE id = ?1", .{t.id});
+    return to;
 }
 
 /// The stage a ticket finished with a PR waits in, parked on it; null when
@@ -2487,13 +2698,13 @@ pub fn setPrSeen(db: Db, id: i64, at: i64, sha: []const u8) Error!void {
 }
 
 /// The stage `approve` moves a ticket to: an approved plan goes to Queued
-/// (a new session builds it when there is room), a reviewed ticket to
-/// Testing, a tested one to Done.
+/// (a new session builds it when there is room), a tested ticket to Review,
+/// a reviewed one to Done.
 pub fn approvedStage(stage: Stage) ?Stage {
     return switch (stage) {
         .planning => .queued,
-        .review => .testing,
-        .testing => .done,
+        .testing => .review,
+        .review => .done,
         else => null,
     };
 }

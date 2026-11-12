@@ -571,13 +571,15 @@ pub const no_subtickets = "it's an umbrella with no sub-tickets yet, so approvin
 pub fn approve(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, spin_off: bool, finish: Finish) !board.Stage {
     const t = try board.getTicket(db, a, key);
     if (t.stage == .planning and t.umbrella and t.children == 0) return error.NoSubtickets;
-    if (t.stage == .testing) {
+    // Reviewed, the last stage: approving finishes it (the Done dialog's
+    // Close, Merge, PR or Tell).
+    if (t.stage == .review) {
         try readyForDone(ctx, db, a, key, spin_off);
-        if (try startFinish(ctx, db, a, key, finish)) return .testing;
+        if (try startFinish(ctx, db, a, key, finish)) return .review;
     }
     const from = try board.approve(ctx, db, a, key);
-    if (from == .testing and finish == .close) try checkLanded(ctx, db, a, key, "It went to Done with Close, not Merge or PR");
-    if (from == .testing) try closeSession(ctx, db, a, key);
+    if (from == .review and finish == .close) try checkLanded(ctx, db, a, key, "It went to Done with Close, not Merge or PR");
+    if (from == .review) try closeSession(ctx, db, a, key);
     return from;
 }
 
@@ -955,20 +957,16 @@ pub fn autoreviewSend(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const
     const msg = try autoreview.message(a, r);
     try tmux.pasteText(ctx, s, msg);
     const br = try board.addComment(ctx, db, a, key, "you", msg, true);
-    const round = (try board.getTicket(db, a, key)).round;
-    autoreview.markSent(&r, ctx.nowSeconds(), round);
-    // Marked sent only if it is still the review that was sent (not a new
-    // one started meanwhile).
-    _ = try board.setAutoreviewIf(db, t.id, try std.fmt.allocPrint(a, "{f}", .{std.json.fmt(r, .{})}), t.autoreview);
+    const round = try autoreview.recordSent(ctx, db, a, t, &r);
     return .{ .sent = true, .sent_back = br.sent_back, .round = round };
 }
 
 /// An automated review just finished (its reviewer's Stop hook, or
 /// `--findings`): one cl started under --auto-review send has its findings
-/// sent to the ticket's session now, for one round (`autoreview.sendsItself`).
-/// One it can't send (no live session) stays on the board for you, and the
-/// ticket is back in Needs You (`autoreview.submit` left that to this); why
-/// is logged on the ticket.
+/// sent to the ticket's session now, for one round (`autoreview.sendsItself`),
+/// and the ticket stays in Running for it. One it can't send (no live
+/// session) stays on the board for you, and the ticket moves on
+/// (`autoreview.submit` left that to this); why is logged on the ticket.
 pub fn afterAutoreview(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8) void {
     const t = board.getTicket(db, a, key) catch return;
     const r = autoreview.load(a, t) orelse return;
@@ -980,10 +978,10 @@ pub fn afterAutoreview(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []cons
         error.NoSession => "the ticket has no live session",
         else => @errorName(e),
     }) catch {};
-    board.raiseAfterReview(ctx, db, t.id, t.stage) catch {};
+    autoreview.advanceAfterReview(ctx, db, a, key) catch {};
 }
 
-test "afterAutoreview: findings cl can't send itself stay for you" {
+test "afterAutoreview: findings cl can't send itself stay for you, and the held ticket moves on" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -999,9 +997,11 @@ test "afterAutoreview: findings cl can't send itself stay for you" {
     try board.setAutoreview(db, id, "{\"status\":\"done\",\"round\":1,\"findings\":[{\"title\":\"x\",\"body\":\"y\"}]}");
     afterAutoreview(ctx, db, a, k);
     try std.testing.expectEqual(@as(usize, 1), (try board.events(db, a, id)).len);
-    // Started under send, but its session is gone: logged, not sent, still
-    // in Review, and back in Needs You with its flag.
-    try board.setAutoreview(db, id, "{\"status\":\"done\",\"round\":1,\"auto\":\"send\",\"findings\":[{\"title\":\"x\",\"body\":\"y\"}]}");
+    // Started under send as Claude finished, held in Running, but its
+    // session is gone: logged, not sent, and on to Review (nothing to test)
+    // with its flag, in Needs You.
+    try db.exec("UPDATE tickets SET stage = 'running' WHERE id = ?1", .{id});
+    try board.setAutoreview(db, id, "{\"status\":\"done\",\"round\":1,\"auto\":\"send\",\"held\":true,\"findings\":[{\"title\":\"x\",\"body\":\"y\"}]}");
     afterAutoreview(ctx, db, a, k);
     var logged = false;
     for (try board.events(db, a, id)) |e| logged = logged or std.mem.eql(u8, e.kind, "autoreview not sent");
@@ -1012,6 +1012,7 @@ test "afterAutoreview: findings cl can't send itself stay for you" {
     const t = try board.getTicket(db, a, k);
     try std.testing.expectEqual(board.Stage.review, t.stage);
     try std.testing.expectEqual(@as(i64, 0), autoreview.load(a, t).?.sent);
+    try std.testing.expectEqual(autoreview.Standing.unread, autoreview.standing(autoreview.load(a, t), t));
 }
 
 test "an umbrella's plan isn't approved until it has sub-tickets" {
@@ -1066,15 +1067,17 @@ pub const TestOutcome = struct {
     sent: bool = false,
     /// It has no session to send them to; they're kept as a comment.
     unsent: bool = false,
-    /// A ticket in Testing went on to Done (or to finishing).
+    /// A ticket in Testing went on to Review.
     approved: bool = false,
 };
 
 /// Record test results. A failure goes to Claude for another round, as do
 /// comments when everything passed if `send` says so (null: whenever there
 /// are any). Everything passing and nothing sent approves a ticket in
-/// Testing; earlier, the results are only kept on the ticket.
-pub fn testResults(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, steps: []const review.StepResult, note: []const u8, send: ?bool, spin_off: bool, finish: Finish) !TestOutcome {
+/// Testing, on to Review; anywhere else, the results are only kept on the
+/// ticket. A ticket in Review that's sent back goes through Testing, so its
+/// next done returns it there to be tested again.
+pub fn testResults(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, steps: []const review.StepResult, note: []const u8, send: ?bool) !TestOutcome {
     const res = try review.recordResults(a, steps, note);
     const t = try board.getTicket(db, a, key);
     // Sent: the next try starts over.
@@ -1086,15 +1089,52 @@ pub fn testResults(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8
         o.sent = r.sent;
         o.unsent = r.unsent;
     } else {
-        if (t.stage == .testing) try readyForDone(ctx, db, a, key, spin_off);
         _ = try board.addComment(ctx, db, a, key, "you", res.text, false);
         if (t.stage == .testing) {
-            _ = try approve(ctx, db, a, key, spin_off, finish);
+            _ = try approve(ctx, db, a, key, false, .close);
             o.approved = true;
         }
     }
     review.stopLaunch(ctx, a, key, .test_plan, null) catch {};
     return o;
+}
+
+test "test results: all passing moves Testing on to Review; a failure in Review goes back through Testing; approve finishes out of Review" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env: std.process.Environ.Map = .init(a);
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = a, .env = &env, .home = "/tmp", .tmux_blocked = true };
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "qa", .dir = "/x" });
+    const k = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "T", .stage = .running });
+    try board.setHandoff(ctx, db, (try board.getTicket(db, a, k)).id, "", "- [ ] it works", "");
+    try board.done(ctx, db, a, k, "Did it");
+    try std.testing.expectEqual(board.Stage.testing, (try board.getTicket(db, a, k)).stage);
+    const pass = [_]review.StepResult{.{ .checks = &.{.{ .text = "it works", .pass = true }} }};
+    const failed = [_]review.StepResult{.{ .checks = &.{.{ .text = "it works", .pass = false, .note = "it doesn't" }} }};
+    // All passed: on to Review, flagged, not Done.
+    const o = try testResults(ctx, db, a, k, &pass, "", null);
+    try std.testing.expect(o.approved);
+    var t = try board.getTicket(db, a, k);
+    try std.testing.expectEqual(board.Stage.review, t.stage);
+    try std.testing.expectEqualStrings(board.flag_review, flagOf(t, board.flag_review).?.kind);
+    // Passing again in Review: kept, nothing moves.
+    try std.testing.expect(!(try testResults(ctx, db, a, k, &pass, "", null)).approved);
+    try std.testing.expectEqual(board.Stage.review, (try board.getTicket(db, a, k)).stage);
+    // A failure in Review goes back to Testing first (no session here to
+    // send it to, so it waits there; sent, its next done returns it there).
+    try std.testing.expect((try testResults(ctx, db, a, k, &failed, "", null)).unsent);
+    try std.testing.expectEqual(board.Stage.testing, (try board.getTicket(db, a, k)).stage);
+    // Approve: Testing on to Review; then Review finishes it (Close: Done).
+    try std.testing.expectEqual(board.Stage.testing, try approve(ctx, db, a, k, false, .close));
+    t = try board.getTicket(db, a, k);
+    try std.testing.expectEqual(board.Stage.review, t.stage);
+    try std.testing.expectEqualStrings("", t.finishing);
+    try std.testing.expectEqual(board.Stage.review, try approve(ctx, db, a, k, false, .close));
+    try std.testing.expectEqual(board.Stage.done, (try board.getTicket(db, a, k)).stage);
 }
 
 test "gutterSubmitted: an empty review sends nothing and leaves the ticket alone" {

@@ -693,7 +693,8 @@ test ticketTestPlan {
     try std.testing.expectEqualStrings("Look", ticketDemo(a, tk(.{ .demo = "## Look\nopen: http://x/\n" })).?.steps[0].title);
 }
 
-/// `done`, with the handoff Claude gives (format_help: what it verified, the
+/// `board.finishRound` (the caller moves it on: `autoreview.startOnDone`),
+/// with the handoff Claude gives (format_help: what it verified, the
 /// test plan, a demo): null keeps the one from an earlier round, "" drops
 /// it, and otherwise it replaces all three parts. The review guide Claude
 /// wrote moves into the ticket (`takeGuide`). A handoff with nothing in it
@@ -720,7 +721,7 @@ pub fn done(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8, summa
         try board.setHandoff(ctx, db, t.id, h.verified, h.test_plan, h.demo);
     }
     if (t.stage != .planning) if (ticketDir(db, a, t)) |dir| try takeGuide(ctx, db, a, t, dir) else |_| {};
-    try board.done(ctx, db, a, key, summary);
+    try board.finishRound(ctx, db, a, key, summary);
 }
 
 /// Which walk-through a launch belongs to: the test plan's steps or the demo's.

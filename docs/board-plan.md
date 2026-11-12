@@ -7,13 +7,14 @@ password), with a phone layout, and can be wrapped as a desktop app later.
 ## Model
 
 - **Stages** are the workflow and the columns: Backlog, Planning (optional),
-  Queued, Running, Review, Testing, Done.
+  Queued, Running, Testing, Review, Done (CL-168: test first, review last).
 - **Flags** say what needs you and drive the inbox and filters. Several can be
   set at once, independent of the stage:
   - `input`: Claude is blocked on a permission prompt (auto)
   - `question`: Claude asked an `AskUserQuestion` (auto)
-  - `review`: Claude said it's done and no feedback is needed (auto, see Done)
-  - `testing`: needs you to try it (auto on Review → Testing, or by hand)
+  - `testing`: Claude said it's done: ready to test (auto, see Done)
+  - `review`: tested (or nothing to test): ready for review (auto on Testing →
+    Review, or by hand)
   - anything you set by hand
 
   A ticket whose session is busy working on it is left out of the inbox (the
@@ -23,8 +24,9 @@ password), with a phone layout, and can be wrapped as a desktop app later.
   ask and its quick actions; it is the main thing to use while work runs.
   Clicking a ticket opens its popup: status, comments, questions, session
   tail, Open shell (also for questions), Open in gutter.
-- **Re-iterating**: a comment sent to Claude on a ticket in Review or Testing
-  means "not done": it goes back to Running and its round goes up. A comment
+- **Re-iterating**: a comment sent to Claude on a ticket in Testing or Review
+  means "not done": it goes back to Running and its round goes up, and its
+  next done returns it to the stage it came from. A comment
   that isn't sent is a note and moves nothing.
 - **Planning** is optional: `--plan` starts a ticket in the Planning column,
   where Claude plans in plan mode and its questions reach the inbox. A
@@ -91,7 +93,7 @@ Three sources, all local files or tmux:
    `.claude/review-guide.md` (format: `gutter -guide-format`) and run
    `cl ticket done --summary "…"`. `CL_TICKET` is set in the session's
    environment so the command knows the ticket. An idle session that never
-   said done stays in Running; only `done` moves it to Review.
+   said done stays in Running; only `done` moves it on (to Testing, or Review with no test plan).
 
    Claude Code hooks, passed per session with `--settings`, are a backstop:
    a Stop hook records each finished turn (the Activity tab), and a

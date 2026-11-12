@@ -114,7 +114,7 @@ pub const ticket_usage =
     \\                              --todo makes it yours (see new), --link "" drops the link,
     \\                              --due none / --remind none drop the date
     \\  move <key> <stage> [--spin-off] [--merge | --pr [--then <steps>] | --tell <text> | --close]
-    \\                              backlog planning queued running review testing done
+    \\                              backlog planning queued running testing review done
     \\                              (done also closes the ticket's session; it's refused while
     \\                              sub-tickets are unfinished, --spin-off makes them top-level;
     \\                              --merge: Claude first merges the ticket's branch, then it goes
@@ -181,12 +181,15 @@ pub const ticket_usage =
     \\  rebase <key>                its change will conflict with its target (the dispatcher test-
     \\                              rebases open tickets' changes as trunk moves; show says so): ask
     \\                              its Claude to rebase onto it and settle the conflicts. Only into
-    \\                              an idle session on that ticket; review/testing go back to running
+    \\                              an idle session on that ticket; testing/review go back to running
+    \\                              (and its done returns them there)
     \\  approve <key> [--spin-off] [--merge | --pr [--then <steps>] | --tell <text> | --close]
     \\                              plan → queued (a new session builds it, told the plan;
-    \\                              an umbrella's sub-tickets queue instead), review → testing,
-    \\                              testing → done. Leaving planning any way (approve, move)
-    \\                              clears the plan's review flag
+    \\                              an umbrella's sub-tickets queue instead), testing → review,
+    \\                              review → done (--merge, --pr, --tell, --close: how it's
+    \\                              finished, as move done takes them; only out of review).
+    \\                              Leaving planning any way (approve, move) clears the plan's
+    \\                              review flag
     \\  answer <key> <answer>...    answer the question (one per question: an option number or
     \\                              your own words) or permission prompt (a number) it waits on;
     \\                              a multi-select question takes several numbers, maybe then
@@ -202,8 +205,9 @@ pub const ticket_usage =
     \\                              profile, read-only) reviews its changes and reports findings,
     \\                              kept on the ticket (show, the board's Review tab); nothing
     \\                              goes to the ticket's session until you --send them (that
-    \\                              starts another round, as comment --send does). In review or
-    \\                              testing; one at a time. --stop: stop it
+    \\                              starts another round, as comment --send does). In testing or
+    \\                              review; one at a time. --stop: stop it. (The project's
+    \\                              --auto-review runs one by itself as Claude finishes, in running)
     \\  autoreview <key> --findings -
     \\                              by hand, for a running review: take these findings (JSON on
     \\                              stdin, as the reviewer writes them) as its result
@@ -214,7 +218,8 @@ pub const ticket_usage =
     \\                              run a step's run: command (the first one by default) in tmux
     \\                              session clrun_<key>_s<n> (a demo step's: _d<n>); --stop: that
     \\                              step's, or all, the demo's too
-    \\  test <key>                  walk through the test plan here; failures go back to Claude; s at a check stops and sends what you have
+    \\  test <key>                  walk through the test plan here; failures go back to Claude, all
+    \\                              passing moves it on to review; s at a check stops and sends what you have
     \\  relocate <key> worktree|queue
     \\                              move it to a worktree of its own, or back to the queue; one
     \\                              under way takes its jj change and conversation along and
@@ -224,7 +229,8 @@ pub const ticket_usage =
     \\                              (cl web runs this too)
     \\  comment <key> <text> [--send] [--as you|claude]
     \\                              --send also types it into the ticket's session; on a
-    \\                              ticket in review or testing that starts another round
+    \\                              ticket in testing or review that starts another round (its
+    \\                              done returns it to that stage)
     \\  flag <key> <kind> [detail]  set a flag (input question review testing, or your own)
     \\  unflag <key> <kind>
     \\  overview [<key>] [--last <text>] [--next <text>]
@@ -240,7 +246,10 @@ pub const ticket_usage =
     \\                              finished with one (the board's Done dialog offers it, and
     \\                              move --pr takes it); "" drops it. Not a custom close
     \\  done [<key>] [--last <line>] [--summary <text>] [--test-plan <markdown> | -]
-    \\                              Claude: finished, nothing more needed; moves to review.
+    \\                              Claude: finished, nothing more needed; moves to testing (to
+    \\                              review with no test plan, or back to the stage it was sent
+    \\                              back from). With the project's --auto-review, an automated
+    \\                              review runs first while it waits in running.
     \\                              --last: the Overview's Last, what it did and where that
     \\                              leaves you ("Made the review changes; ready for review
     \\                              again"); without it, the summary
@@ -317,11 +326,13 @@ pub const project_usage =
     \\--review-skill: the skill the automated review (cl ticket autoreview) uses
     \\  instead of cl's own instructions; it still reports findings in cl's format.
     \\  "" (the default): cl's own.
-    \\--auto-review: run the automated review by itself when a ticket reaches review
-    \\  (Claude's `cl ticket done`; only its first time there, not for one without
-    \\  changes), so it reaches Needs You with the findings there. send: also send
-    \\  what it finds to Claude for one round (like Send findings); the default for
-    \\  a new project (off for --no-repo). off: only when you start it. You can
+    \\--auto-review: run the automated review by itself when Claude finishes a ticket
+    \\  in running (its `cl ticket done`; only the first time, not for one without
+    \\  changes). The ticket waits in running until it's done, so you never test code
+    \\  it then changes. on: then it moves on, findings and all, for you to read.
+    \\  send: what it finds goes to Claude for one round first (like Send findings),
+    \\  and it moves on after Claude's next done; the default for a new project (off
+    \\  for --no-repo). off: only when you start it (in testing or review). You can
     \\  start one any time either way.
     \\--after-merge-claude: what Claude is asked to do after a merge when there is no
     \\  command (the ticket's Claude, or the operator once its session is gone), and
@@ -431,7 +442,7 @@ fn openBoard(ctx: Ctx, cfg: config.Config) board.Db {
 }
 
 fn parseStage(s: []const u8) board.Stage {
-    return board.Stage.parse(s) orelse fail("no such stage: {s} (backlog planning queued running review testing done)", .{s});
+    return board.Stage.parse(s) orelse fail("no such stage: {s} (backlog planning queued running testing review done)", .{s});
 }
 
 /// Move a ticket to `to` (see `dispatch.relocate`) and say where it went.
@@ -1089,6 +1100,10 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         if (last) |l| if (l.len > 0) board.setOverview(ctx, db, t0.id, l, null) catch |e| boardFail(db, e, "ticket");
         // Findings sent to it are handled now (before a new review replaces them).
         if (t0.stage != .planning) autoreview.answered(ctx, db, a, key, args.get("--summary") orelse "") catch {};
+        // On to Testing (Review with nothing to test, or where it was sent
+        // back from), or held in Running while the project's automated
+        // review runs first (--auto-review).
+        const on = autoreview.startOnDone(ctx, cfg, db, a, key) catch |e| boardFail(db, e, "ticket");
         // A round on its PR's feedback: back where it waited, parked on the
         // PR again (a push may need a new approval). Its work goes to the
         // PR's reviewers, not through the board's stages (or review) again.
@@ -1099,13 +1114,17 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
             actions.stopForPark(ctx, cfg, db, a, key) catch |e| boardFail(db, e, "ticket");
             return;
         };
-        // The project reviews what reaches Review by itself (--auto-review).
-        const auto: []const u8 = if (t0.stage == .planning) "" else switch (autoreview.startOnReview(ctx, cfg, db, a, key)) {
-            .off, .skipped => "",
-            .started => |m| if (m == .send)
-                "\nAn automated review of your changes runs now. If it finds problems, they're sent to you here for one more round: check them, then finish the same way."
+        const where: []const u8 = switch (on) {
+            .moved => |st| switch (st) {
+                .planning => "plan ready for approval",
+                .testing => "moved to testing: the human tries it next",
+                .review => "moved to review",
+                else => @tagName(st),
+            },
+            .held => |m| if (m == .send)
+                "an automated review of your changes runs now, and the ticket waits in Running until it's done. If it finds problems, they're sent to you here for one more round: check them, then finish the same way"
             else
-                "\nAn automated review of your changes runs now; the human gets its findings with your work.",
+                "an automated review of your changes runs now, and the ticket waits in Running until it's done; then it goes to the human with its findings",
         };
         const t = board.getTicket(db, a, key) catch |e| boardFail(db, e, "ticket");
         // Said when Claude finishes, as that's when it knows: its work has a
@@ -1114,9 +1133,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
             try std.fmt.allocPrint(a, "\nIf its work shouldn't be merged (or made a PR) as it is, say so now: `cl ticket custom-close {s} \"<what to do with it instead>\"`.", .{t.key})
         else
             "";
-        return out(try std.fmt.allocPrint(a, "{s}: {s}. The board shows it to the human; nothing more to do.{s}{s}\n", .{
-            t.key, if (t.stage == .planning) "plan ready for approval" else "moved to review", auto, hint,
-        }));
+        return out(try std.fmt.allocPrint(a, "{s}: {s}. The board shows it to the human; nothing more to do.{s}\n", .{ t.key, where, hint }));
     }
     if (std.mem.eql(u8, cmd, "rm")) {
         args.only(&.{}, ticket_usage);
@@ -1305,13 +1322,17 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
     if (std.mem.eql(u8, cmd, "approve")) {
         args.only(&.{ "--spin-off", "--merge", "--pr", "--then", "--tell", "--close" }, ticket_usage);
         const key = keyArg(pos, 0, env_key, "cl ticket approve <key>");
-        if (args.has("--then") and (board.getTicket(db, a, key) catch |e| boardFail(db, e, "ticket")).stage != .testing)
-            fail("--then goes with approving out of testing (to done) with --pr", .{});
+        // Finishing (merge, PR, tell) is approving out of Review, the last stage.
+        const stage = (board.getTicket(db, a, key) catch |e| boardFail(db, e, "ticket")).stage;
+        if (args.has("--then") and stage != .review)
+            fail("--then goes with approving out of review (to done) with --pr", .{});
+        if (stage != .review) for ([_][]const u8{ "--merge", "--pr", "--tell" }) |o| if (args.has(o))
+            fail("{s} finishes a ticket: it goes with approving out of review; {s} is in {s} (approve moves it to {s})", .{ o, key, @tagName(stage), if (board.approvedStage(stage)) |to| @tagName(to) else "nowhere" });
         const old = try setThen(ctx, db, a, key, args);
         _ = actions.approve(ctx, db, a, key, args.has("--spin-off"), finishArg(args)) catch |e| {
             restoreThen(ctx, db, a, key, old);
             switch (e) {
-                error.BadInput => fail("only a ticket in planning, review or testing can be approved", .{}),
+                error.BadInput => fail("only a ticket in planning, testing or review can be approved", .{}),
                 error.NoSubtickets => fail("{s}: {s}", .{ key, actions.no_subtickets }),
                 else => boardFail(db, e, "ticket"),
             }
@@ -1409,7 +1430,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         }
         tmux.requireServer(ctx);
         const r = autoreview.start(ctx, cfg, db, a, t) catch |e| switch (e) {
-            error.NotInReview => fail("{s} is in {s}: only a ticket in review or testing gets an automated review", .{ t.key, @tagName(t.stage) }),
+            error.NotInReview => fail("{s} is in {s}: only a ticket in testing or review gets an automated review (the project's --auto-review runs one as Claude finishes)", .{ t.key, @tagName(t.stage) }),
             error.NoChanges => fail("{s} has no changes to review", .{t.key}),
             error.NoRepo => fail("{s}'s project isn't a code repo (cl project set --repo), so there are no changes to review", .{t.key}),
             error.AlreadyRunning => fail("{s}'s automated review is running already (--stop stops it)", .{t.key}),
@@ -1562,32 +1583,19 @@ fn walkTest(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8) !void
         try results.append(a, .{ .title = st.title, .comment = comment, .checks = checks.items });
     }
     const note = try ask.line(&in, a, "\nAnything else for Claude? (Enter to skip) ");
-    var finish: actions.Finish = .close;
-    const cur = board.getTicket(db, a, key) catch |e| boardFail(db, e, "ticket");
     const res = review.recordResults(a, results.items, note) catch |e| boardFail(db, e, "ticket");
-    // Comments with everything passing: send them, or finish without.
+    // Comments with everything passing: send them, or move on without.
     var send = !res.passed;
     if (res.passed and res.commented) send = yes(try ask.line(&in, a, "\nAll passed, with comments. Send them to Claude for another round? [Y/n] "));
-    if (res.passed and !send and cur.stage == .testing and (cur.branch.len > 0 or cur.change.len > 0)) {
-        const main = worktree.mergeBranch(ctx, a, (board.getProject(db, a, cur.project) catch |e| boardFail(db, e, "project")).dir, cur.onto);
-        const ans = try ask.line(&in, a, try std.fmt.allocPrint(a, "\nAll passed. [m]erge {s} into {s}, open a [p]R, or just [c]lose? ", .{ if (cur.branch.len > 0) cur.branch else "its change", main }));
-        if (ans.len > 0) finish = switch (std.ascii.toLower(ans[0])) {
-            'm' => .merge,
-            'p' => .pr,
-            else => .close,
-        };
-    }
-    const o = actions.testResults(ctx, db, a, key, results.items, note, send, false, finish) catch |e| boardFail(db, e, "ticket");
+    const o = actions.testResults(ctx, db, a, key, results.items, note, send) catch |e| boardFail(db, e, "ticket");
     try out(if (o.sent)
-        "\nSent the results to Claude for another round.\n"
+        "\nSent the results to Claude for another round; its next done brings it back to testing.\n"
     else if (o.unsent)
         "\nIt has no session to send them to; they're kept as a comment.\n"
     else if (!o.approved)
         "\nAll passed; kept on the ticket (it isn't in testing, so nothing moved).\n"
-    else if (finish != .close)
-        "\nAll passed: Claude is finishing it; it goes to done when that's through.\n"
     else
-        "\nAll passed: the ticket is done.\n");
+        try std.fmt.allocPrint(a, "\nAll passed: on to review. Approve it there to finish it (`cl ticket approve {s}`).\n", .{t.key}));
 }
 
 /// What Claude verified itself, before the steps: `cl t testplan` and `cl t test`.

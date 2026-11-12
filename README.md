@@ -334,7 +334,7 @@ bare `cl` with no terminal (an agent reading the help, say) prints the help
 rather than starting a session in the current folder, and `cl <dir>` without
 `-d` refuses when there is no terminal to attach to.
 
-`review.model` does the same for the automated review (Review and testing).
+`review.model` does the same for the automated review (Testing and review).
 
 `operator.model = sonnet` (any `claude --model` value) runs the operator on
 another model than the profile's default. It takes effect the next time the
@@ -529,7 +529,8 @@ to the home screen (iOS 16.4 or later), not in Safari.
 - On Android the notification also has buttons that act there and then,
   signed in as the board is on that phone: a question's options (a single
   question with one answer) or a permission prompt's, **Approve plan**,
-  **Merge** (work in Review or Testing with a branch or change of its own),
+  **Merge** (work ready for review, in Review, with a branch or change of its
+  own: finishing comes after testing),
   or **Dismiss** (an alert, or a flag that doesn't wait on you). It says
   what it's doing at once, then what happened; an item dealt with since
   (on the board, or by Claude moving on) is left alone and says so. Chrome
@@ -858,8 +859,10 @@ review) are kept out through `.git/info/exclude`; everything
 gitignored, like `node_modules`, stays out as usual.
 
 Stages are the workflow: backlog, planning (optional), queued, running,
-review, testing, done. Flags say what needs you and are separate from the
-stage: `input` (a permission prompt), `question`, `review`, `testing`, or any
+testing, review, done: you test the work first and review it last, and
+finishing it (merge, PR) is approving it out of Review. Flags say what needs
+you and are separate from the stage: `input` (a permission prompt),
+`question`, `testing` (ready to test), `review` (ready for review), or any
 word you like. While a ticket's session is busy working on it, it stays out of
 the inbox whatever its flags say; it comes back once the session stops.
 
@@ -872,31 +875,39 @@ cl t edit QA-1 --title ... | move QA-1 testing | rm QA-1
 cl t comment QA-1 "also cover logout" --send
 cl t flag QA-1 needs-design "which layout?" | unflag QA-1 needs-design
 cl t overview QA-1 --last "In progress: the retry" --next "A test for it"
-cl t done QA-1 --last "Fixed the race; ready for review" --summary "Retry the lock once on EBUSY"
+cl t done QA-1 --last "Fixed the race; ready to test" --summary "Retry the lock once on EBUSY"
 ```
 
 - `done` is how Claude says a ticket is finished and needs nothing more: it
-  moves to review with the `review` flag, and the summary becomes a comment.
+  moves to testing with the `testing` flag (to review with `review` when it
+  has no handoff: nothing to test), and the summary becomes a comment. A
+  round sent back from testing or review (a sent comment, gutter, test
+  results, a rebase, its PR's feedback) returns to that stage instead, so a
+  review comment never sends it through testing again. With the project's
+  `--auto-review`, an automated review runs first while it waits in running
+  (Automated review, below). A `done` in testing or review leaves it there and
+  raises the flag again.
 - `overview` sets the ticket's Overview, the board ticket view's first tab: a
   sentence on what was done last (or "In progress: ..."), one on what comes
   next, and its state (stage, session and whatever waits on you, which cl
   works out itself). Its session (building, planning or resumed; not a
   todo's) is told to keep it current as it goes. `done --last` hands in
   Last as Claude finishes: what it did this round and where that leaves you
-  ("Made the review changes; ready for review again"), separate from the
+  ("Fixed what failed in testing; ready to test again"), separate from the
   longer `--summary`, which only stands in for it when `--last` is left out.
   `done` also clears Next. Claude's Next shows only while it's Claude's turn
   (Running or Planning with nothing asking you); otherwise, or with no Next
   from Claude, the board says what's next from the stage and flags (answer
-  it, read the plan, review it, try it). Without `--last` or `--next` it
+  it, read the plan, test it, review it). Without `--last` or `--next` it
   prints them; `show` has them too. A ticket opens on its Overview unless
   something asks you for an answer now (a question, a plan ready to approve,
   a failed merge), which opens on that tab instead.
 - `comment --send` also types the comment into the ticket's session. On a
-  ticket in review or testing it means "not done yet": the ticket goes back
-  to running and its round goes up. Without `--send` a comment is a note.
-- Entering testing sets `testing`; leaving review or testing clears its flag;
-  done clears every flag.
+  ticket in testing or review it means "not done yet": the ticket goes back
+  to running, its round goes up, and its next `done` returns it to the stage
+  it came from. Without `--send` a comment is a note.
+- Entering testing sets `testing`; entering review sets `review`; leaving
+  testing or review clears its flag; done clears every flag.
 - Moving a ticket in progress back to queued or backlog stops it: its session
   ends as `cl t kill` does, so Claude doesn't carry on unseen (holding the
   project's slot) while the board says it waits. Its conversation and change
@@ -917,7 +928,9 @@ cl t done QA-1 --last "Fixed the race; ready for review" --summary "Retry the lo
   isn't told the plan): that session gets the plan as you saved it, and
   Claude isn't told you changed it. If Claude hands
   in a revised plan while you edit, Save is refused rather than replace it. `cl t approve` moves it to Queued, and a new session builds it; on
-  a ticket in review or testing, approve moves it on a stage. Leaving
+  a ticket in testing, approve moves it on to review ("Tested, to review"),
+  and in review it finishes it ("Approve, finish…": the Done dialog's Close,
+  Merge, PR or Tell; `--merge`, `--pr`, `--tell`, `--close` on the CLI). Leaving
   Planning any way (approve, `cl t move`, the board's Stage) clears the
   plan's `review` flag, so a plan that's been dealt with doesn't stay in
   Needs You.
@@ -1052,7 +1065,10 @@ replaces all three parts (one it leaves out is dropped); `done` without
 demo with checks is refused, and so is text in the test plan or demo before
 its first `## ` step (it would be dropped). You can send what you have to
 Claude from any step: checks you didn't get to go as not tested, and Claude
-is told which steps still need testing. Finishing needs every check passed. The handoff is kept in the ticket on the board, not in a file,
+is told which steps still need testing. Moving on to Review needs every check
+passed. Without a handoff the ticket skips Testing: `done` moves it straight
+to Review (drag it to Testing if you want to try it anyway); a Verified list
+or a Demo alone still gets its "Try it" step in Testing. The handoff is kept in the ticket on the board, not in a file,
 so each ticket's Test tab shows only what its own session gave. So is the
 review guide: `done` moves `.claude/review-guide.md` into the ticket (a
 guide older than the ticket's session is someone else's and is dropped), and
@@ -1087,7 +1103,7 @@ the ticket (its description and how to finish); not when it was told already
 it still has). When it is busy, waiting on you, or idle with a background
 task (a dev server) a restart would end, it is left as it is: the session is
 recorded, and attaching it again once it is idle adds the rest. A ticket in
-Backlog or Queued moves to Running; one in Review or Testing stays put. It is
+Backlog or Queued moves to Running; one in Testing or Review stays put. It is
 refused for a session outside the ticket's project (its checkout, the
 ticket's worktree or the project's worktrees), when the session belongs to
 another ticket that isn't done, and when the ticket has a live session of its
@@ -1102,7 +1118,7 @@ nothing new there: queued tickets stay in Queued, keeping their order, and
 read "paused" instead of "waiting for a slot"; planning tickets wait to be
 planned; and a parked ticket whose check passes ends its park but waits in
 Queued (with the note it resumes with) instead of resuming. What runs goes
-on to the end of its work, and Review and Testing wait on you as before.
+on to the end of its work, and Testing and Review wait on you as before.
 `cl project resume <name>` (or `--all`) starts dispatching again, top of the
 queue first. The pause is kept on the project, so it survives a `cl web`
 restart; `cl project list` says `paused`, and the board shows a banner with
@@ -1119,7 +1135,9 @@ session is killed and it goes back to Queued, its conversation and change
 kept, to resume where it left off once the project resumes. Planning
 sessions end too; their tickets stay in Planning and are planned again,
 resuming the conversation. A ticket whose session another ticket in progress
-shares (a sub-ticket in its parent's) is left running and named.
+shares (a sub-ticket in its parent's) is left running and named. A Running
+ticket Claude has finished, waiting there for its automated review, is left
+alone: it moves on when the review is done.
 
 ### Parking a ticket
 
@@ -1176,7 +1194,7 @@ board's Park form has a PR field that does the same.
 
 A ticket finished with a PR (Done → Open a PR, below) isn't Done while the
 PR is open: once Claude has opened it, the ticket stays in the stage it was
-in, parked on the PR, and its session stops (conversation and worktree
+in (Review, when approving it there finished it), parked on the PR, and its session stops (conversation and worktree
 kept). Its card says "Waiting on PR #31", and its popup links the PR. It
 isn't called unmerged (it isn't Done), and stays out of Needs You.
 
@@ -1198,8 +1216,9 @@ comment's text, file and line, and link, and the failed checks' links. It is
 told to fix what is real and push to the PR's branch, not to merge the PR,
 and to put proposed replies in its summary rather than posting them on
 GitHub (unless you've said otherwise), then to finish with `cl t done` as
-usual. That `done` puts it back in the stage it waited in (not through the
-stages before it) and parks it on the PR again (a push can dismiss
+usual. That `done` puts it back in the stage it waited in (not through
+Testing again: review comments on a PR never send it back to be re-tested)
+and parks it on the PR again (a push can dismiss
 approvals, so it waits for the next round); no automated review runs on
 it. What it was told is kept on the ticket (the newest comment's time, and
 the commit whose failed checks it saw), so the same feedback never wakes it
@@ -1210,7 +1229,7 @@ The merge, by anyone (on GitHub, by hand), moves it to Done at the next
 check, without resuming it: its session closes, and steps for after the
 merge get their follow-up then (below). Closed without merging, the park
 ends with `pr-closed` as above and the ticket no longer waits on that PR:
-its next `done` goes to Review the usual way. No merge within 14 days,
+its next `done` goes on the usual way (Testing, or Review). No merge within 14 days,
 `park-expired`; the PR is still open, so its next `done` waits on it again.
 Unpark it to talk to it; its next `done` parks it on the PR again. Moving it
 to Done by hand ends the wait.
@@ -1404,10 +1423,10 @@ killed (`--json` for one object per line, with the flag's details):
 ```
 CL-37 cl-wrapper set question Add cl ticket watch
 CL-37 cl-wrapper cleared question Add cl ticket watch
-CL-37 cl-wrapper moved running->review Add cl ticket watch
+CL-37 cl-wrapper moved running->testing Add cl ticket watch
 CL-90 cl-wrapper new backlog Fix the login page
-CL-37 cl-wrapper needs question,review Add cl ticket watch
-CL-37 cl-wrapper left question,review Add cl ticket watch
+CL-37 cl-wrapper needs question,testing Add cl ticket watch
+CL-37 cl-wrapper left question,testing Add cl ticket watch
 ```
 
 `needs` and `left` follow Needs you, decided the same way the board does it.
@@ -1438,18 +1457,37 @@ raises one `cl alert` for tickets or kinds of flag you asked it to follow, and
 alerts when something looks wrong that the board won't make obvious. What you
 tell it goes in its notes.
 
-### Review and testing
+### Testing and review
+
+You test a ticket first and review it last. When Claude finishes (`done`),
+the ticket goes to Testing, flagged "Ready to test" with Claude's summary on
+its card (or straight to Review when Claude gave no handoff to test). Pass its tests
+("Pass, to review"), or approve it there ("Tested, to review"), and it goes
+to Review, "Ready for review". Review is the last stage: approving it there
+("Approve, finish…") opens the Done dialog (Close, Merge, PR or Tell), and
+the phone notification's Merge works only there too. Dragging a ticket to
+Done, or `cl t move <key> done`, still finishes it from any stage.
+
+Send a ticket back from either stage (a sent comment, gutter, failed tests,
+Rebase now, its PR's feedback) and cl remembers where it came from: Claude's
+next `done` returns it there, so a fix asked for in Review goes back to Review
+without being tested again, and one for a failed test goes back to Testing.
+Drag it elsewhere if you want something else.
 
 ```
-cl t gutter QA-1 [--stop]          review the ticket's changes in gutter's window; Submit sends it to Claude
-cl t autoreview QA-1 [--stop]      a second Claude reviews the changes; its findings wait on the ticket for you
-cl t autoreview QA-1 --send        send the findings to the ticket's session (another round)
 cl t testplan QA-1                 what Claude verified, its test plan step by step, and the demo
 cl t launch QA-1 --step 2          run step 2's run: command (tmux session clrun_qa-1_s2; --stop ends it)
 cl t launch QA-1 --demo --step 1   the demo's step 1 (clrun_qa-1_d1); --stop without --step ends them all
-cl t test QA-1                     walk through the plan here; failures go back to Claude (s at a check stops and sends what you have)
-cl t approve QA-1                  review -> testing -> done
+cl t test QA-1                     walk through the plan here; failures go back to Claude, all passing moves it to review (s at a check stops and sends what you have)
+cl t gutter QA-1 [--stop]          review the ticket's changes in gutter's window; Submit sends it to Claude
+cl t autoreview QA-1 [--stop]      a second Claude reviews the changes; its findings wait on the ticket for you
+cl t autoreview QA-1 --send        send the findings to the ticket's session (another round)
+cl t approve QA-1                  testing -> review -> done (out of review: --merge, --pr, --tell or --close)
 ```
+
+When this order came in (CL-168), the board's open tickets swapped: those in
+Review went to Testing and those in Testing to Review, flags and all, so none
+changed its place in the flow.
 
 Reviewing in gutter is optional. cl uses
 `gutter.path` from the config when it is set, else `gutter` on PATH:
@@ -1472,9 +1510,10 @@ submitting (or `--stop`) leaves the ticket as it was. gutter only listens on
 127.0.0.1, so while it runs the board links to it and `cl web` also opens the
 same port on its other `web.listen` addresses (tailscale) and forwards it,
 answering only connections from tailscale (a 100.64.0.0/10 or
-fd7a:115c:a1e0::/48 address; see "Test plans on the phone"). Test results that all pass move a ticket in testing to
-done; a failure sends them to Claude for another round, and so can comments
-when everything passed (the board asks).
+fd7a:115c:a1e0::/48 address; see "Test plans on the phone"). Test results that all pass move a ticket in testing on to
+review; a failure sends them to Claude for another round (from Review, it
+goes back through Testing, so its next `done` returns it there to be tested
+again), and so can comments when everything passed (the board asks).
 
 #### Test plans on the phone
 
@@ -1509,13 +1548,13 @@ Opened on this machine, the links stay as Claude wrote them.
 #### Automated review
 
 `cl t autoreview QA-1`, or the board's Auto review (in a ticket's action bar,
-or Run automated review on its Review tab; in Review or Testing), has a second
+or Run automated review on its Review tab; in Testing or Review), has a second
 Claude go over the changes before you spend time on them. It isn't the
 ticket's own session, which is anchored on its own reasoning; the ticket stays
 where it is while it runs, out of Needs You (`cl t needs` and `cl t watch`
 too), as when Claude is working on it. When the review finishes or fails, the
-ticket is back there with its Ready for review flag (raised again if you
-dismissed or hid it meanwhile), and its card says how many findings there
+ticket is back there with its stage's flag, Ready to test or Ready for review
+(raised again if you dismissed or hid it meanwhile), and its card says how many findings there
 are. The reviewer is
 an interactive `claude` in tmux session clrv_qa-1 (`tmux attach -t clrv_qa-1`
 to watch), in the ticket's directory, under the same profile as the ticket's
@@ -1575,30 +1614,34 @@ Done,
 deleting the ticket, or moving it back to Queued stops a review that's
 running.
 
-A project can have it run by itself when a ticket reaches Review: `cl project
-set <p> --auto-review on` (or the project's "When a ticket reaches Review" on
+A project can have it run by itself when Claude finishes: `cl project set
+<p> --auto-review on` (or the project's "When Claude finishes a ticket" on
 the board). A new code project starts with `send` (below) unless `cl project
 add` is given `--auto-review off|on`; a `--no-repo` project has no automated
 review. A project keeps the setting it was added with until you change it.
-When Claude says it's done (`cl ticket done`, or the board's done for it), the
-review starts right away, so the ticket reaches Needs You with its findings
-already there instead of waiting for you to press Auto review. `--auto-review send` also
-sends what it finds to Claude, as Send findings would, for one round; when
-Claude finishes that round, the ticket waits for you with the old findings and
-Claude's answer. A review with no findings sends nothing.
-Either way it runs only the first time a ticket reaches Review: not again when
-it comes back (Claude says done twice, answers the findings, or finishes a
-round you started with a comment), so the two don't go back and forth with
-nobody looking. Auto review still runs one whenever you press it. A ticket
-with no changes, or one whose reviewer can't start, is skipped (its log says
-why, and the next time it reaches Review tries again; so does one whose
-automatic review failed) and is in Needs You as usual; so are findings cl
-couldn't send because the ticket's session is gone. With send, the ticket
-only comes back to Needs You if cl couldn't send them, or once Claude has
-answered. If you approve or send the
-ticket back while the review runs, nothing is sent by itself. A review
-started this way says so on the Review tab and in `cl t show`. `off` (the
-default) goes back to only when you start it.
+When Claude says it's done in Running (`cl ticket done`, or the
+board's done for it), the review starts right away and the ticket waits in
+Running, marked reviewing and out of Needs You, until it's over. Only then
+does it move on to Testing (or Review, with no handoff), so you never test
+code a review then changes. With `on` the findings wait for you on the card
+and the Review tab, unread. `--auto-review send` sends what it finds to
+Claude first, as Send findings would, for one round in the same session (it
+starts a round of its own); the ticket stays in Running while Claude works on
+them and moves on after Claude's next `done`, with the findings handled and
+Claude's answer on the Review tab. A review with no findings, one that failed
+or timed out, one you stopped, and findings cl couldn't send (the ticket's
+session is gone) all move the ticket on right away. Drag it on yourself and
+it isn't moved again.
+Either way it runs only the first time Claude finishes a ticket: not again
+when it comes back (Claude says done twice, answers the findings, finishes a
+round you started with a comment, or a round on its PR's feedback), so the two
+don't go back and forth with nobody looking. Auto review still runs one
+whenever you press it (in Testing or Review). A ticket with no changes, or one
+whose reviewer can't start, is skipped (its log says why, and its next round
+tries again; so does one whose automatic review failed) and moves on as usual.
+A review started this way says so on the Review tab and in `cl t show`.
+`off` goes back to only when you start it. Pause now leaves a ticket waiting
+on its review alone.
 
 Tests clean up after themselves. Sending test results stops the ticket's
 launches, and so does finishing it. Once a minute the main `cl web` also
@@ -1619,13 +1662,13 @@ ticket uses, should whatever moved it have been stopped halfway (say, `cl web`
 restarted by an after-merge command). For a ticket with a branch of its own
 (a jj change, or a git worktree's branch) you choose what happens to the branch first: the board asks
 when a card is dropped on Done (or Done is picked, or it is approved out of
-testing), and the CLI takes a flag:
+review, the last stage), and the CLI takes a flag:
 
 ```
 cl t move QA-1 done --merge        merge it into the main branch, or its --onto branch (see below)
 cl t move QA-1 done --pr           Claude pushes it and opens a PR, then it waits on the PR, parked
 cl t move QA-1 done --tell "<text>"  Claude does what you say first (anything)
-cl t move QA-1 done [--close]      just close (the default; also approve and test)
+cl t move QA-1 done [--close]      just close (the default; approve out of review takes these too)
 ```
 
 The board's dialog has the same choices: "Tell Claude what to do" takes your
@@ -1743,8 +1786,8 @@ ticket's session: `jj rebase -b <change> -d '"<target>"'`, then settle what jj
 records, check it builds, and carry on. It is only sent into a session that
 is idle and on that ticket, so a working session isn't interrupted and a
 question isn't answered by accident; otherwise it says why and waits for you
-to try again. A ticket in Review or Testing goes back to Running, as a sent
-comment does, and Claude says done again after. Git branches (no jj change)
+to try again. A ticket in Testing or Review goes back to Running, as a sent
+comment does, and Claude says done again after, which returns it there. Git branches (no jj change)
 aren't checked.
 
 #### After merge
@@ -1960,13 +2003,14 @@ for its project (the selected ticket's to start with), title and an optional
 description. On a card or an open ticket:
 
 - `t` opens its session (attaches; `Ctrl-Q` comes back).
-- `a` approves (plan → Queued, Review → Testing, Testing → Done).
+- `a` approves (plan → Queued, Testing → Review, Review → Done: going to Done
+  asks how to finish it, below).
 - `A` answers what Claude asks: an option number or your own words, one per
   question separated by `|` (`cl ticket answer`).
-- `m` then a stage letter moves it (`b p q r v t d`); `<` and `>` move it one
+- `m` then a stage letter moves it (`b p q r t v d`); `<` and `>` move it one
   stage back or on.
 - `c` adds a note (it goes with the ticket's next prompt), `s` sends a line
-  into its session (on a ticket in Review or Testing, that sends it back).
+  into its session (on a ticket in Testing or Review, that sends it back).
 - `/` searches keys, titles and descriptions.
 
 Going to Done asks what the web board asks: to spin off unfinished

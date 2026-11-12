@@ -81,7 +81,7 @@ const instructions =
     \\
     \\Keeping a project moving: when the human asks for it, write in your notes the project
     \\and what they let you do there: answer Claude's questions (which kinds), allow
-    \\permission prompts, approve plans, reviews and tests, finish tickets (--merge, --pr or
+    \\permission prompts, approve plans, tests and reviews, finish tickets (--merge, --pr or
     \\--close), restart sessions that ended. If they didn't say, ask once before starting.
     \\Make sure the watch covers it (`--change needs --project <p>`, or the default). On each
     \\`needs` line for it, read the ticket with `cl ticket show <key>` and do what it waits
@@ -331,9 +331,10 @@ const tickets_skill =
     \\  cl ticket show <key> [--json]      details, flags, what it waits on and blocks,
     \\                                     sub-tickets (in order), comments and activity
     \\
-    \\Stages: backlog, planning, queued, running, review, testing, done. Flags say what a
-    \\ticket needs from the human: question (Claude asked something), input (a permission
-    \\prompt), review (finished, to review), testing (to try), ended (its session went away),
+    \\Stages: backlog, planning, queued, running, testing, review, done (test first, review
+    \\last). Flags say what a ticket needs from the human: question (Claude asked something),
+    \\input (a permission prompt), testing (Claude finished: ready to test), review (tested,
+    \\or nothing to test: ready for review), ended (its session went away),
     \\idle (Claude ended its turn with nothing else pending; it waits for a prompt), unparked
     \\(its park's check passed and it resumed), park-expired (the check never passed), pr-closed
     \\(the PR its park waited on was closed without merging), and for todos reminder (its
@@ -395,9 +396,9 @@ const tickets_skill =
     \\                                     runs the check from its directory, and exit 0 resumes it
     \\  cl ticket unpark <key> [--no-resume]  end the park now (and resume it, by default)
     \\  cl ticket comment <key> "<text>"   a note; with --send it is also typed into the
-    \\                                     ticket's session, and a ticket in review or testing
-    \\                                     goes back to running
-    \\  cl ticket approve <key>            plan -> queued, review -> testing, testing -> done
+    \\                                     ticket's session, and a ticket in testing or review
+    \\                                     goes back to running (its done returns it there)
+    \\  cl ticket approve <key>            plan -> queued, testing -> review, review -> done
     \\  Going to done (move or approve) closes the session. A worktree ticket takes
     \\  --merge (Claude merges its branch first) or --pr (opens a PR first); ask the
     \\  human which unless they said. --close, the default, just closes. --tell "<text>"

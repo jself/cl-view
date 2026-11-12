@@ -164,7 +164,7 @@ pub fn handle(ctx: Ctx, cfg: config.Config, req: *std.http.Server.Request, path:
             error.GutterFailed => .{ .internal_server_error, "gutter didn't start" },
             error.GutterMissing => .{ .conflict, review.not_installed },
             error.GutterOpen => .{ .conflict, "gutter is open already: close it first, then open it with the findings" },
-            error.NotInReview => .{ .conflict, "only a ticket in review or testing gets an automated review" },
+            error.NotInReview => .{ .conflict, "only a ticket in testing or review gets an automated review (the project's own runs as Claude finishes)" },
             error.NoChanges => .{ .conflict, "it has no changes to review" },
             error.AlreadyRunning => .{ .conflict, "its automated review is running already" },
             error.StartFailed => .{ .internal_server_error, std.fmt.allocPrint(a, "the reviewer didn't start: {s}", .{tmux.lastError()}) catch "the reviewer didn't start" },
@@ -196,7 +196,7 @@ pub fn handle(ctx: Ctx, cfg: config.Config, req: *std.http.Server.Request, path:
             error.NoTestPlan => .{ .not_found, "no test plan" },
             error.NoDemo => .{ .not_found, "no demo" },
             error.NoLaunch => .{ .not_found, "that step has no run: command" },
-            error.Conflicts => .{ .conflict, "merging it back conflicts (the files are on the ticket); it stays in Testing" },
+            error.Conflicts => .{ .conflict, "merging it back conflicts (the files are on the ticket); it stays in Review" },
             error.MergeFailed => .{ .internal_server_error, worktree.lastError() },
             error.SharedSession => .{ .conflict, "another ticket is in progress in its session, so stopping it would cut that one off; move or finish that ticket first, or kill the session for both" },
             error.Starting => .{ .conflict, "it is starting right now; try again in a moment" },
@@ -267,7 +267,8 @@ const Body = struct {
     after_merge_claude: ?[]const u8 = null,
     /// Project: the automated review's skill ("" for cl's own instructions).
     review_skill: ?[]const u8 = null,
-    /// Project: whether a ticket reaching Review gets an automated review by itself.
+    /// Project: whether Claude finishing a ticket in Running gets it an
+    /// automated review by itself, before it moves on.
     auto_review: ?board.AutoReview = null,
     push_after_merge: ?[]const u8 = null,
     /// Project: a code repo (`board.Project.repo`); false for one that isn't.
@@ -669,11 +670,12 @@ fn ticketAction(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator
         return ok(req, a, .{ .dismissed = try board.dismissFlag(ctx, db, a, key, kind) });
     } else if (eql(u8, action, "done")) {
         try review.done(ctx, db, a, key, b.summary orelse "", null, null);
-        // Into Review as with Claude's `cl ticket done`: the project may review it by itself.
-        _ = autoreview.startOnReview(ctx, cfg, db, a, key);
+        // As with Claude's `cl ticket done`: the project may review it by
+        // itself first, in Running; else it moves on now.
+        _ = try autoreview.startOnDone(ctx, cfg, db, a, key);
     } else if (eql(u8, action, "approve")) {
         const finish = try finishOf(b);
-        const old = if ((try board.getTicket(db, a, key)).stage == .testing) try setThen(ctx, db, a, key, b, finish) else null;
+        const old = if ((try board.getTicket(db, a, key)).stage == .review) try setThen(ctx, db, a, key, b, finish) else null;
         errdefer restoreThen(ctx, db, a, key, old);
         _ = try actions.approve(ctx, db, a, key, b.spin_off orelse false, finish);
     } else if (eql(u8, action, "start")) {
@@ -759,10 +761,9 @@ fn ticketAction(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator
         try board.setTestProgress(db, (try board.getTicket(db, a, key)).id, json);
     } else if (eql(u8, action, "test-results")) {
         const steps = b.steps orelse &.{review.StepResult{ .checks = b.checks orelse return error.BadInput }};
-        const finish = try finishOf(b);
-        const old = try setThen(ctx, db, a, key, b, finish);
-        errdefer restoreThen(ctx, db, a, key, old);
-        return ok(req, a, try actions.testResults(ctx, db, a, key, steps, b.note orelse "", b.send, b.spin_off orelse false, finish));
+        // All passing moves a ticket in Testing on to Review: finishing is
+        // approving it there.
+        return ok(req, a, try actions.testResults(ctx, db, a, key, steps, b.note orelse "", b.send));
     } else return error.NotFound;
     return ok(req, a, .{ .ok = true });
 }
@@ -802,9 +803,10 @@ fn listTicket(a: std.mem.Allocator, t: board.Ticket, ar: ?autoreview.Review) !bo
     out.demo = "";
     out.test_progress = "";
     out.plan_md = "";
-    // A card shows the summary only as what its review flag asks.
+    // A card shows the summary only as what its testing or review flag
+    // asks (Claude's summary is first seen in Testing now).
     const asks_review = for (t.flags) |f| {
-        if (std.mem.eql(u8, f.kind, "review")) break true;
+        if (std.mem.eql(u8, f.kind, "review") or std.mem.eql(u8, f.kind, "testing")) break true;
     } else false;
     if (!asks_review) out.summary = "";
     out.autoreview = if (ar) |r| try listReview(a, r) else "";
@@ -852,6 +854,9 @@ test "listTicket leaves out the popup's texts, not what a card shows" {
     try std.testing.expect(back.edited.len > 0);
 
     t.flags = &review_flag;
+    try std.testing.expectEqualStrings("did it", (try listTicket(a, t, null)).summary);
+    var testing_flag = [_]board.Flag{.{ .kind = "testing", .source = "auto", .detail = "", .at = 1 }};
+    t.flags = &testing_flag;
     try std.testing.expectEqualStrings("did it", (try listTicket(a, t, null)).summary);
 }
 

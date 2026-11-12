@@ -178,7 +178,8 @@ fn actionsFor(a: std.mem.Allocator, t: ticket_watch.Seen, f: ticket_watch.SeenFl
         return out.items;
     }
     if (eql(u8, f.kind, board.flag_review) or eql(u8, f.kind, board.flag_testing)) {
-        if (t.mergeable and (t.stage == .review or t.stage == .testing)) try out.append(a, .{ .action = "merge", .title = "Merge" });
+        // Finishing is out of Review, the last stage: testing comes first.
+        if (t.mergeable and eql(u8, f.kind, board.flag_review) and t.stage == .review) try out.append(a, .{ .action = "merge", .title = "Merge" });
         return out.items;
     }
     if (!board.waitingFlag(f.kind)) return &dismiss_only;
@@ -360,8 +361,7 @@ pub fn act(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, ite
         return .{ .message = try std.fmt.allocPrint(a, "{s}: plan approved; {s}", .{ key, if (t.umbrella) "its sub-tickets are queued" else "a new session builds it" }) };
     }
     if (eql(u8, action, "merge")) {
-        if (!eql(u8, kind, board.flag_review) and !eql(u8, kind, board.flag_testing)) return error.BadAction;
-        if (t.stage != .review and t.stage != .testing) return error.BadAction;
+        if (!eql(u8, kind, board.flag_review) or t.stage != .review) return error.BadAction;
         if (t.finishing.len > 0) return error.Handled;
         if (t.branch.len == 0 and t.change.len == 0) return error.BadAction;
         if (t.custom_close.len > 0) return error.CustomClose;
@@ -1259,14 +1259,15 @@ test "actionsFor: the buttons each kind of item gets" {
     // Not an umbrella's with no sub-tickets yet: approving it is refused.
     planning.empty_umbrella = true;
     try testing.expectEqual(@as(usize, 0), (try actionsFor(a, planning, .{ .id = 1, .kind = "review", .detail = "plan" })).len);
-    // Review or test: Merge, only for work Merge can land.
+    // Ready for review (the last stage): Merge, only for work Merge can land.
     var rev = t;
     rev.stage = .review;
     try testing.expectEqual(@as(usize, 0), (try actionsFor(a, rev, .{ .id = 1, .kind = "review", .detail = "" })).len);
     rev.mergeable = true;
     try testing.expectEqualStrings("merge=Merge;", try names(a, try actionsFor(a, rev, .{ .id = 1, .kind = "review", .detail = "" })));
+    // Ready to test: not yet; it's reviewed after.
     rev.stage = .testing;
-    try testing.expectEqualStrings("merge=Merge;", try names(a, try actionsFor(a, rev, .{ .id = 1, .kind = "testing", .detail = "" })));
+    try testing.expectEqual(@as(usize, 0), (try actionsFor(a, rev, .{ .id = 1, .kind = "testing", .detail = "" })).len);
     // What doesn't wait on you: Dismiss. What does (idle, a conflict): nothing.
     try testing.expectEqualStrings("dismiss=Dismiss;", try names(a, try actionsFor(a, t, .{ .id = 1, .kind = "after-merge", .detail = "boom" })));
     try testing.expectEqual(@as(usize, 0), (try actionsFor(a, t, .{ .id = 1, .kind = "idle", .detail = "" })).len);
@@ -1340,6 +1341,11 @@ test "act: a notification's button does what the board's would, once" {
     try testing.expectError(error.CustomClose, act(ctx, cfg, db, a, rev, "merge", ""));
     try db.exec("UPDATE tickets SET custom_close = '', finishing = 'merge' WHERE key = ?1", .{r});
     try testing.expectError(error.Handled, act(ctx, cfg, db, a, rev, "merge", ""));
+    // Nor in Testing: it's reviewed after, and finished out of Review.
+    const tt = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Test it", .stage = .testing });
+    try db.exec("UPDATE tickets SET branch = 't' WHERE key = ?1", .{tt});
+    try board.setFlag(ctx, db, a, tt, "testing", "auto", "");
+    try testing.expectError(error.BadAction, act(ctx, cfg, db, a, try flagItem(a, db, tt, "testing"), "merge", ""));
 
     // Answers: only to the question the notification showed. A newer one in
     // the same flag row (its detail replaced) is Handled.

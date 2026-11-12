@@ -415,7 +415,7 @@ fn askLineRaw(a: std.mem.Allocator, t: board.Ticket, f: board.Flag) ![]const u8 
         if (eql(u8, f.detail, "plan")) return "Plan ready for approval";
         return if (t.summary.len > 0) try std.fmt.allocPrint(a, "Ready for review: {s}", .{t.summary}) else "Ready for review";
     }
-    if (eql(u8, f.kind, board.flag_testing)) return "Ready to try";
+    if (eql(u8, f.kind, board.flag_testing)) return if (t.summary.len > 0) try std.fmt.allocPrint(a, "Ready to test: {s}", .{t.summary}) else "Ready to test";
     if (eql(u8, f.kind, board.flag_conflict)) {
         var out: std.ArrayList(u8) = .empty;
         try out.appendSlice(a, "Merging it back conflicts in: ");
@@ -579,12 +579,13 @@ fn askLines(a: std.mem.Allocator, l: *std.ArrayList(Line), t: board.Ticket, f: b
         return;
     }
     if (eql(u8, f.kind, board.flag_review)) {
-        const text = if (eql(u8, f.detail, "plan")) (if (!t.umbrella) "the plan is ready: a approves it (Queued, a new session builds it)" else if (t.children > 0) "the plan is ready: a approves it (Queued, and its sub-tickets with it)" else "the plan is ready, but it's an umbrella with no sub-tickets yet: have Claude file them first") else if (t.summary.len > 0) t.summary else "Claude says it's done: a approves it, to Testing";
+        const text = if (eql(u8, f.detail, "plan")) (if (!t.umbrella) "the plan is ready: a approves it (Queued, a new session builds it)" else if (t.children > 0) "the plan is ready: a approves it (Queued, and its sub-tickets with it)" else "the plan is ready, but it's an umbrella with no sub-tickets yet: have Claude file them first") else if (t.summary.len > 0) try std.fmt.allocPrint(a, "{s}\n(a approves it and finishes it: the Done dialog)", .{t.summary}) else "ready for review: a approves it and finishes it (the Done dialog)";
         try l.append(a, .{ .text = text, .indent = 4 });
         return;
     }
     if (eql(u8, f.kind, board.flag_testing)) {
-        try l.append(a, .{ .text = try std.fmt.allocPrint(a, "ready to try (`cl ticket test {s}` walks the test plan); a when it's done", .{t.key}), .indent = 4 });
+        if (t.summary.len > 0) try l.append(a, .{ .text = t.summary, .indent = 4 });
+        try l.append(a, .{ .text = try std.fmt.allocPrint(a, "ready to test (`cl ticket test {s}` walks the test plan); a when it's tested, on to Review", .{t.key}), .indent = 4 });
         return;
     }
     if (f.detail.len > 0) try l.append(a, .{ .text = f.detail, .indent = 4 });
@@ -1053,7 +1054,7 @@ pub const View = struct {
             return .none;
         }
         const to = board.approvedStage(t.stage) orelse {
-            self.setMsg(true, "nothing to approve in {s} (planning, review and testing are)", .{stageName(t.stage)});
+            self.setMsg(true, "nothing to approve in {s} (planning, testing and review are)", .{stageName(t.stage)});
             return .none;
         };
         if (t.stage == .planning) {
@@ -1440,7 +1441,7 @@ pub fn errText(err: anyerror) []const u8 {
         error.NoSubtickets => actions.no_subtickets,
         error.OpenSubtickets => "it has sub-tickets that aren't done yet; finish them or spin them off",
         error.CustomClose => "Claude asked to close it its own way; tell Claude, or just close it",
-        error.Conflicts => "merging it back conflicts (the files are on the ticket); it stays in Testing",
+        error.Conflicts => "merging it back conflicts (the files are on the ticket); it stays in Review",
         error.SharedSession => "another ticket is in progress in its session, so stopping it would cut that one off",
         error.Starting => "it is starting right now; try again in a moment",
         error.Busy => "Claude is working in its session or waiting on you; it can move once it is idle",
@@ -1580,6 +1581,10 @@ test askLine {
     try testing.expectEqualStrings("Wants permission: Bash: rm -rf zig-out — 1 Yes · 2 No", try askLine(a, t, p));
     try testing.expectEqualStrings("Ready for review: Fixed the race", try askLine(a, t, .{ .kind = "review", .source = "auto", .at = 0, .detail = "" }));
     try testing.expectEqualStrings("Plan ready for approval", try askLine(a, t, .{ .kind = "review", .source = "auto", .at = 0, .detail = "plan" }));
+    try testing.expectEqualStrings("Ready to test: Fixed the race", try askLine(a, t, .{ .kind = "testing", .source = "auto", .at = 0, .detail = "" }));
+    // Test first, review last: the columns (and < >) go Running, Testing, Review, Done.
+    const order = std.enums.values(Stage);
+    try testing.expectEqualStrings("Running Testing Review Done", try std.fmt.allocPrint(a, "{s} {s} {s} {s}", .{ stageName(order[3]), stageName(order[4]), stageName(order[5]), stageName(order[6]) }));
     try testing.expectEqualStrings("Merging it back conflicts in: src/a.zig, b.md", try askLine(a, t, .{ .kind = "conflict", .source = "auto", .at = 0, .detail = "src/a.zig (content)\nb.md\n" }));
     try testing.expectEqualStrings("After-merge command failed: make: error 2", try askLine(a, t, .{ .kind = "after-merge", .source = "auto", .at = 0, .detail = "make: error 2\nmore" }));
     try testing.expectEqualStrings("Push after merge failed: couldn't push trunk to origin: rejected", try askLine(a, t, .{ .kind = "push-failed", .source = "auto", .at = 0, .detail = "couldn't push trunk to origin: rejected\nmore" }));

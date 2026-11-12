@@ -638,11 +638,11 @@
 <script src="/mic.js"></script>
 <script>
 "use strict";
-const STAGES = ["backlog", "planning", "queued", "running", "review", "testing", "done"];
+const STAGES = ["backlog", "planning", "queued", "running", "testing", "review", "done"];
 // A todo is only ever in Backlog (to do), Running (doing) or Done (board.zig todoStage).
 const TODO_STAGES = ["backlog", "running", "done"];
-const STAGE_NAME = { backlog: "Backlog", planning: "Planning", queued: "Queued", running: "Running", review: "Review", testing: "Testing", done: "Done" };
-const FLAG_NAME = { input: "Needs input", question: "Question", review: "Ready for review", testing: "Needs testing", ended: "Session ended", "start-failed": "Didn't start", conflict: "Conflicts", "after-merge": "After-merge failed", "push-failed": "Push failed", "ci-failed": "CI failed", "merge-failed": "Didn't land", unmerged: "Not merged", unparked: "Woke from park", "park-expired": "Park expired", "pr-closed": "PR closed", "follow-up-failed": "Follow-up failed", idle: "Idle", "ready-to-close": "Ready to close", reminder: "Reminder", due: "Due" };
+const STAGE_NAME = { backlog: "Backlog", planning: "Planning", queued: "Queued", running: "Running", testing: "Testing", review: "Review", done: "Done" };
+const FLAG_NAME = { input: "Needs input", question: "Question", review: "Ready for review", testing: "Ready to test", ended: "Session ended", "start-failed": "Didn't start", conflict: "Conflicts", "after-merge": "After-merge failed", "push-failed": "Push failed", "ci-failed": "CI failed", "merge-failed": "Didn't land", unmerged: "Not merged", unparked: "Woke from park", "park-expired": "Park expired", "pr-closed": "PR closed", "follow-up-failed": "Follow-up failed", idle: "Idle", "ready-to-close": "Ready to close", reminder: "Reminder", due: "Due" };
 const STATUS_NAME = { waits: "Waits", paused: "Paused", busy: "Working", waiting: "Waiting on you", blocked: "Waiting on you", idle: "Idle", shell: "Idle · background task", starting: "Starting", gone: "Session ended", nosession: "No session", killed: "Killed · restart it", parked: "Parked", unknown: "Unknown" };
 
 const store = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch { return null; } };
@@ -749,8 +749,8 @@ function askText(t, f) {
   const d = flagDetail(f);
   if (f.kind === "question") return d?.questions?.map((q) => q.question).join(" · ") || "Claude asked something";
   if (f.kind === "input") return d ? `${d.tool || "Permission"}: ${d.summary || "wants permission"}` : (f.detail || "Waiting on a prompt");
-  if (f.kind === "review") return (d === null && f.detail === "plan") || f.detail === "plan" ? "The plan is ready for approval" : (t.summary || "Claude says it's done");
-  if (f.kind === "testing") return "Ready to try";
+  if (f.kind === "review") return (d === null && f.detail === "plan") || f.detail === "plan" ? "The plan is ready for approval" : t.summary ? "Ready for review: " + t.summary : "Ready for review";
+  if (f.kind === "testing") return t.summary || "Claude says it's done";
   if (f.kind === "idle") return "Claude ended its turn and nothing else is pending: it waits for your next prompt";
   if (f.kind === "start-failed") return `Its session didn't start (${f.detail || "no reason given"}). `
     + (retries(t) ? "The dispatcher keeps trying by itself and clears this once it starts; nothing to do unless it keeps failing" : "Start it again from the ticket");
@@ -764,6 +764,7 @@ function askLine(t, f, quick) {
   if (f.kind === "question") return quick ? askText(t, f) : d?.questions?.length > 1 ? `Needs ${d.questions.length} answers` : "Needs an answer";
   if (f.kind === "input") return d?.tool ? `Wants permission: ${d.tool}` : "Waiting on a prompt";
   if (f.kind === "review") return f.detail === "plan" ? "Plan ready for approval" : "Ready for review";
+  if (f.kind === "testing") return "Ready to test";
   if (f.kind === "idle") return "Idle: waiting for you";
   if (f.kind === "conflict") { const n = f.detail.split("\n").filter((l) => l.trim()).length; return `Merge conflicts in ${n} file${n === 1 ? "" : "s"}`; }
   if (f.kind === "after-merge") return "After-merge command failed: " + f.detail.split("\n")[0];
@@ -821,18 +822,20 @@ const arAnswers = (a) => ["fixed", "partly", "declined"].map((k) => [k, a.filter
 const reviewNote = (t) => reviewing(t) ? "" : arPill(t, true);
 // An automated review running on it (autoreview.zig); the detail checks it's alive.
 const reviewing = (t) => (t.autoreview || "").includes('"status":"running"');
-const reviewPill = (t) => reviewing(t) ? `<span class="pill" title="A separate Claude is reviewing its changes">reviewing</span>` : "";
+// Held in Running as Claude finished (autoreview.startOnDone): it moves on when the review is done.
+const heldReview = (t) => reviewing(t) && t.stage === "running" && (t.autoreview || "").includes('"held":true');
+const reviewPill = (t) => reviewing(t) ? `<span class="pill" title="${heldReview(t) ? "Claude has finished; a separate Claude is reviewing its changes first. It moves on to you when that's done" : "A separate Claude is reviewing its changes"}">reviewing</span>` : "";
 // Its change would conflict with its target if rebased now (drift.zig): an early warning, not a flag.
 const driftFiles = (d) => d.files.split("\n").filter(Boolean);
 const driftPill = (t) => t.drift && t.stage !== "done" ? `<span class="pill f-drift" title="${esc(`Rebasing it onto ${t.drift.onto} now would conflict in: ${driftFiles(t.drift).join(", ")}`)}">Will conflict</span>` : "";
 // On its board card: only what says something (to read, with Claude, handled) while it's still in play.
-const cardArPill = (t) => ["running", "review", "testing"].includes(t.stage) && ["unread", "sent", "handled"].includes(t.ar) && !(t.ar === "unread" && t.stage === "running") ? arPill(t, false) : "";
+const cardArPill = (t) => ["running", "testing", "review"].includes(t.stage) && ["unread", "sent", "handled"].includes(t.ar) && !(t.ar === "unread" && t.stage === "running") ? arPill(t, false) : "";
 const pills = (t) => cardFlags(t).length || t.finishing || t.custom_close || t.park || t.drift || reviewing(t) || cardArPill(t) ? `<span class="pills">${reviewPill(t)}${cardArPill(t)}${parkPill(t)}${driftPill(t)}${customPill(t)}${finishPill(t)}${cardFlags(t).map((f) => `<span class="pill ${flagClass(f.kind)}">${esc(flagLabel(f))}</span>`).join("")}</span>` : "";
 // "(starting)" is the dispatcher's claim while it opens the session.
 // A Backlog or Queued ticket whose session is gone hasn't ended: it's waiting to start.
 // A killed one waits for you to restart it.
 // A queued one in a paused project waits for it to resume, not for a slot.
-// One in Running, Review or Testing that never had a session has "No session" (it was moved there by hand).
+// One in Running, Testing or Review that never had a session has "No session" (it was moved there by hand).
 // One that waits on other tickets (board.zig hold: a link, its parent, or the
 // sub-ticket before it) waits for them to be Done: it isn't stuck, and the
 // dispatcher won't start it. An umbrella never has a session of its own: its
@@ -1013,7 +1016,7 @@ function confirmPause(name) {
   document.getElementById("pauseBody").innerHTML = `
     <div class="head"><h1 style="flex:1">Pause ${what}?</h1></div>
     <p style="margin:0">cl starts nothing new there: queued tickets stay in Queued in their order, planning waits, and a parked ticket whose check passes waits in Queued. Resume starts them again, top of the queue first. Starting a ticket yourself still works.</p>
-    <p class="muted" style="margin:0">${running ? `${running} ticket${running === 1 ? " is" : "s are"} running or planning now. <strong>Pause</strong> lets ${running === 1 ? "it" : "them"} finish what ${running === 1 ? "it's" : "they're"} doing.` : "Nothing is running or planning there now."} <strong>Pause now</strong> stops Running tickets and planning sessions too: they go back to Queued (or stay in Planning) and pick up their conversation on Resume. Review and Testing tickets are left alone.</p>
+    <p class="muted" style="margin:0">${running ? `${running} ticket${running === 1 ? " is" : "s are"} running or planning now. <strong>Pause</strong> lets ${running === 1 ? "it" : "them"} finish what ${running === 1 ? "it's" : "they're"} doing.` : "Nothing is running or planning there now."} <strong>Pause now</strong> stops Running tickets and planning sessions too: they go back to Queued (or stay in Planning) and pick up their conversation on Resume. Testing and Review tickets are left alone, and so is a Running ticket Claude has finished while its automated review runs.</p>
     <div class="actions"><button type="button" class="btn primary" data-pause-yes="${esc(name)}">Pause</button><button type="button" class="btn danger" data-pause-yes="${esc(name)}" data-now="1">Pause now</button><button type="button" class="btn" id="closePause">Cancel</button></div>`;
   document.getElementById("pauseDlg").showModal();
 }
@@ -1135,7 +1138,7 @@ function renderFilters() {
   const todos = mine.filter((r) => r.ticket.todo && (state.done || r.ticket.stage !== "done")).length;
   const parked = mine.filter((r) => r.ticket.park && (state.done || r.ticket.stage !== "done")).length;
   const n = (f) => all.filter((r) => f === "all" || (f === "me" ? needsMe(r) : f === "working" ? r.status === "busy" : r.ticket.flags.some((x) => x.kind === f))).length;
-  const statuses = [["all", "All tickets"], ["me", "Needs me"], ["input", "Needs input"], ["question", "Questions"], ["review", "Review"], ["testing", "Testing"], ["working", "Working"]];
+  const statuses = [["all", "All tickets"], ["me", "Needs me"], ["input", "Needs input"], ["question", "Questions"], ["testing", "Testing"], ["review", "Review"], ["working", "Working"]];
   setHtml(document.getElementById("statusSel"), statuses.map(([k, l]) =>
     `<option value="${k}" ${state.filter === k ? "selected" : ""}>${l} (${n(k)})</option>`).join(""));
   setHtml(document.getElementById("projectSel"), `<option value="">All projects</option>`
@@ -1284,7 +1287,7 @@ function openProject(name) {
       <div class="row2"><label>Profile<select name="profile"><option value="">Default</option>${profiles.map((x) => `<option ${x === p?.profile ? "selected" : ""}>${esc(x)}</option>`).join("")}</select></label>
         <label data-repo-only ${p?.repo === false ? "hidden" : ""}>Target branch<input type="text" name="onto" class="mono" value="${esc(p?.onto || "")}" placeholder="Trunk" autocomplete="off" title="A jj bookmark or git branch its tickets start from and merge into instead of trunk; a ticket's own target wins. Merges into it don't run the after-merge steps"></label></div>
       <label data-repo-only ${p?.repo === false ? "hidden" : ""}>Push trunk to<input type="text" name="push_after_merge" class="mono" value="${esc(p?.push_after_merge || "")}" placeholder="Nowhere" autocomplete="off" title="A git remote (like origin) cl pushes trunk to after each merge into it, then watches its CI and flags the ticket when it fails. For projects that don't go through PRs"></label>
-      <label data-repo-only ${p?.repo === false ? "hidden" : ""}>When a ticket reaches Review<select name="auto_review" title="Run the automated review by itself, the first time a ticket gets there, so the ticket reaches Needs you with its findings there">${[["off", "Wait for me to run the automated review"], ["on", "Run the automated review"], ["send", "Run the automated review and send its findings to Claude for one round"]].map(([v, l]) => `<option value="${v}" ${(p ? p.auto_review || "off" : "send") === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>
+      <label data-repo-only ${p?.repo === false ? "hidden" : ""}>When Claude finishes a ticket<select name="auto_review" title="Run the automated review by itself, the first time Claude finishes, while the ticket waits in Running, so you never test code it then changes">${[["off", "Wait for me to run the automated review"], ["on", "Run the automated review"], ["send", "Run the automated review and send its findings to Claude for one round"]].map(([v, l]) => `<option value="${v}" ${(p ? p.auto_review || "off" : "send") === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>
       ${p ? `<p class="muted" style="margin:0;font-size:calc(12.5 * var(--u))">A new prefix applies to new tickets; existing keys stay as they are.</p>` : ""}
       <p class="formerr" id="projErr" role="alert" hidden></p>
       <div class="actions"><button type="submit" class="btn primary">${p ? "Save" : "Add project"}</button></div></form>`;
@@ -1484,16 +1487,18 @@ const planFact = (t) => {
 const emptyUmbrella = (t) => t.umbrella && !t.children;
 const planReady = (t) => t.stage === "planning" && (hasPlan(t) || t.flags.some((f) => f.kind === "review"));
 // The ticket's approve button (the ticket view's bar, Ctrl+K's actions): its label, or "" for none.
-const approveLabel = (t) => planReady(t) ? (emptyUmbrella(t) ? "" : "Approve plan") : t.stage === "review" ? "Approve, to testing" : t.stage === "testing" && !t.finishing ? "Tested, done" : "";
+// Test first, review last: Testing approves on to Review, Review finishes it (the Done dialog).
+const approveLabel = (t) => planReady(t) ? (emptyUmbrella(t) ? "" : "Approve plan") : t.stage === "testing" ? "Tested, to review" : t.stage === "review" && !t.finishing ? "Approve, finish…" : "";
 function tabsFor(d) {
   const t = d.ticket; const tabs = [["overview", "Overview"]];
   if (t.flags.some((f) => f.kind === "question" || f.kind === "input")) tabs.push(["needs", "Needs you"]);
   if (hasPlan(t) || planReady(t)) tabs.push(["plan", "Plan"]);
   if (t.flags.some((f) => f.kind === "after-merge")) tabs.push(["after-merge", "After merge"]);
   if (t.flags.some((f) => f.kind === "merge-failed" || f.kind === "unmerged")) tabs.push(["landing", "Not merged"]);
-  if (t.stage === "review" || d.guide || d.review || d.autoreview) tabs.push(["review", "Review"]);
+  // Test first, review last: the tabs go in that order too.
   if (d.test_plan) tabs.push(["test", "Test"]);
   if (d.demo) tabs.push(["demo", "Demo"]);
+  if (t.stage === "review" || d.guide || d.review || d.autoreview) tabs.push(["review", "Review"]);
   tabs.push(["comments", `Comments${d.comments.length ? " " + d.comments.length : ""}`]);
   tabs.push(["session", "Session"]);
   if (d.subtickets.length) tabs.push(["subs", `Sub-tickets ${d.subtickets.length}`]);
@@ -1630,7 +1635,8 @@ function renderFocus() {
   const waiting = f && !(f.kind === "review" && f.detail === "plan" && !planReady(t));
   const others = state.data ? state.data.tickets.filter((r) => needsMe(r) && r.ticket.key !== t.key && projectShown(r.ticket.project)).length + shownAlerts().length : 0;
   const into = d.main_branch || "trunk";
-  const merge = f && (f.kind === "testing" || (f.kind === "review" && f.detail !== "plan")) && (t.stage === "review" || t.stage === "testing") && (t.branch || t.change) && !t.custom_close && !t.finishing
+  // Finishing is out of Review, the last stage: a ticket ready to test isn't merged yet.
+  const merge = f && f.kind === "review" && f.detail !== "plan" && t.stage === "review" && (t.branch || t.change) && !t.custom_close && !t.finishing
     ? `<button type="button" class="btn primary" data-merge-now="1" title="Move it to Done, merging its work into ${esc(into)} first">Merge into ${esc(into)}</button>` : "";
   // The After merge and Not merged tabs have their own Dismiss.
   const dismiss = f && dismissable(f) && !["after-merge", "landing"].includes(tab) ? `<button type="button" class="btn" data-unflag="${esc(f.kind)}" title="${DISMISS_TIP}">Dismiss</button>` : "";
@@ -1670,7 +1676,7 @@ function depBox(d) {
 function driftBox(t, live) {
   const d = t.drift; if (!d || t.stage === "done") return "";
   const files = driftFiles(d);
-  const back = t.stage === "review" || t.stage === "testing" ? "; it goes back to Running and says done again after" : "";
+  const back = t.stage === "review" || t.stage === "testing" ? `; it goes back to Running and says done again after, which returns it to ${STAGE_NAME[t.stage]}` : "";
   return `<div class="driftbox"><div><strong>Will conflict with ${esc(d.onto)}</strong> · found ${ago(d.at) === "now" ? "just now" : ago(d.at) + " ago"}</div>
     <div class="muted">${esc(d.onto)} has moved on since its change was made; rebasing onto it now would conflict in:</div>
     <code>${files.map(esc).join("<br>")}</code>
@@ -1742,9 +1748,9 @@ function nextStep(d) {
     case "backlog": return t.umbrella ? "Queue it: its sub-tickets run in order" : "Queue it, or Start now";
     case "planning": return planReady(t) ? "You: read the plan, then approve it or say what to change" : "Claude writes the plan";
     case "queued": return waitingOn(t).length ? "Starts once " + waitingOn(t).map((x) => x.key).join(", ") + (waitingOn(t).length > 1 ? " are" : " is") + " done" : "Starts when a session is free";
-    case "running": return t.umbrella ? "Its sub-tickets finish" : "Claude finishes it and hands it to you for review";
-    case "review": return "You: review it (Review tab), then approve it or send it back";
-    case "testing": return d.test_plan ? "You: try it (Test tab), then Tested, done" : "You: try it, then Tested, done";
+    case "running": return t.umbrella ? "Its sub-tickets finish" : heldReview(t) ? "The automated review finishes; then it's yours to test" : "Claude finishes it (with an automated review first, if the project runs one) and hands it to you to test";
+    case "testing": return d.test_plan ? "You: test it (Test tab), then Tested, to review" : "You: test it, then Tested, to review";
+    case "review": return "You: review it (Review tab), then approve and finish it, or send it back";
     case "done": return t.flags.some((f) => asksNow(t, f)) ? "You: see its alert" : "Nothing: it's done";
   }
   return "";
@@ -1800,7 +1806,7 @@ function reviewTab(d) {
     <div class="actions">${d.gutter_port ? `<a class="btn primary" target="_blank" rel="noopener" href="http://${location.hostname}:${d.gutter_port}/">Open gutter in the browser</a>
         <button type="button" class="btn" data-act="gutter-stop">Close gutter</button>`
       : d.gutter && sessionLive(d) ? `<button type="button" class="btn primary" data-act="gutter">Open in gutter</button>` : ""}
-      ${t.stage === "review" ? `<button type="button" class="btn" data-act="approve">Approve, to testing</button>` : ""}</div>
+      ${t.stage === "review" && !t.finishing ? `<button type="button" class="btn" data-act="approve">Approve, finish…</button>` : ""}</div>
     ${autoreviewHtml(d)}
     <label class="muted" style="display:flex;flex-direction:column;gap:calc(5 * var(--u));font-size:calc(12.5 * var(--u))">Or say what to change (sends it back for another round)
       <textarea id="backText" rows="3"></textarea></label>
@@ -1811,8 +1817,8 @@ function reviewTab(d) {
 // send them, or open them in gutter as a draft review to edit and submit.
 function autoreviewHtml(d) {
   const t = d.ticket; const r = d.autoreview;
-  // Only a ticket in Review or Testing is reviewed (the server says so too).
-  // Not a code repo: there are no changes to review (the server refuses it).
+  // You run one in Testing or Review (the server says so too); the project's own runs as Claude
+  // finishes, in Running. Not a code repo: there are no changes to review (the server refuses it).
   const can = t.repo && (t.stage === "review" || t.stage === "testing");
   if (!r && !can) return "";
   const runBtn = (label, primary) => !can ? "" : `<button type="button" class="btn${primary ? " primary" : ""}" data-act="autoreview" title="A separate Claude (profile ${esc(t.profile || "default")} or the project's) reads the changes and reports problems; nothing is sent until you choose">${label}</button>`;
@@ -1826,7 +1832,7 @@ function autoreviewHtml(d) {
   const prevHtml = !pv ? "" : `<div class="state"><span class="pill ar-handled">Last review: handled by Claude${pv.handled ? " " + (ago(pv.handled) === "now" ? "just now" : ago(pv.handled) + " ago") : ""}</span><span class="muted">round ${pv.round}${pv.answers?.length ? " · " + arAnswers(pv.answers) : ""}</span>${pv.reply || pv.titles?.length ? `<button type="button" class="btn" data-ar-prev aria-expanded="${!!state.arPrevShow}">${state.arPrevShow ? "Hide" : "Show what Claude did"}</button>` : ""}</div>
     ${state.arPrevShow ? `${pv.reply ? `<div class="plan reply">${mdHtml(pv.reply)}</div>` : ""}${pv.titles?.length ? `<ol style="opacity:.62">${pv.titles.map((x, i) => `<li><strong>${esc(x)}</strong>${pvAns(i)}</li>`).join("")}</ol>` : ""}` : ""}`;
   if (r.status === "running") return `<div class="ar">${head(`Reviewing… (started ${ago(r.started)}${ago(r.started) === "now" ? "" : " ago"}${meta ? " · " + meta : ""})`)}
-    <p class="muted" style="margin:0">The findings show here when it's done. To watch it: <code>tmux attach -t ${esc(d.autoreview_session)}</code></p>
+    <p class="muted" style="margin:0">${r.held && t.stage === "running" ? `Claude has finished; this runs before you see the ticket. ${r.auto === "send" ? "What it finds goes to Claude for one round, then the ticket moves on to you" : "When it's done the ticket moves on to you, with the findings here"}. ` : "The findings show here when it's done. "}To watch it: <code>tmux attach -t ${esc(d.autoreview_session)}</code></p>
     <div class="actions"><button type="button" class="btn" data-act="autoreview-stop">Stop</button></div>${prevHtml}</div>`;
   if (r.status === "failed") return `<div class="ar">${head(`failed ${ago(r.finished)}${meta ? " · " + meta : ""}`)}<p style="margin:0">${esc(r.error)}</p><div class="actions">${runBtn("Run again", false)}</div>${prevHtml}</div>`;
   const live = sessionLive(d); const n = r.findings.length;
@@ -1999,7 +2005,7 @@ function demoTab(d) {
 }
 // What Submit does: anything failed or not tested goes to Claude; everything passed with
 // comments lets you choose; everything passed and nothing to say approves a
-// ticket in Testing (earlier, it's only kept).
+// ticket in Testing, on to Review (anywhere else, it's only kept).
 function submitButtons(d, all) {
   const failed = all.some((c, ci) => state.checks["c" + ci]?.pass === false);
   const untested = all.filter((c, ci) => state.checks["c" + ci]?.pass === undefined).length;
@@ -2007,7 +2013,7 @@ function submitButtons(d, all) {
   if (untested) return `<button type="button" class="btn primary" id="sendResults" data-send="1">Send results to Claude (${untested} not tested)</button>`;
   const commented = (state.checks.note || "").trim() || d.test_plan.steps.some((st, si) => (state.checks["s" + si] || "").trim());
   if (failed) return `<button type="button" class="btn primary" id="sendResults" data-send="1">Send results to Claude</button>`;
-  const finish = d.ticket.stage === "testing" ? "Pass and finish" : "Pass (keep the results)";
+  const finish = d.ticket.stage === "testing" ? "Pass, to review" : "Pass (keep the results)";
   if (commented) return `<button type="button" class="btn primary" id="sendResults" data-send="1">Send to Claude</button>
     <button type="button" class="btn" id="sendResults2" data-send="0">${finish}${d.ticket.stage === "testing" ? " (comments stay on the ticket)" : ""}</button>`;
   return `<button type="button" class="btn primary" id="sendResults" data-send="0">${finish}</button>`;
@@ -2730,10 +2736,12 @@ async function onClick(e) {
     try { await act(key, "kill", {}, `Killed ${d.ticket.tmux}; Restart brings it back`); } catch {}
     return;
   }
-  if (ds.act === "approve" && state.detail?.ticket.stage === "testing") {
+  // Approving out of Review, the last stage, finishes it: the Done dialog first.
+  if (ds.act === "approve" && state.detail?.ticket.stage === "review") {
     const extra = await doneExtras(key); if (!extra) return;
     return act(key, "approve", extra, finishMsg(key, extra) || "Done");
   }
+  if (ds.act === "approve" && state.detail?.ticket.stage === "testing") return act(key, "approve", {}, "Tested: on to Review");
   if (ds.act) return act(key, ds.act, {}, "Done");
   if (el.id === "sendAnswers") {
     const qs = flagDetail(state.detail.ticket.flags.find((f) => f.kind === "question"))?.questions || [];
@@ -2758,14 +2766,12 @@ async function onClick(e) {
     const note = state.checks.note || "";
     if (checks.every((c) => c.pass === undefined) && !note.trim() && !state.detail.test_plan.steps.some((st, si) => (state.checks["s" + si] || "").trim()))
       return toast("Mark a check or write a comment first", true);
-    const extra = !send && checks.every((c) => c.pass) && state.detail.ticket.stage === "testing" ? await doneExtras(key) : {};
-    if (!extra) return;
     const steps = state.detail.test_plan.steps.map((st, si) => ({ title: st.title, comment: state.checks["s" + si] || "",
       checks: checks.filter((c) => c.si === si).map(({ text, pass, note }) => ({ text, pass, note })) }));
     clearTimeout(progressTimer);
-    const r = await act(key, "test-results", { steps, send, note, ...extra });
+    const r = await act(key, "test-results", { steps, send, note });
     toast(r.sent ? "Sent to Claude" : r.unsent ? "No session to send to: kept as a comment" : !r.approved ? "All passed: kept on the ticket"
-      : finishMsg(key, extra) ? "All passed: " + finishMsg(key, extra) : "All passed: done", r.unsent); state.checks = {};
+      : "All passed: on to Review", r.unsent); state.checks = {};
     return;
   }
 }
@@ -3474,7 +3480,7 @@ function palActions(key) {
   const open = (tab) => () => openTicket(key, tab);
   a("Open", open(null));
   const flagTabs = [...new Set(t.flags.map(flagTab).filter(Boolean))];
-  for (const [tab, l] of [["needs", "Needs you"], ["plan", "Plan"], ["review", "Review"], ["test", "Test"], ["landing", "Not merged"], ["after-merge", "After merge"]])
+  for (const [tab, l] of [["needs", "Needs you"], ["plan", "Plan"], ["test", "Test"], ["review", "Review"], ["landing", "Not merged"], ["after-merge", "After merge"]])
     if (flagTabs.includes(tab) || (tab === "plan" && t.stage === "planning") || (tab === "review" && t.stage === "review") || (tab === "test" && t.stage === "testing")) a(`Open: ${l}`, open(tab));
   for (const [tab, l] of [["session", "Session"], ["comments", "Comments"], ["activity", "Activity"], ["details", "Details"]]) a(`Open: ${l}`, open(tab));
   if (live) a(t.todo ? "Open terminal" : "Open shell", () => openTerm(shellHref(t)), "the session's terminal");
@@ -3485,8 +3491,8 @@ function palActions(key) {
   else if (!live && t.stage !== "done" && !t.umbrella && !t.todo) a(t.killed || t.tmux || t.session_id ? "Restart" : "Start now", () => act(key, "start", {}, t.killed || t.session_id ? "Restarted" : "Started").catch(() => {}));
   if (approveLabel(t))
     a(approveLabel(t), async () => {
-      if (t.stage === "testing") { const extra = await doneExtras(key); if (!extra) return; return act(key, "approve", extra, finishMsg(key, extra) || "Done").catch(() => {}); }
-      return act(key, "approve", {}, "Approved").catch(() => {});
+      if (t.stage === "review") { const extra = await doneExtras(key); if (!extra) return; return act(key, "approve", extra, finishMsg(key, extra) || "Done").catch(() => {}); }
+      return act(key, "approve", {}, t.stage === "testing" ? "Tested: on to Review" : "Approved").catch(() => {});
     });
   for (const s of STAGES) if (s !== t.stage && (!t.todo || TODO_STAGES.includes(s))) a(`Move to ${STAGE_NAME[s]}`, () => moveTo(key, s));
   if (needsMe(row)) a("Hide from Needs you", () => act(key, "hide", {}, `${key} hidden from Needs you; a new flag brings it back`).catch(() => {}));
