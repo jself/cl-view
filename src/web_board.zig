@@ -231,6 +231,11 @@ const Body = struct {
     skill: ?[]const u8 = null,
     parent: ?[]const u8 = null,
     profile: ?[]const u8 = null,
+    /// Ticket: 1 (highest) to 5 (lowest) (`board.Ticket.priority`).
+    priority: ?i64 = null,
+    /// New ticket: start it now, even with every worktree slot taken
+    /// (`dispatch.startNew`).
+    start: ?bool = null,
     text: ?[]const u8 = null,
     send: ?bool = null,
     kind: ?[]const u8 = null,
@@ -377,6 +382,9 @@ fn route(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: 
                 if (!tp.repo) return error.NoRepo;
                 try checkOnto(ctx, a, tp.dir, o);
             }
+            // Start now is for a ticket Claude builds, queued: never a
+            // backlog, planning, todo or umbrella one (`cl ticket new --start`).
+            if ((b.start orelse false) and (!std.mem.eql(u8, b.stage orelse "", "queued") or (b.plan orelse false) or (b.todo orelse false) or (b.umbrella orelse false))) return error.BadInput;
             const key = try board.createTicket(ctx, db, a, .{
                 .project = b.project orelse "",
                 .title = b.title,
@@ -394,8 +402,15 @@ fn route(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: 
                 .profile = b.profile,
                 .parent = nonEmpty(b.parent),
                 .onto = nonEmpty(b.onto),
+                .priority = b.priority,
                 .body_for_key = .{ .ctx = &adopt_ctx, .call = adoptImages },
             });
+            if (b.start orelse false) {
+                // Made either way: say how the start went rather than fail.
+                const r = dispatch.startNew(ctx, cfg, db, a, key) catch |err|
+                    return ok(req, a, .{ .key = key, .start = "failed", .reason = dispatch.failureReason(err) });
+                return ok(req, a, .{ .key = key, .start = @tagName(r) });
+            }
             return ok(req, a, .{ .key = key });
         }
         try ticketAction(ctx, cfg, db, a, req, name, action, b);
@@ -633,6 +648,7 @@ fn ticketAction(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator
             .target = b.target,
             .profile = b.profile,
             .onto = b.onto,
+            .priority = b.priority,
         });
         // A new mode moves the ticket (with its work, once started).
         if (mode) |m| {

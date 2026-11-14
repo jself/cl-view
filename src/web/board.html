@@ -229,6 +229,9 @@
   .f-due { background: #3b1f12; color: #fdba74; } .f-due.over { background: var(--conflict-bg); color: var(--conflict); }
   .f-reminder { background: #0f2f2b; color: var(--todo); }
   .f-finishing { background: var(--finishing-bg); color: var(--finishing); }
+  /* A priority other than normal (3), next to the key: higher stands out, lower recedes. */
+  .prio { font: 600 calc(11 * var(--u)) var(--mono); padding: 0 calc(5 * var(--u)); border-radius: calc(4 * var(--u)); background: var(--other-bg); color: var(--muted); }
+  .prio.hi { background: var(--conflict-bg); color: var(--conflict); }
   /* Parked: waiting on something outside cl. The reason is cut to the card's width. */
   .f-parked { background: var(--parked-bg); color: var(--parked); max-width: 100%; }
   .f-parked > span { overflow: hidden; text-overflow: ellipsis; }
@@ -1056,7 +1059,9 @@ function renderNeeds() {
   const alerts = shownAlerts();
   const rows = shownRows().filter(needsMe);
   const hidden = shownRows().filter(hiddenNeeds);
-  rows.sort((a, b) => Math.min(...a.ticket.flags.map((f) => f.at)) - Math.min(...b.ticket.flags.map((f) => f.at)));
+  // Higher priority first, then the oldest ask (`cl ticket needs` goes the same way).
+  const oldest = (r) => Math.min(...r.ticket.flags.map((f) => f.at));
+  rows.sort((a, b) => prioOf(a.ticket) - prioOf(b.ticket) || oldest(a) - oldest(b));
   const box = document.getElementById("needs");
   box.style.display = alerts.length || rows.length || hidden.length ? "" : "none";
   // The tab's title counts what needs you, so it shows from another tab.
@@ -1097,7 +1102,7 @@ function renderNeeds() {
       : `<button type="button" class="btn" data-hide="${esc(t.key)}" title="Take it out of Needs you until it raises a new flag; its card keeps the flag">Hide</button>`;
     const dismiss = dismissable(f) ? `<button type="button" class="btn" data-dismiss="${esc(t.key)}" data-kind="${esc(f.kind)}" title="${DISMISS_TIP}">Dismiss</button>` : "";
     // Its text (not its buttons) opens the ticket, as its card does.
-    return `<div class="ask${isHidden ? " hidden" : ""}" tabindex="-1" data-ask="${esc(t.key)}"><div class="ask-top"><span>${esc(t.key)}</span><span class="grow"></span>${shellIcon(r, true)}<span>${ago(f.at)}</span></div>
+    return `<div class="ask${isHidden ? " hidden" : ""}" tabindex="-1" data-ask="${esc(t.key)}"><div class="ask-top"><span>${esc(t.key)}</span>${prioChip(t)}<span class="grow"></span>${shellIcon(r, true)}<span>${ago(f.at)}</span></div>
       <div class="pills"><span class="pill ${flagClass(f.kind)}">${esc(flagLabel(f))}</span>${isHidden ? `<span class="pill">Hidden</span>` : ""}${f.kind === "review" || f.kind === "testing" ? reviewNote(t) : ""}</div>
       <div style="font-weight:500">${esc(t.title)}</div><div class="what" title="${esc(askText(t, f))}">${esc(askLine(t, f, quick))}</div>
       ${quick ? `<div class="acts">${quick}</div>` : ""}<div class="acts">${main}${hide}${dismiss}</div></div>`;
@@ -1109,12 +1114,13 @@ function renderNeeds() {
     `<button type="button" class="btn" data-dismiss-all="${esc(k)}" data-keys="${esc(keys.join(" "))}" title="Remove the ${esc((FLAG_NAME[k] || k).toLowerCase())} alert from ${keys.length} tickets (you confirm first). The tickets don't change">Dismiss all ${keys.length} ${esc(FLAG_NAME[k] || k)}</button>`).join(""));
 }
 
-// Today: todos whose only ask is a reminder or a due date, one line each, overdue first.
+// Today: todos whose only ask is a reminder or a due date, one line each: higher
+// priority first, then overdue first.
 function renderToday(rows) {
   const box = document.getElementById("needsToday");
   box.hidden = !rows.length;
   const dueAt = (t) => t.flags.some((f) => f.kind === "due") ? t.due_at : Infinity;
-  rows.sort((a, b) => dueAt(a.ticket) - dueAt(b.ticket) || Math.min(...a.ticket.flags.map((f) => f.at)) - Math.min(...b.ticket.flags.map((f) => f.at)));
+  rows.sort((a, b) => prioOf(a.ticket) - prioOf(b.ticket) || dueAt(a.ticket) - dueAt(b.ticket) || Math.min(...a.ticket.flags.map((f) => f.at)) - Math.min(...b.ticket.flags.map((f) => f.at)));
   setHtml(box, !rows.length ? "" : `<button type="button" id="todayToggle" aria-expanded="${state.todayOpen}" title="Your todos' reminders and due dates"><span>Today</span><span class="count">${rows.length}</span><span style="flex:1"></span><span class="sum">${state.todayOpen ? "Collapse" : "Expand"}</span></button>`
     + (state.todayOpen ? rows.map(todayHtml).join("") : ""));
 }
@@ -1162,7 +1168,7 @@ function renderFilters() {
 function cardHtml(row, compact) {
   const t = row.ticket; const hot = t.flags.some((f) => f.kind === "input" || f.kind === "question");
   return `<button type="button" class="card s-${esc(statusOf(row))} ${hot ? "hot" : ""}" data-open="${esc(t.key)}" data-drag="${esc(t.key)}">
-    <span class="hd"><span class="top"><span>${esc(t.key)}</span><span class="grow"></span>${shellIcon(row)}<span>${ago(t.updated)}</span></span>
+    <span class="hd"><span class="top"><span>${esc(t.key)}</span>${prioChip(t)}<span class="grow"></span>${shellIcon(row)}<span>${ago(t.updated)}</span></span>
     <span class="t">${esc(t.title)}</span></span>
     ${t.parent ? `<span class="sub">sub-ticket of ${esc(t.parent)}${t.parallel ? " · parallel" : ""}</span>` : ""}
     ${compact ? "" : `<span class="meta">${esc(t.project)} · ${t.todo ? "todo" : esc(where(t))}</span>`}
@@ -1204,11 +1210,19 @@ function dateChips(t) {
   if (t.remind_at) out.push(`<span class="pill f-reminder" title="A reminder puts it in Needs you then">remind ${esc(dayLabel(t.remind_at, true))}</span>`);
   return `<span class="pills">${out.join("")}</span>`;
 }
+// Priority (board.zig Ticket.priority): 1 highest, 3 normal, 5 lowest. It comes
+// before the drag order, as the dispatcher goes: in columns, Needs you and starts.
+const PRIO_NORMAL = 3;
+const prioOf = (t) => t.priority || PRIO_NORMAL;
+const PRIO_NAME = { 1: "1 · highest", 2: "2 · high", 3: "3 · normal", 4: "4 · low", 5: "5 · lowest" };
+const prioOptions = (cur) => [1, 2, 3, 4, 5].map((n) => `<option value="${n}" ${n === cur ? "selected" : ""}>${PRIO_NAME[n]}</option>`).join("");
+const PRIO_TITLE = "1 is highest, 3 normal, 5 lowest. A higher one starts first, sits higher in its column and comes first in Needs you; dragging orders tickets of the same priority";
+const prioChip = (t) => prioOf(t) === PRIO_NORMAL ? "" : `<span class="prio${prioOf(t) < PRIO_NORMAL ? " hi" : ""}" title="Priority ${PRIO_NAME[prioOf(t)]}">P${prioOf(t)}</span>`;
 // Done is a column only when it's toggled on.
 const columns = () => state.done ? STAGES : STAGES.filter((s) => s !== "done");
-// A column top to bottom: by priority (drag to reorder), except Done, latest first.
+// A column top to bottom: by priority, then the drag order, except Done, latest first.
 const inColumn = (rows, stage) => { const cs = rows.filter((r) => r.ticket.stage === stage);
-  return stage === "done" ? cs : cs.sort((a, b) => a.ticket.rank - b.ticket.rank || a.ticket.id - b.ticket.id); };
+  return stage === "done" ? cs : cs.sort((a, b) => prioOf(a.ticket) - prioOf(b.ticket) || a.ticket.rank - b.ticket.rank || a.ticket.id - b.ticket.id); };
 function boardHtml(rows) {
   return `<div class="cols">${columns().map((s) => { const cs = inColumn(rows, s);
     return `<section class="col" data-drop="${s}"><h2><span class="sd st-${s}"></span>${STAGE_NAME[s]}<span class="n">${cs.length}</span></h2>${cs.map((r) => cardHtml(r)).join("")}<button type="button" class="add" data-new-when="${s}" aria-label="New ticket in ${STAGE_NAME[s]}">+</button></section>`; }).join("")}</div>`;
@@ -1230,7 +1244,7 @@ function lanesHtml(rows) {
 function listHtml(rows) {
   if (!rows.length) return `<p class="empty">Nothing matches.</p>`;
   return `<div class="list"><table><thead><tr><th>Key</th><th>Ticket</th><th>Stage</th><th>Session</th><th>Flags</th><th>Workspace</th><th>Updated</th></tr></thead><tbody>
-    ${rows.map((r) => { const t = r.ticket; return `<tr class="row" tabindex="-1" data-open="${esc(t.key)}"><td class="mono muted" style="white-space:nowrap">${esc(t.key)} ${shellIcon(r, true)}</td>
+    ${rows.map((r) => { const t = r.ticket; return `<tr class="row" tabindex="-1" data-open="${esc(t.key)}"><td class="mono muted" style="white-space:nowrap">${esc(t.key)} ${prioChip(t)} ${shellIcon(r, true)}</td>
       <td><div style="font-weight:500">${esc(t.title)}</div><div class="muted" style="font-size:calc(12 * var(--u))">${esc(t.project)}${t.parent ? " · sub-ticket of " + esc(t.parent) : ""}</div></td>
       <td>${STAGE_NAME[t.stage]}</td><td>${statusHtml(r)}</td><td>${pills(t)}</td><td class="mono" style="font-size:calc(12 * var(--u))">${esc(where(t))}</td><td class="muted">${ago(t.updated)}</td></tr>`; }).join("")}
   </tbody></table></div>`;
@@ -2085,6 +2099,7 @@ function detailsTab(d) {
     <div class="row2" ${t.todo ? "hidden" : ""}><label>Plan first<select name="plan"><option value="0">No</option><option value="1" ${t.plan ? "selected" : ""}>Yes</option></select></label>
       <label title="${esc(KIND_TITLE)}">Kind<select name="kind2">${kindOptions(t)}</select></label>
       <label>Planning skill<input type="text" name="skill" value="${esc(t.skill)}" placeholder="grilling, wayfinder"></label></div>
+    <label title="${esc(PRIO_TITLE)}">Priority<select name="priority">${prioOptions(prioOf(t))}</select></label>
     <label ${!t.todo && (t.repo || t.onto_own) ? "" : "hidden"}>Target branch<input type="text" name="onto" class="mono" value="${esc(t.onto_own)}" autocomplete="off" placeholder="${t.onto && !t.onto_own ? "The project's: " + esc(t.onto) : "Trunk"}" title="A jj bookmark or git branch it starts from and merges into instead of trunk, like a long-lived feature branch. Empty: the project's target, else trunk"></label>
     <div class="actions"><button type="submit" class="btn primary" value="close">Save and close</button>
       <button type="submit" class="btn">Save</button>
@@ -2194,11 +2209,12 @@ function openNew(parentKey, pick = {}) {
       <label data-todo-only hidden title="Where it came from (a Slack message, an email, a PR); its Claude tasks are told it">Link<input type="url" name="link" placeholder="https://..." autocomplete="off"></label>
       <div class="row2" data-todo-only hidden><label title="From that day's morning (or its time) it's in Needs you's Today group, and again each morning while it's overdue, until it's done">Due<input type="date" name="due_day"></label><label>Due at (optional)<input type="time" name="due_time"></label></div>
       <div class="row2" data-todo-only hidden><label title="Then it's in Needs you's Today group, once. Without a time: that morning">Remind me<input type="date" name="remind_day"></label><label>At (empty: the morning)<input type="time" name="remind_time"></label></div>
-      <div class="row2" data-claude-only><label>When<select name="when"><option value="queued">Start when there's room</option><option value="backlog">Backlog for now</option><option value="planning">Plan first</option></select></label>
+      <div class="row2" data-claude-only><label title="Start now: it starts as soon as it's created, in its own worktree even when all the project's worktree slots are taken (in the queue it still waits for its session)">When<select name="when"><option value="queued">Start when there's room</option><option value="start">Start now, even if every slot is taken</option><option value="backlog">Backlog for now</option><option value="planning">Plan first</option></select></label>
         <label data-repo-only>Runs as<select name="mode"><option value="queue" ${p?.mode !== "worktree" ? "selected" : ""}>Queue in a session</option><option value="worktree" ${p?.mode === "worktree" ? "selected" : ""}>Its own worktree</option></select></label></div>
       <div class="row2" data-claude-only><label>Queue session<select name="target"><option value="">Project default / parent's</option>${d.sessions.map((s) => `<option value="${esc(s.tmux)}">${esc(s.name)} (${esc(s.status)})</option>`).join("")}</select></label>
         <label>Planning skill (plan first)<input type="text" name="skill" placeholder="grilling, wayfinder"></label></div>
-      <div class="row2" data-claude-only><label>Profile<select name="profile"><option value="">Project's</option>${d.profiles.map((x) => `<option>${esc(x)}</option>`).join("")}</select></label></div>
+      <div class="row2"><label data-claude-only>Profile<select name="profile"><option value="">Project's</option>${d.profiles.map((x) => `<option>${esc(x)}</option>`).join("")}</select></label>
+        <label title="${esc(PRIO_TITLE)}">Priority<select name="priority">${prioOptions(PRIO_NORMAL)}</select></label></div>
       <div class="row2"><label>Sub-ticket of<select name="parent"><option value="">None</option>${d.tickets.filter((r) => r.ticket.stage !== "done").map((r) => `<option value="${esc(r.ticket.key)}" ${r.ticket.key === parentKey ? "selected" : ""}>${esc(r.ticket.key)} ${esc(r.ticket.title)}</option>`).join("")}</select></label>
         <label data-repo-only data-claude-only>Target branch<input type="text" name="onto" class="mono" autocomplete="off" placeholder="${esc(newOntoHint(d, proj, parentKey))}" title="A jj bookmark or git branch it starts from and merges into instead of trunk, like a long-lived feature branch. Empty: the parent's, else the project's, else trunk"></label></div>
       <div class="actions"><button type="submit" class="btn primary" title="Ctrl+Enter">Create</button></div></form>`;
@@ -2250,11 +2266,16 @@ async function submitNew(form) {
     const todo = f.kind === "todo";
     const r = await api("ticket", todo
       ? { project: f.project, title: f.title, body: f.body, parent: f.parent || undefined, todo: true, link: f.link?.trim() || undefined, stage: "backlog",
-        due: whenOf(f.due_day, f.due_time) || undefined, remind: whenOf(f.remind_day, f.remind_time) || undefined }
-      : { project: f.project, title: f.title, body: f.body, mode: f.mode, target: f.target || undefined,
-        stage: f.when, plan: f.when === "planning", skill: f.skill || undefined, profile: f.profile || undefined, parent: f.parent || undefined, umbrella: f.kind === "umbrella", onto: f.onto?.trim() || undefined });
-    store("cl-new", JSON.stringify({ project: f.project, ...Object.fromEntries(NEW_KEEP.map((k) => [k, f[k] ?? ""])) }));
-    document.getElementById("newDlg").close(); toast(`${r.key} created`); await refresh();
+        due: whenOf(f.due_day, f.due_time) || undefined, remind: whenOf(f.remind_day, f.remind_time) || undefined, priority: +f.priority }
+      : { project: f.project, title: f.title, body: f.body, mode: f.mode, target: f.target || undefined, priority: +f.priority,
+        stage: f.when === "start" ? "queued" : f.when, start: f.when === "start" && f.kind !== "umbrella", plan: f.when === "planning", skill: f.skill || undefined, profile: f.profile || undefined, parent: f.parent || undefined, umbrella: f.kind === "umbrella", onto: f.onto?.trim() || undefined });
+    // Start now is for this ticket only: the next one starts from "when there's room".
+    store("cl-new", JSON.stringify({ project: f.project, ...Object.fromEntries(NEW_KEEP.map((k) => [k, f[k] ?? ""])), ...(f.when === "start" ? { when: "queued" } : {}) }));
+    document.getElementById("newDlg").close();
+    toast(r.start === "started" ? `${r.key} created and started` : r.start === "waiting" ? `${r.key} created; its session is busy, so it waits in Queued`
+      : r.start === "blocked" ? `${r.key} created; it waits in Queued for the ticket before it`
+      : r.start === "failed" ? `${r.key} created but didn't start: ${r.reason}` : `${r.key} created`, r.start === "failed");
+    await refresh();
   } catch (e) { toast(e.message, true); }
 }
 // Save the plan or the review's message you edited (revert: drop your edit of the message).
@@ -2376,12 +2397,19 @@ function endDrag(drop) {
   placeLocally(d.key, place); render();
   act(d.key, "rank", place).catch(() => refresh());
 }
-// Show a reorder before the server answers: just past its new neighbor.
+// Show a reorder before the server answers: just past its new neighbor, or,
+// next to another priority's card, at the near edge of its own priority in
+// the column (board.zig rankTicket).
 function placeLocally(key, place) {
-  const rank = (k) => state.data.tickets.find((r) => r.ticket.key === k)?.ticket.rank;
-  const t = state.data.tickets.find((r) => r.ticket.key === key)?.ticket; if (!t) return;
+  const ref = state.data.tickets.find((r) => r.ticket.key === (place.after || place.before))?.ticket;
+  const t = state.data.tickets.find((r) => r.ticket.key === key)?.ticket; if (!t || !ref) return;
   editedLocally();
-  if (place.after) t.rank = rank(place.after) + 0.5; else if (place.before) t.rank = rank(place.before) - 0.5;
+  if (prioOf(ref) !== prioOf(t)) {
+    const ranks = state.data.tickets.map((r) => r.ticket).filter((x) => x !== t && x.stage === ref.stage && prioOf(x) === prioOf(t)).map((x) => x.rank);
+    if (ranks.length) t.rank = prioOf(ref) < prioOf(t) ? Math.min(...ranks) - 0.5 : Math.max(...ranks) + 0.5;
+    return;
+  }
+  t.rank = place.after ? ref.rank + 0.5 : ref.rank - 0.5;
 }
 
 // ---- moving to Done ----
@@ -3102,9 +3130,9 @@ async function onSubmit(e) {
     // A todo's form shows Kind up top (its other fields are hidden); a ticket's, next to Plan first.
     const kind = state.detail?.ticket.todo ? f.kind : f.kind2;
     let r; try { r = await act(state.open, "edit", kind === "todo"
-      ? { title: f.title, body: f.body, project: f.project, link: f.link.trim(), todo: true, umbrella: false, plan: false,
+      ? { title: f.title, body: f.body, project: f.project, link: f.link.trim(), todo: true, umbrella: false, plan: false, priority: +f.priority,
         ...todoDatesEdited(state.detail?.ticket, f) }
-      : { title: f.title, body: f.body, project: f.project, link: f.link.trim(), mode: f.mode, target: f.target, plan: f.plan === "1", umbrella: kind === "umbrella", todo: false, skill: f.skill, onto: f.onto.trim() }); } catch { return; }
+      : { title: f.title, body: f.body, project: f.project, link: f.link.trim(), priority: +f.priority, mode: f.mode, target: f.target, plan: f.plan === "1", umbrella: kind === "umbrella", todo: false, skill: f.skill, onto: f.onto.trim() }); } catch { return; }
     toast(r?.result && was && was !== f.mode ? "Saved. " + relocatedMsg(r.result, f.mode) : "Saved");
     if (e.submitter?.value === "close") document.getElementById("ticketDlg").close();
   }

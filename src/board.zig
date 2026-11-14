@@ -321,9 +321,15 @@ pub const Ticket = struct {
     /// On its way to Done: "merge" or "pr" while Claude merges its branch or
     /// opens a PR (it moves to Done when Claude is finished), else "".
     finishing: []const u8 = "",
-    /// Priority: lower comes first. The board shows each column in rank order
+    /// The manual order (dragging a card, `cl ticket rank`): lower comes
+    /// first, within a `priority`. The board shows each column in that order
     /// and the dispatcher starts waiting tickets in it.
     rank: i64 = 0,
+    /// 1 (highest) to 5 (lowest), `default_priority` normal. It comes before
+    /// `rank`: the dispatcher starts a higher one first, the columns show it
+    /// first, and its asks come first in Needs You. Sub-tickets still run in
+    /// rank order (`blocked_by`).
+    priority: i64 = default_priority,
     /// Its session was killed on purpose (`cl ticket kill`, the board's Kill):
     /// it waits for you to restart it rather than for the dispatcher.
     killed: bool = false,
@@ -377,6 +383,22 @@ pub const Error = error{
     /// or Done, a plan, being an umbrella, or Claude saying it's done.
     Todo,
 };
+
+/// A ticket's priority when none is given (`Ticket.priority`), and the range.
+pub const default_priority = 3;
+pub const min_priority = 1;
+pub const max_priority = 5;
+
+pub fn validPriority(p: i64) bool {
+    return p >= min_priority and p <= max_priority;
+}
+
+/// Board order: higher priority first, then rank, then oldest first. The
+/// columns (but Done) and the dispatcher's starts go by it.
+pub fn boardOrder(x: Ticket, y: Ticket) bool {
+    if (x.priority != y.priority) return x.priority < y.priority;
+    return x.rank < y.rank or (x.rank == y.rank and x.id < y.id);
+}
 
 /// Worktree slots a new project gets when none are given.
 pub const default_slots = 3;
@@ -432,6 +454,8 @@ const schema =
     \\  finishing TEXT NOT NULL DEFAULT '',
     \\  change_id TEXT NOT NULL DEFAULT '',
     \\  rank INTEGER NOT NULL DEFAULT 0,
+    \\  priority INTEGER NOT NULL DEFAULT
+    ++ std.fmt.comptimePrint(" {d},\n", .{default_priority}) ++
     \\  killed INTEGER NOT NULL DEFAULT 0,
     \\  test_plan TEXT NOT NULL DEFAULT '',
     \\  test_progress TEXT NOT NULL DEFAULT '',
@@ -660,6 +684,9 @@ pub fn migrate(db: Db) !void {
         // The handoff's other two parts, next to the test plan.
         _ = try addColumn(db, "tickets", "verified", "TEXT NOT NULL DEFAULT ''");
         _ = try addColumn(db, "tickets", "demo", "TEXT NOT NULL DEFAULT ''");
+        // Priorities, before the manual order. Before the swap below, which
+        // reads tickets (with every column, this one too).
+        _ = try addColumn(db, "tickets", "priority", std.fmt.comptimePrint("INTEGER NOT NULL DEFAULT {d}", .{default_priority}));
         // CL-168 reversed Review and Testing (test first, review last). The
         // column comes with a one-time swap of the open tickets, so nobody
         // changes position in the flow: see `reverse_stages`.
@@ -1370,6 +1397,8 @@ pub const TicketInput = struct {
     due: ?when.When = null,
     /// A todo's next reminder (`Ticket.remind_at`); 0 clears it.
     remind: ?i64 = null,
+    /// `Ticket.priority`; null for the default (createTicket) or to keep it.
+    priority: ?i64 = null,
     /// Target branch (`Ticket.onto_own`); "" for the project's. A new
     /// sub-ticket without one takes its parent's.
     onto: ?[]const u8 = null,
@@ -1404,6 +1433,8 @@ pub fn createTicket(ctx: Ctx, db: Db, a: std.mem.Allocator, in: TicketInput) Err
     const due = in.due orelse when.When{};
     const remind = in.remind orelse 0;
     if (!todo and (due.at != 0 or remind != 0)) return error.BadInput;
+    const priority = in.priority orelse default_priority;
+    if (!validPriority(priority)) return error.BadInput;
     // A Claude task for a todo goes on its own: it neither waits on the todo
     // (see `blockers`) nor on the tasks before it.
     const parallel = in.parallel orelse if (parent) |pt| pt.todo else false;
@@ -1418,9 +1449,9 @@ pub fn createTicket(ctx: Ctx, db: Db, a: std.mem.Allocator, in: TicketInput) Err
     };
     const t = now(ctx);
     try db.exec(
-        \\INSERT INTO tickets (key, project, title, body, stage, mode, plan, target, profile, parent, skill, created, updated, rank, umbrella, onto, todo, link, parallel, due_at, due_time, remind_at)
-        \\VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, (SELECT coalesce(max(rank), 0) + ?13 FROM tickets), ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
-    , .{ key, p.name, title, body, @tagName(stage), @tagName(in.mode orelse p.mode), plan, in.target orelse "", in.profile orelse p.profile, if (parent) |pt| pt.id else null, in.skill orelse "", t, rank_gap, in.umbrella orelse false, if (!p.repo) @as([]const u8, "") else in.onto orelse if (parent) |pt| pt.onto_own else "", todo, std.mem.trim(u8, in.link orelse "", " \t\r\n"), parallel, due.at, due.at != 0 and due.has_time, remind });
+        \\INSERT INTO tickets (key, project, title, body, stage, mode, plan, target, profile, parent, skill, created, updated, rank, umbrella, onto, todo, link, parallel, due_at, due_time, remind_at, priority)
+        \\VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, (SELECT coalesce(max(rank), 0) + ?13 FROM tickets), ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
+    , .{ key, p.name, title, body, @tagName(stage), @tagName(in.mode orelse p.mode), plan, in.target orelse "", in.profile orelse p.profile, if (parent) |pt| pt.id else null, in.skill orelse "", t, rank_gap, in.umbrella orelse false, if (!p.repo) @as([]const u8, "") else in.onto orelse if (parent) |pt| pt.onto_own else "", todo, std.mem.trim(u8, in.link orelse "", " \t\r\n"), parallel, due.at, due.at != 0 and due.has_time, remind, priority });
     const id = db.lastId();
     try logEvent(ctx, db, id, "created", @tagName(stage));
     if (parent) |pt| {
@@ -1438,7 +1469,7 @@ const ticket_cols = "t.id, t.key, t.project, t.title, t.body, t.stage, t.mode, t
     "(SELECT count(*) FROM tickets c WHERE c.parent = t.id AND c.stage = 'done'), t.umbrella, " ++
     "t.onto, coalesce((SELECT p.onto FROM projects p WHERE p.name = t.project), ''), t.autoreview, t.pr_then, " ++
     "coalesce((SELECT p.repo FROM projects p WHERE p.name = t.project), 1), t.todo, t.link, t.due_at, t.due_time, t.remind_at, t.overview_last, t.overview_next, t.overview_at, " ++
-    "t.pr_url, t.pr_stage, t.pr_seen, t.pr_seen_sha, t.verified, t.demo, t.back_to";
+    "t.pr_url, t.pr_stage, t.pr_seen, t.pr_seen_sha, t.verified, t.demo, t.back_to, t.priority";
 
 fn readTicket(st: sqlite.Stmt, a: std.mem.Allocator) !Ticket {
     return .{
@@ -1498,6 +1529,7 @@ fn readTicket(st: sqlite.Stmt, a: std.mem.Allocator) !Ticket {
         .verified = try st.dupe(a, 53),
         .demo = try st.dupe(a, 54),
         .back_to = try st.dupe(a, 55),
+        .priority = st.int(56),
     };
 }
 
@@ -1621,7 +1653,7 @@ pub fn listTickets(db: Db, a: std.mem.Allocator, f: Filter) Error![]Ticket {
     if (f.due) {
         try sql.appendSlice(a, " ORDER BY t.due_at, t.id");
     } else if (f.needs) {
-        try sql.appendSlice(a, " ORDER BY (SELECT min(at) FROM flags g WHERE g.ticket = t.id AND g.cleared IS NULL), t.id");
+        try sql.appendSlice(a, " ORDER BY t.priority, (SELECT min(at) FROM flags g WHERE g.ticket = t.id AND g.cleared IS NULL), t.id");
     } else if (f.parent != null) {
         // The order they run in.
         try sql.appendSlice(a, " ORDER BY t.rank, t.id");
@@ -1676,6 +1708,7 @@ pub fn updateTicket(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, in:
     const moving = in.project.len > 0 and !std.mem.eql(u8, in.project, t.project);
     const repo = if (moving) (try getProject(db, a, in.project)).repo else t.repo;
     if (in.title) |v| if (v.len == 0) return error.BadInput;
+    if (in.priority) |v| if (!validPriority(v)) return error.BadInput;
     // A todo is the human's: never planned, never an umbrella, never further
     // along than Running.
     const todo = in.todo orelse t.todo;
@@ -1725,6 +1758,7 @@ pub fn updateTicket(ctx: Ctx, db: Db, a: std.mem.Allocator, key: []const u8, in:
         try clearFlagId(ctx, db, t.id, flag_reminder);
     }
     if (in.onto) |v| try db.exec("UPDATE tickets SET onto = ?2 WHERE id = ?1", .{ t.id, v });
+    if (in.priority) |v| try db.exec("UPDATE tickets SET priority = ?2 WHERE id = ?1", .{ t.id, v });
     if (in.project.len > 0 and !std.mem.eql(u8, in.project, t.project)) {
         _ = try getProject(db, a, in.project);
         try db.exec("UPDATE tickets SET project = ?2 WHERE id = ?1", .{ t.id, in.project });
@@ -2796,6 +2830,10 @@ pub fn rankTicket(db: Db, a: std.mem.Allocator, key: []const u8, after: ?[]const
     const t = try getTicket(db, a, key);
     const ref = try getTicket(db, a, after orelse before orelse return error.BadInput);
     if (ref.id == t.id) return;
+    // Next to a card of another priority (a drop at the edge of its group,
+    // or among another group's cards): priority comes first, so the place
+    // is the nearest edge of its own priority in that column.
+    if (ref.priority != t.priority) return rankAtEdge(db, a, t, ref.stage, ref.priority < t.priority);
     try db.execMulti("BEGIN IMMEDIATE");
     errdefer db.execMulti("ROLLBACK") catch {};
     for (0..2) |_| {
@@ -2822,20 +2860,28 @@ pub fn rankTicket(db: Db, a: std.mem.Allocator, key: []const u8, after: ?[]const
     unreachable;
 }
 
-/// Put a ticket first (`top`) or last among the tickets in its stage, across
-/// every project: the top or bottom of its board column with all projects
-/// shown, so also of its own project's tickets there.
+/// Put a ticket first (`top`) or last among the tickets in its stage with
+/// its priority, across every project: the top or bottom of its priority's
+/// cards in its board column with all projects shown, so also of its own
+/// project's tickets there. Priority comes first, so it stays below higher
+/// ones and above lower ones.
 pub fn rankInStage(db: Db, a: std.mem.Allocator, key: []const u8, top: bool) Error!void {
     const t = try getTicket(db, a, key);
+    return rankAtEdge(db, a, t, t.stage, top);
+}
+
+/// Rank `t` first (`top`) or last among the tickets of its priority in
+/// `stage` (its column, or the one it's being moved to).
+fn rankAtEdge(db: Db, a: std.mem.Allocator, t: Ticket, stage: Stage, top: bool) Error!void {
     var st = try db.query(if (top)
-        "SELECT key FROM tickets WHERE stage = ?1 AND id != ?2 ORDER BY rank, id LIMIT 1"
+        "SELECT key FROM tickets WHERE stage = ?1 AND id != ?2 AND priority = ?3 ORDER BY rank, id LIMIT 1"
     else
-        "SELECT key FROM tickets WHERE stage = ?1 AND id != ?2 ORDER BY rank DESC, id DESC LIMIT 1", .{ @tagName(t.stage), t.id });
+        "SELECT key FROM tickets WHERE stage = ?1 AND id != ?2 AND priority = ?3 ORDER BY rank DESC, id DESC LIMIT 1", .{ @tagName(stage), t.id, t.priority });
     defer st.finalize();
-    if (!try st.step()) return; // Alone in its column.
+    if (!try st.step()) return; // Alone in its column (at its priority).
     const ref = try st.dupe(a, 0);
-    if (top) return rankTicket(db, a, key, null, ref);
-    return rankTicket(db, a, key, ref, null);
+    if (top) return rankTicket(db, a, t.key, null, ref);
+    return rankTicket(db, a, t.key, ref, null);
 }
 
 pub fn setBase(db: Db, id: i64, base: []const u8) Error!void {
@@ -3291,6 +3337,101 @@ test "rank: new tickets go last, a drop goes between its neighbors" {
     try rankTicket(db, a, k1, k3, null);
     try testing.expectEqualStrings("Three One Two", try order(db, a));
     try testing.expectEqual(@as(i64, rank_gap + rank_gap / 2), (try getTicket(db, a, k1)).rank);
+}
+
+test "priority: 3 unless given, 1 to 5 only, and Needs You and --top go by it" {
+    const ctx = testCtx();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try Db.open(":memory:");
+    defer db.close();
+    try migrate(db);
+    try addProject(db, .{ .name = "qa", .dir = "/x/qa" });
+    const k1 = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Normal", .stage = .queued });
+    try testing.expectEqual(@as(i64, default_priority), (try getTicket(db, a, k1)).priority);
+    try testing.expectError(error.BadInput, createTicket(ctx, db, a, .{ .project = "qa", .title = "Zero", .priority = 0 }));
+    try testing.expectError(error.BadInput, createTicket(ctx, db, a, .{ .project = "qa", .title = "Six", .priority = 6 }));
+    try testing.expectError(error.BadInput, updateTicket(ctx, db, a, k1, .{ .priority = 9 }));
+    try testing.expectEqual(@as(i64, default_priority), (try getTicket(db, a, k1)).priority);
+    const k2 = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Urgent", .stage = .queued, .priority = 1 });
+    const k3 = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Normal too", .stage = .queued });
+    // Needs You: the urgent ask comes first, though it's the newest.
+    try setFlag(ctx, db, a, k1, "review", "auto", "");
+    try setFlag(ctx, db, a, k3, "review", "auto", "");
+    try setFlag(ctx, db, a, k2, "review", "auto", "");
+    const needs = try listTickets(db, a, .{ .needs = true });
+    try testing.expectEqual(@as(usize, 3), needs.len);
+    for ([_][]const u8{ k2, k1, k3 }, needs) |k, t| try testing.expectEqualStrings(k, t.key);
+    // --top: the top of its own priority, under the urgent one.
+    try rankInStage(db, a, k3, true);
+    const t3 = try getTicket(db, a, k3);
+    try testing.expect(boardOrder(t3, try getTicket(db, a, k1)));
+    try testing.expect(boardOrder(try getTicket(db, a, k2), t3));
+    // --bottom: the bottom of its priority, still above the normal ones.
+    try rankInStage(db, a, k2, false);
+    try testing.expect(boardOrder(try getTicket(db, a, k2), try getTicket(db, a, k1)));
+    // Alone at its priority: it stays where it is.
+    const rank2 = (try getTicket(db, a, k2)).rank;
+    try rankInStage(db, a, k2, true);
+    try testing.expectEqual(rank2, (try getTicket(db, a, k2)).rank);
+}
+
+test "rank: a drop next to another priority's card goes to the near edge of its own" {
+    const ctx = testCtx();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try Db.open(":memory:");
+    defer db.close();
+    try migrate(db);
+    try addProject(db, .{ .name = "qa", .dir = "/x/qa" });
+    // The column shows A (P1), then B, C, D (P3), then E (P5).
+    const ka = try createTicket(ctx, db, a, .{ .project = "qa", .title = "A", .stage = .queued, .priority = 1 });
+    const kb = try createTicket(ctx, db, a, .{ .project = "qa", .title = "B", .stage = .queued });
+    const kc = try createTicket(ctx, db, a, .{ .project = "qa", .title = "C", .stage = .queued });
+    const kd = try createTicket(ctx, db, a, .{ .project = "qa", .title = "D", .stage = .queued });
+    const ke = try createTicket(ctx, db, a, .{ .project = "qa", .title = "E", .stage = .queued, .priority = 5 });
+    // A's rank comes after B's: a global rank next to A would land mid-group.
+    try db.exec("UPDATE tickets SET rank = 1500 WHERE key = ?1", .{ka});
+    const column = struct {
+        fn of(d: Db, al: std.mem.Allocator) ![]const u8 {
+            const ts = try listTickets(d, al, .{ .stage = .queued });
+            std.mem.sort(Ticket, ts, {}, struct {
+                fn lt(_: void, x: Ticket, y: Ticket) bool {
+                    return boardOrder(x, y);
+                }
+            }.lt);
+            var out: std.ArrayList(u8) = .empty;
+            for (ts) |t| try out.appendSlice(al, t.title);
+            return out.items;
+        }
+    }.of;
+    try testing.expectEqualStrings("ABCDE", try column(db, a));
+    // D dropped just under A: the top of the P3 group.
+    try rankTicket(db, a, kd, ka, null);
+    try testing.expectEqualStrings("ADBCE", try column(db, a));
+    // B dropped just above E: the bottom of the P3 group.
+    try rankTicket(db, a, kb, null, ke);
+    try testing.expectEqualStrings("ADCBE", try column(db, a));
+    // C dropped above A (among a higher group): still the top of its own.
+    try rankTicket(db, a, kc, null, ka);
+    try testing.expectEqualStrings("ACDBE", try column(db, a));
+}
+
+test "migrate: a board from before priorities gets the column, every ticket normal" {
+    const ctx = testCtx();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try Db.open(":memory:");
+    defer db.close();
+    try migrate(db);
+    try addProject(db, .{ .name = "qa", .dir = "/x/qa" });
+    const k = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Old" });
+    try db.execMulti("ALTER TABLE tickets DROP COLUMN priority");
+    try migrate(db);
+    try testing.expectEqual(@as(i64, default_priority), (try getTicket(db, a, k)).priority);
 }
 
 test "rank: --top and --bottom go to the ends of the ticket's stage" {

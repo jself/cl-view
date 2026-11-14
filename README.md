@@ -869,7 +869,7 @@ the inbox whatever its flags say; it comes back once the session stops.
 ```
 cl t new qa-tool "Flaky login spec" -m "fails one run in five" [--worktree | --queue] [--plan]
 cl t list [--stage review] [--project qa-tool] [--flag question] [--search login] [--open] [--json]
-cl t needs                       the inbox: flagged tickets Claude isn't working on, oldest first
+cl t needs                       the inbox: flagged tickets Claude isn't working on, highest priority then oldest first
 cl t show QA-1 [--json]          details, flags, comments and activity
 cl t edit QA-1 --title ... | move QA-1 testing | rm QA-1
 cl t comment QA-1 "also cover logout" --send
@@ -1920,10 +1920,28 @@ in the terminal (`/?attach=<session>`), open gutter, launch and test, see
 its sub-tickets and activity, and edit it. On a phone the columns swipe and
 the popup fills the screen.
 
-Drag a card to another column to move it, or up and down for priority (on a
-phone, hold it first). Each column runs top to bottom in priority order,
-except Done (latest first); new tickets go to the bottom, and the dispatcher
-starts queued tickets from the top.
+Drag a card to another column to move it, or up and down to reorder it (on a
+phone, hold it first). Each column runs top to bottom by priority, then in
+the order you dragged them, except Done (latest first); new tickets go to the
+bottom of their priority, and the dispatcher starts queued tickets from the
+top.
+
+A ticket's priority runs from 1 (highest) to 5 (lowest); 3 is normal and the
+default. Pick it in New ticket or the ticket's Details (`cl t new --priority
+1`, `cl t edit QA-1 --priority 1`). A higher priority starts before the other
+queued tickets, sits higher in its column and comes first in Needs You;
+cards other than 3 show it next to their key (P1, P5). Dragging reorders
+tickets of the same priority: a card dropped among another priority's cards
+goes to the nearest edge of its own. Sub-tickets that run in order still go by
+that order, whatever their priorities.
+
+For something that can't wait for a slot, pick "Start now, even if every
+slot is taken" under When in New ticket (`cl t new ... --start`): it starts
+as soon as it's created, in its own worktree even with the project's
+`--slots` all in progress (as Start now on an existing ticket does). A queue
+ticket still waits in Queued while its session is busy, and one that waits on
+another ticket (an `--after` link, its parent, the sub-ticket before it)
+waits in Queued until that one is done.
 
 Paste or drop an image (png, jpeg, gif or webp, up to 10 MB) into a
 ticket's description, in New ticket or its Details, and it is uploaded and

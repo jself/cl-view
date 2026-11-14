@@ -603,6 +603,42 @@ pub fn start(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t
     return startKeeping(ctx, cfg, db, a, t, force, false);
 }
 
+pub const StartedNew = enum {
+    /// It has a session now (or the dispatcher got there first).
+    started,
+    /// Its session is busy (a queue ticket): it waits in Queued.
+    waiting,
+    /// It waits on another ticket that isn't done (an --after link, its
+    /// parent, the sub-ticket before it): it waits in Queued, and the
+    /// dispatcher starts it once that one is done (`board.hold`).
+    blocked,
+};
+
+/// A ticket just created to start now (`cl ticket new --start`, the board's
+/// "Start now"): it starts as `start` does, so a worktree one starts even
+/// with all of the project's worktree slots taken. Unlike `cl ticket start`
+/// it keeps to the order of what it waits on (`.blocked`). A queue one whose
+/// session is busy waits in Queued. Any other failure flags it
+/// start-failed, as the dispatcher does, and is returned.
+pub fn startNew(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, key: []const u8) !StartedNew {
+    const t = try board.getTicket(db, a, key);
+    if (board.hold(t) == .blocked) return .blocked;
+    return newOutcome(ctx, db, t, start(ctx, cfg, db, a, t, false));
+}
+
+/// What `startNew` makes of how `start` went.
+fn newOutcome(ctx: Ctx, db: board.Db, t: board.Ticket, r: anyerror!void) !StartedNew {
+    r catch |err| switch (err) {
+        error.TargetBusy => return .waiting,
+        error.AlreadyStarted => return .started,
+        else => {
+            board.setFlagId(ctx, db, t.id, "start-failed", "auto", failureReason(err)) catch {};
+            return err;
+        },
+    };
+    return .started;
+}
+
 /// `start`; with `keep_stage` a ticket in Review or Testing stays there (it
 /// moved, it wasn't sent back).
 fn startKeeping(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: board.Ticket, force: bool, keep_stage: bool) !void {
@@ -1437,9 +1473,9 @@ fn pausedProjects(db: board.Db, a: std.mem.Allocator) !std.StringHashMapUnmanage
     return paused;
 }
 
-/// Board order: rank, then oldest first.
+/// Board order: priority, rank, then oldest first (`board.boardOrder`).
 fn byRank(_: void, x: board.Ticket, y: board.Ticket) bool {
-    return x.rank < y.rank or (x.rank == y.rank and x.id < y.id);
+    return board.boardOrder(x, y);
 }
 
 pub const Interrupted = struct {
@@ -2057,6 +2093,62 @@ test "a running ticket moved back to Queued is stopped, then started again where
     try std.testing.expectEqualStrings("", b.tmux);
     try board.move(ctx, db, a, kr, .queued);
     try std.testing.expectEqual(@as(usize, 2), (try waitingToStart(db, a)).len);
+}
+
+test "start now: busy waits, already started counts, a failure is flagged; a blocked one waits its turn" {
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = Ctx.testEnv(), .home = "/tmp" };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "qa", .dir = "/x/qa-tool", .mode = .worktree, .slots = 1 });
+    const k = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Now", .stage = .queued });
+    const t = try board.getTicket(db, a, k);
+    try std.testing.expectEqual(StartedNew.started, try newOutcome(ctx, db, t, {}));
+    try std.testing.expectEqual(StartedNew.waiting, try newOutcome(ctx, db, t, error.TargetBusy));
+    try std.testing.expectEqual(StartedNew.started, try newOutcome(ctx, db, t, error.AlreadyStarted));
+    try std.testing.expectEqual(@as(usize, 0), (try board.getTicket(db, a, k)).flags.len);
+    try std.testing.expectError(error.WorktreeFailed, newOutcome(ctx, db, t, error.WorktreeFailed));
+    const flagged = try board.getTicket(db, a, k);
+    try std.testing.expectEqual(@as(usize, 1), flagged.flags.len);
+    try std.testing.expectEqualStrings("start-failed", flagged.flags[0].kind);
+    // A sub-ticket in order behind an unfinished one isn't started: it waits
+    // in Queued (returned before anything is started, so no tmux here).
+    const parent = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Steps", .umbrella = true });
+    _ = try board.createTicket(ctx, db, a, .{ .project = "qa", .parent = parent, .title = "One", .stage = .queued });
+    const two = try board.createTicket(ctx, db, a, .{ .project = "qa", .parent = parent, .title = "Two", .stage = .queued });
+    const cfg: config.Config = .{ .profiles = &.{}, .default = "", .operator = "" };
+    try std.testing.expectEqual(StartedNew.blocked, try startNew(ctx, cfg, db, a, two));
+    const after = try board.getTicket(db, a, two);
+    try std.testing.expectEqual(board.Stage.queued, after.stage);
+    try std.testing.expectEqualStrings("", after.tmux);
+}
+
+test "a higher priority starts first; the same priority goes by rank" {
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = Ctx.testEnv(), .home = "/tmp" };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "qa", .dir = "/x/qa-tool" });
+    const k1 = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Normal", .stage = .queued });
+    const k2 = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Low", .stage = .queued, .priority = 5 });
+    const k3 = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Urgent", .stage = .queued, .priority = 1 });
+    const k4 = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Normal too", .stage = .queued });
+    // Ranked first of all, a normal one still waits for the urgent one.
+    try board.rankTicket(db, a, k4, null, k1);
+    try std.testing.expect((try board.getTicket(db, a, k4)).rank < (try board.getTicket(db, a, k3)).rank);
+    var w = try waitingToStart(db, a);
+    try std.testing.expectEqual(@as(usize, 4), w.len);
+    for ([_][]const u8{ k3, k4, k1, k2 }, w) |k, t| try std.testing.expectEqualStrings(k, t.key);
+    // Priority changed later: it moves with it.
+    try board.updateTicket(ctx, db, a, k2, .{ .priority = 2 });
+    w = try waitingToStart(db, a);
+    for ([_][]const u8{ k3, k2, k4, k1 }, w) |k, t| try std.testing.expectEqualStrings(k, t.key);
 }
 
 test "a ticket switched to a worktree starts now when queued or beyond" {

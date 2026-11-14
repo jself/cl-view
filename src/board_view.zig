@@ -91,9 +91,9 @@ pub fn shows(t: board.Ticket, projects: []const board.Project, o: Options) bool 
     return true;
 }
 
-/// The columns and their cards. Each runs in priority order (rank), as the
-/// web board's do, except Done: latest first, the order `tickets` comes in
-/// (board.listTickets). Done is a column when switched on.
+/// The columns and their cards. Each runs in board order (priority, then
+/// rank: `board.boardOrder`), as the web board's do, except Done: latest first,
+/// the order `tickets` comes in (board.listTickets). Done is a column when switched on.
 pub fn columns(a: std.mem.Allocator, tickets: []const board.Ticket, projects: []const board.Project, o: Options) ![]Column {
     var out: std.ArrayList(Column) = .empty;
     for (std.enums.values(Stage)) |s| {
@@ -107,9 +107,7 @@ pub fn columns(a: std.mem.Allocator, tickets: []const board.Ticket, projects: []
 }
 
 fn byRank(tickets: []const board.Ticket, x: usize, y: usize) bool {
-    const a = tickets[x];
-    const b = tickets[y];
-    return a.rank < b.rank or (a.rank == b.rank and a.id < b.id);
+    return board.boardOrder(tickets[x], tickets[y]);
 }
 
 /// A ticket's session as the board shows it (the web board's statusOf).

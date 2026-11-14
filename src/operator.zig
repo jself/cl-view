@@ -196,6 +196,12 @@ const tickets_skill =
     \\     --stage queued       start as soon as a slot or session frees up; without it
     \\                          the ticket waits in backlog until someone queues it
     \\     --profile <name>     the Claude profile for its session
+    \\     --priority <1-5>     only when the human says how urgent it is: 1 highest, 3 normal
+    \\                          (the default), 5 lowest. A higher one starts before the
+    \\                          other queued tickets and its asks come first in Needs You
+    \\     --start              with "start it now" / "right away": queued and started at
+    \\                          once, in a worktree even with every worktree slot taken
+    \\                          (instead of --stage)
     \\   Ask before queueing (`--stage queued`) unless the human asked for the work to start.
     \\4. Tell the human the key and, in a line, what it will do.
     \\
@@ -385,8 +391,10 @@ const tickets_skill =
     \\                                     wait on other tickets, or stop; a sub-ticket that
     \\                                     doesn't / does wait for the one before it
     \\  cl ticket move <key> <stage>       e.g. queued to have the dispatcher start it
+    \\  cl ticket edit <key> --priority <1-5>   1 highest, 3 normal, 5 lowest: it comes
+    \\                                     before the order rank sets
     \\  cl ticket rank <key> --top         reorder when asked: --top / --bottom of its
-    \\                                     stage (all projects), or --before / --after <key>;
+    \\                                     stage at its priority (all projects), or --before / --after <key>;
     \\                                     the dispatcher starts queued tickets in this order,
     \\                                     and sub-tickets run in it
     \\  cl ticket start <key>              start it now (even if it waits on other tickets)

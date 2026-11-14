@@ -27,7 +27,7 @@ pub const ticket_usage =
     \\  new <project> <title> [-m <body>] [--worktree | --queue] [--target <session>]
     \\      [--plan [--skill <name>]] [--stage <stage>] [--profile <name>] [--parent <key>]
     \\      [--after <key,...>] [--parallel] [--umbrella] [--onto <branch>] [--todo] [--link <url>]
-    \\      [--due <when>] [--remind <when>]
+    \\      [--due <when>] [--remind <when>] [--priority <1-5>] [--start]
     \\                              create a ticket; prints its key. With --parent the
     \\                              project may be left out (it's the parent's). Sub-tickets
     \\                              run in order: each waits for the one ranked before it to
@@ -66,18 +66,30 @@ pub const ticket_usage =
     \\                              <when>: today, tomorrow, mon (the next one), +3d, +2w, +4h,
     \\                              +30m, now, 2026-11-10 or 11-10, each optionally followed by a
     \\                              time (15:00, 3pm); a time alone; none clears
+    \\                              --priority: 1 (highest) to 5 (lowest), 3 (normal) by
+    \\                              default. The dispatcher starts a higher one first, the
+    \\                              board shows it first in its column, and its asks come
+    \\                              first in Needs You; rank orders tickets of the same
+    \\                              priority. Sub-tickets in order still run in rank order.
+    \\                              --start: queued and started now, as `start` does: in a
+    \\                              worktree even with every worktree slot taken; in the
+    \\                              queue it waits in queued while its session is busy.
+    \\                              One that waits on another ticket (--after, its parent,
+    \\                              the sub-ticket before it) waits in queued for it instead
     \\  sub <title> [-m <body>] [options of new]
     \\                              in a ticket's session: a sub-ticket of $CL_TICKET
     \\  list [--stage <s>] [--project <p>] [--flag <f>] [--needs] [--search <q>] [--open]
     \\      [--top] [--parent <key>] [--parked] [--hidden-projects] [--todo | --no-todo] [--due]
-    \\                              tickets, newest first (--needs: oldest ask first;
-    \\                              --top: no sub-tickets; --parent: its sub-tickets;
-    \\                              --todo: only todos, --no-todo: none; --due: todos with
-    \\                              a due date, soonest first). A todo with one says when
+    \\                              tickets, newest first (--needs: highest priority, then
+    \\                              oldest ask first; --top: no sub-tickets; --parent: its
+    \\                              sub-tickets; --todo: only todos, --no-todo: none; --due:
+    \\                              todos with a due date, soonest first). A todo with one
+    \\                              says when
     \\  needs [--hidden] [--hidden-projects]
-    \\                              tickets with a flag, oldest first (the inbox); a ticket
-    \\                              whose session is working on it is left out until it stops,
-    \\                              and a hidden one until it raises a new flag (--hidden: those).
+    \\                              tickets with a flag, highest priority then oldest first
+    \\                              (the inbox); a ticket whose session is working on it is
+    \\                              left out until it stops, and a hidden one until it raises
+    \\                              a new flag (--hidden: those).
     \\                              First the sessions' alerts (cl alert), one line each:
     \\                              alert, from (operator or a session), ticket or -, raised
     \\                              (unix s), text. Last, under "today:", todos asking only
@@ -105,7 +117,7 @@ pub const ticket_usage =
     \\      [--target <session>] [--plan | --no-plan] [--skill <name>] [--profile <name>]
     \\      [--after <key,...>] [--not-after <key,...>] [--parallel | --in-order]
     \\      [--umbrella | --no-umbrella] [--onto <branch>] [--todo | --no-todo] [--link <url>]
-    \\      [--due <when>] [--remind <when>]
+    \\      [--due <when>] [--remind <when>] [--priority <1-5>]
     \\                              --onto "" goes back to the project's target. --after: the
     \\                              dispatcher doesn't start it until those
     \\                              tickets are done (refused if they wait on it already);
@@ -135,7 +147,8 @@ pub const ticket_usage =
     \\  rank <key> --before <key> | --after <key> | --top | --bottom
     \\                              reorder: next to another ticket, as dragging its card on
     \\                              the board does, or first or last in its stage across all
-    \\                              projects (the board column). The dispatcher starts queued
+    \\                              projects (the board column), within its priority (which
+    \\                              comes first: see new --priority). The dispatcher starts queued
     \\                              tickets of a project in this order, and sub-tickets run
     \\                              in it (refused if it would contradict an --after link)
     \\  start <key> [--now]         start it now: a worktree and session, or typed into its
@@ -464,6 +477,13 @@ fn relocate(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, ke
     });
 }
 
+fn parsePriority(args: Args) ?i64 {
+    const v = args.get("--priority") orelse return null;
+    const n = std.fmt.parseInt(i64, v, 10) catch board.max_priority + 1;
+    if (!board.validPriority(n)) fail("--priority takes {d} (highest) to {d} (lowest); {d} is normal (got {s})", .{ board.min_priority, board.max_priority, board.default_priority, v });
+    return n;
+}
+
 fn parseMode(args: Args) ?board.Mode {
     if (args.has("--worktree") and args.has("--queue")) fail("--worktree or --queue, not both", .{});
     if (args.has("--worktree")) return .worktree;
@@ -769,7 +789,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
     const valued = [_][]const u8{
         "--body", "--target", "--stage", "--profile", "--project", "--flag", "--search", "--title", "--as", "--summary", "--test-plan", "--step", "--parent", "--skill", "--pr-url", "--before", "--after", "--tell", "--then",
         "--reason", "--until", "--every", "--max", "--at", "--change", "--not-after", "--onto", "--findings", "--link",
-        "--last", "--next",
+        "--last", "--next", "--priority",
     };
     // park's --pr names the PR; elsewhere (move, approve) it's a finish.
     // list's --due is a switch (todos with a due date); new's and edit's
@@ -782,8 +802,12 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
     const pos = args.pos.items;
 
     if (std.mem.eql(u8, cmd, "new") or std.mem.eql(u8, cmd, "sub")) {
-        args.only(&.{ "--body", "--worktree", "--queue", "--target", "--plan", "--skill", "--stage", "--profile", "--parent", "--json", "--after", "--parallel", "--umbrella", "--onto", "--todo", "--link", "--due", "--remind" }, ticket_usage);
+        args.only(&.{ "--body", "--worktree", "--queue", "--target", "--plan", "--skill", "--stage", "--profile", "--parent", "--json", "--after", "--parallel", "--umbrella", "--onto", "--todo", "--link", "--due", "--remind", "--priority", "--start" }, ticket_usage);
         if (!args.has("--todo") and (args.get("--due") != null or args.get("--remind") != null)) fail("--due and --remind are for todos: add --todo (or use cl todo)", .{});
+        const priority = parsePriority(args);
+        const start_now = args.has("--start");
+        if (start_now and (args.has("--plan") or args.has("--skill") or args.has("--todo") or args.has("--umbrella"))) fail("--start doesn't go with --plan, --todo or --umbrella: they don't start a session to build it", .{});
+        if (start_now and args.get("--stage") != null) fail("--start puts it in queued and starts it; leave out --stage", .{});
         const is_sub = std.mem.eql(u8, cmd, "sub");
         const parent = args.get("--parent") orelse if (is_sub) (env_key orelse fail("cl ticket sub runs in a ticket's session ($CL_TICKET); elsewhere use new --parent <key>", .{})) else null;
         // With a parent, the project is optional: new --parent QA-2 "title".
@@ -807,8 +831,9 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
             .target = args.get("--target"),
             .plan = args.has("--plan") or args.has("--skill"),
             .skill = args.get("--skill"),
-            .stage = if (args.get("--stage")) |s| parseStage(s) else null,
+            .stage = if (start_now) .queued else if (args.get("--stage")) |s| parseStage(s) else null,
             .profile = args.get("--profile"),
+            .priority = priority,
             .umbrella = args.has("--umbrella"),
             .onto = args.get("--onto"),
             .todo = args.has("--todo"),
@@ -817,6 +842,21 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
             .remind = if (parseWhen(ctx, cfg, db, "--remind", args.get("--remind"))) |w| w.at else null,
         }) catch |e| boardFail(db, e, if (parent != null) "parent ticket or project" else "project");
         try applyDeps(ctx, db, a, key, args);
+        if (start_now) {
+            // Made either way: the key goes to stdout, how the start went to stderr.
+            const r = dispatch.startNew(ctx, cfg, db, a, key) catch |e| {
+                const shown = if (args.has("--json")) try std.fmt.allocPrint(a, "{f}\n", .{std.json.fmt(.{ .key = key }, .{})}) else try std.fmt.allocPrint(a, "{s}\n", .{key});
+                out(shown) catch {};
+                fail("{s} was created but didn't start: {s} (flagged start-failed; `cl ticket start {s}` tries again)", .{ key, dispatch.failureReason(e), key });
+            };
+            const after = board.getTicket(db, a, key) catch |e| boardFail(db, e, "ticket");
+            const note = switch (r) {
+                .started => try std.fmt.allocPrint(a, "cl: {s} started in {s}{s}{s}\n", .{ key, after.tmux, if (after.worktree.len > 0) " at " else "", try ctx.shortenHomeIn(a, after.worktree) }),
+                .waiting => try std.fmt.allocPrint(a, "cl: {s}'s session is busy or has another ticket in progress; it waits in queued\n", .{key}),
+                .blocked => try std.fmt.allocPrint(a, "cl: {s} waits on {s}, not done yet; it waits in queued and starts once that is done (`cl ticket start {s}` starts it anyway)\n", .{ key, (try board.waitingOn(a, after))[0].key, key }),
+            };
+            std.Io.File.stderr().writeStreamingAll(ctx.io, note) catch {};
+        }
         if (args.has("--json")) return out(try std.fmt.allocPrint(a, "{f}\n", .{std.json.fmt(.{ .key = key }, .{})}));
         return out(try std.fmt.allocPrint(a, "{s}\n", .{key}));
     }
@@ -915,9 +955,10 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         return out(try showText(ctx, a, t, dates, blocks, subs, cs, evs));
     }
     if (std.mem.eql(u8, cmd, "edit")) {
-        args.only(&.{ "--title", "--body", "--project", "--worktree", "--queue", "--target", "--plan", "--no-plan", "--skill", "--profile", "--after", "--not-after", "--parallel", "--in-order", "--umbrella", "--no-umbrella", "--onto", "--todo", "--no-todo", "--link", "--due", "--remind" }, ticket_usage);
+        args.only(&.{ "--title", "--body", "--project", "--worktree", "--queue", "--target", "--plan", "--no-plan", "--skill", "--profile", "--after", "--not-after", "--parallel", "--in-order", "--umbrella", "--no-umbrella", "--onto", "--todo", "--no-todo", "--link", "--due", "--remind", "--priority" }, ticket_usage);
         if (args.has("--todo") and args.has("--no-todo")) fail("--todo or --no-todo, not both", .{});
         const key = keyArg(pos, 0, env_key, "cl ticket edit <key> [options]");
+        const priority = parsePriority(args);
         try checkProfile(cfg, args.get("--profile"));
         checkLink(args.get("--link"));
         if (args.has("--todo")) {
@@ -949,6 +990,7 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
             .link = args.get("--link"),
             .due = due,
             .remind = if (remind) |w| w.at else null,
+            .priority = priority,
         }) catch |e| boardFail(db, e, "ticket or project");
         try applyDeps(ctx, db, a, key, args);
         if (parseMode(args)) |m| return relocate(ctx, cfg, db, a, key, m);
@@ -1880,6 +1922,7 @@ fn showText(ctx: Ctx, a: std.mem.Allocator, t: board.Ticket, dates: TodoDates, b
         if (t.mode == .queue and t.target.len > 0) try std.fmt.allocPrint(a, " in {s}", .{t.target}) else "",
     });
     if (t.onto.len > 0) try w.print("onto: {s}{s} (starts from it and merges into it, not trunk)\n", .{ t.onto, if (t.onto_own.len == 0) ", the project's" else "" });
+    if (t.priority != board.default_priority) try w.print("priority: {d} ({s})\n", .{ t.priority, if (t.priority < board.default_priority) "higher than normal: it starts and asks before normal ones" else "lower than normal: it starts and asks after normal ones" });
     if (t.parent.len > 0) try w.print("sub-ticket of: {s}{s}\n", .{ t.parent, if (t.parallel) " (parallel: doesn't wait for the one before it)" else "" });
     if (t.umbrella) try w.writeAll("umbrella: only a container for its sub-tickets; it never runs\n");
     if (t.todo) try w.print("todo: yours ({s}){s}\n", .{ todoStageName(t.stage), if (t.stage == .done) "" else "; nothing runs it, and it closes when you move it to done" });
