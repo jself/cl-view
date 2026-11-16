@@ -17,6 +17,7 @@ const board = @import("board.zig");
 const worktree = @import("worktree.zig");
 const web_service = @import("web_service.zig");
 const push = @import("push.zig");
+const intake = @import("intake.zig");
 
 const index_html = @embedFile("web/index.html");
 const login_html = @embedFile("web/login.html");
@@ -108,6 +109,8 @@ fn serve(ctx: Ctx, cfg: config.Config) !void {
     (try std.Thread.spawn(.{}, reapLoop, .{&state})).detach();
     // Push notifications: whichever server holds the lock sends them.
     (try std.Thread.spawn(.{}, push.loop, .{ ctx, cfg, &logLine })).detach();
+    // Forwarded email and Discord messages to the operator: likewise one server.
+    if (intake.configured(cfg)) (try std.Thread.spawn(.{}, intake.loop, .{ ctx, cfg, &logLine })).detach();
     if (cfg.board.dispatch) {
         (try std.Thread.spawn(.{}, dispatch.loop, .{ ctx, cfg, &logLine })).detach();
         (try std.Thread.spawn(.{}, sweepLoop, .{ ctx, cfg })).detach();

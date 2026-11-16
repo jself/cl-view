@@ -811,6 +811,112 @@ It's `cl dictate`, which you can also run yourself or bind elsewhere:
 - Claude Code's own `/voice` is the other way: it records with SoX or
   `arecord` and transcribes on Anthropic's servers, not locally.
 
+## Intake
+
+Forward an email, or post in a Discord channel, and the operator turns it
+into a ticket or a todo, as if you had typed it into the board's Quick Ticket
+box. `cl web` checks every minute, and at once when it starts, so what
+arrived while the laptop was shut is picked up when it wakes.
+
+```
+intake.email.url = imaps://imap.gmail.com     # imaps://host[:port]
+intake.email.mailbox = INBOX                  # the default
+intake.email.user = me.cl.inbox@gmail.com
+intake.email.password_cmd = cat ~/.config/cl/imap-password
+intake.email.from = me@example.com, me@gmail.com   # whose mail is taken (@example.com: a whole domain)
+intake.email.dmarc = true                     # the default: see below
+intake.discord.token_cmd = cat ~/.config/cl/discord-token
+intake.discord.channel = 1300000000000000000
+intake.discord.users = 200000000000000000     # whose messages are taken (Discord user ids)
+intake.every = 60                             # seconds between checks (at least 15)
+```
+
+Set up either or both, then restart `cl web` (`cl web stop` when it runs in
+the background, `systemctl --user restart cl-web` as a service) and run
+`cl intake check`: it signs in, lists the newest few messages, and says what
+`cl web` would do with each, without taking any. `cl intake` says what it
+last did: when each source was checked, its error if any, and the last
+message taken. The server log (`~/.local/state/cl/web.log`) has a line
+for each message taken or left, and why.
+
+- **What's taken.** A message goes to the operator only when it comes from
+  someone on the list: an email whose From is on `intake.email.from`, a
+  Discord message whose author's id is on `intake.discord.users` (never a
+  bot's). An email must also have passed DMARC at the receiving server for
+  its From's own domain (its first `Authentication-Results` header says
+  `dmarc=pass` with `header.from=` that domain), so mail that only claims to
+  be from you is left. A From that isn't exactly one address (two of them,
+  a group, an address in a comment) counts as nobody's. Mail the mailbox's
+  own account sends itself (from finder@gmail.com to finder+cl@gmail.com)
+  passes no mail server, so it has no Received or Authentication-Results
+  header: from `intake.email.user`'s address with neither, it's taken. If your own forwards show as "not
+  DMARC-verified" in `cl intake check`, your address's domain publishes no
+  DMARC record: set `intake.email.dmarc = false`, and keep the mailbox's
+  address to yourself.
+- **Where it starts.** The first check of a mailbox or channel takes nothing:
+  it notes the newest message and takes what comes after. From then on each
+  source keeps a mark in the board database (the last IMAP UID or Discord
+  message id handled), so nothing is taken twice and nothing is missed
+  while `cl web` is down. A message the operator couldn't be given is tried
+  again on the next check. A `cl web` stopped in the moment between handing
+  one over and noting it would hand it over again when it starts.
+- **What the operator gets.** An email arrives as "Add a Ticket or Todo
+  (from an email I forwarded to cl): <subject>" with its From, Date,
+  Message-ID and text (the plain part, or the HTML one as text; attachments
+  by name; at most 12 KB; only a message's first 2 MB is fetched, so a big
+  attachment costs nothing). Write what you want above the forwarded message
+  ("todo for Friday", "ticket in web"): the operator follows that and treats
+  the forwarded message as material, never as instructions. With a Gmail
+  connector it links the ticket to the forward in your Sent mail. A Discord
+  message arrives as "Add a Ticket or Todo (from Discord): <text>" with its
+  link, and gets a ✅ reaction once the operator has it. A message from you
+  that arrives without its text means the bot's Message Content Intent is
+  off: the channel stops there with that error (in `cl intake` and the log)
+  and takes it once the intent is on.
+- **Secrets.** `password_cmd` and `token_cmd` are shell commands that print
+  the secret (`cat` a file only you can read, `pass show ...`, `secret-tool
+  lookup ...`). cl runs them on each check and hands the secret to curl on
+  its stdin, never on a command line. One still running after 30 seconds (a
+  keyring waiting to be unlocked) is stopped, and that check fails with
+  that error.
+- Only one server checks: the one holding `<board.dir>/intake.lock`, as with
+  push notifications. A second server on `CL_PORT` checks only while the
+  main one doesn't (an older build, or it isn't running).
+- It needs `curl` (with IMAP support, as distributions build it).
+
+### A mailbox to forward to
+
+Any IMAP mailbox works; a spare Gmail account is the quickest:
+
+1. Make the account, turn on 2-Step Verification, and make an app password
+   (Google Account, Security, App passwords). Save it to a file only you can
+   read: `install -m600 /dev/null ~/.config/cl/imap-password`, then put the
+   password in it.
+2. Set `intake.email.url = imaps://imap.gmail.com`, `intake.email.user` to
+   the account and `intake.email.password_cmd = cat ~/.config/cl/imap-password`.
+3. Forward to it from your own address, which goes on `intake.email.from`.
+   To skip forwarding by hand, a filter in your own mail can forward a label
+   there.
+
+### A Discord bot
+
+1. In the Discord Developer Portal, make a New Application, and under Bot
+   reset and copy its token into a file only you can read
+   (`~/.config/cl/discord-token`). On the same page turn on **Message
+   Content Intent**: without it the bot gets empty messages, and the
+   channel waits (see above) until it's on.
+2. Under OAuth2, URL Generator, tick the `bot` scope and the permissions
+   View Channels, Read Message History and Add Reactions; open the URL and
+   add the bot to a server of your own (a private one just for this is
+   simplest).
+3. In Discord's settings turn on Developer Mode (Advanced), then
+   right-click the channel for Copy Channel ID (`intake.discord.channel`)
+   and yourself for Copy User ID (`intake.discord.users`).
+
+The bot never needs to be online: cl reads the channel through Discord's
+REST API on each check, so messages posted while the laptop was off are
+read when it next checks.
+
 ## Board
 
 A ticket board on top of the sessions, stored in SQLite at

@@ -49,6 +49,8 @@ const usage =
     \\                            a todo of yours on the board (board.todo_project, else -p);
     \\                            prints its key. Short for cl ticket new <project> <title> --todo
     \\  cl project <command>      projects tickets belong to (cl project for the commands)
+    \\  cl intake [check]         forwarded email and Discord messages that become tickets
+    \\                            (intake.* in the config): what cl web last did, or look now
     \\
     \\options for launch:
     \\  -p, --profile <name>      profile from ~/.config/cl/config
@@ -114,6 +116,7 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, cmd, "ticket") or std.mem.eql(u8, cmd, "t")) return ticket_cli.ticketMain(ctx, cfg, argv[1..]);
         if (std.mem.eql(u8, cmd, "project")) return ticket_cli.projectMain(ctx, cfg, argv[1..]);
         if (std.mem.eql(u8, cmd, "todo")) return ticket_cli.todoMain(ctx, cfg, argv[1..]);
+        if (std.mem.eql(u8, cmd, "intake")) return @import("intake.zig").main(ctx, cfg, argv[1..]);
         if (std.mem.eql(u8, cmd, "help") or std.mem.eql(u8, cmd, "-h") or std.mem.eql(u8, cmd, "--help")) return out(usage);
     }
     const opts = parseLaunch(argv) catch {
@@ -459,4 +462,5 @@ test {
     std.testing.refAllDecls(@import("images.zig"));
     std.testing.refAllDecls(alerts);
     std.testing.refAllDecls(@import("push.zig"));
+    std.testing.refAllDecls(@import("intake.zig"));
 }

@@ -33,6 +33,17 @@
 //!   voice.model = haiku                 (the voice operator's model; the default)
 //!                                        (talking to the operator from the board: see voice.zig)
 //!
+//!   intake.email.url = imaps://imap.gmail.com   (forwarded mail becomes tickets: see intake.zig)
+//!   intake.email.mailbox = INBOX
+//!   intake.email.user = me.cl@gmail.com
+//!   intake.email.password_cmd = cat ~/.config/cl/imap-password
+//!   intake.email.from = me@example.com, @example.org
+//!   intake.email.dmarc = true            (only mail the receiving server says passed DMARC)
+//!   intake.discord.token_cmd = cat ~/.config/cl/discord-token
+//!   intake.discord.channel = 123456789012345678
+//!   intake.discord.users = 234567890123456789
+//!   intake.every = 60                    (seconds between checks)
+//!
 //! `default`, `operator` and dotted keys are settings; every other key is a
 //! profile. `operator` picks the operator's profile and falls back to `default`.
 //!
@@ -69,6 +80,7 @@ pub const Config = struct {
     gutter: Gutter = .{},
     tmux: Tmux = .{},
     voice: Voice = .{},
+    intake: Intake = .{},
 
     pub fn find(self: Config, name: []const u8) ?Profile {
         for (self.profiles) |p| if (std.mem.eql(u8, p.name, name)) return p;
@@ -165,6 +177,50 @@ pub const Voice = struct {
     model: []const u8 = "haiku",
 };
 
+/// Messages that become tickets: forwarded email, Discord (intake.zig).
+/// Secrets come from a command's output, so they stay out of this file.
+pub const Intake = struct {
+    /// Seconds between checks (at least 15).
+    every: u32 = 60,
+    email: Email = .{},
+    discord: Discord = .{},
+
+    pub const Email = struct {
+        /// imaps://host[:port], "" for no email.
+        url: []const u8 = "",
+        mailbox: []const u8 = "INBOX",
+        user: []const u8 = "",
+        /// A shell command that prints the password (an app password).
+        password_cmd: []const u8 = "",
+        /// Comma-separated senders taken: addresses, or @domain.
+        from: []const u8 = "",
+        /// Take only mail whose receiving server's Authentication-Results
+        /// says dmarc=pass, so a forged From isn't taken.
+        dmarc: bool = true,
+
+        pub fn on(self: Email) bool {
+            return self.url.len > 0;
+        }
+    };
+
+    pub const Discord = struct {
+        /// A shell command that prints the bot's token.
+        token_cmd: []const u8 = "",
+        /// The channel id the bot reads.
+        channel: []const u8 = "",
+        /// Comma-separated Discord user ids whose messages are taken.
+        users: []const u8 = "",
+
+        pub fn on(self: Discord) bool {
+            return self.channel.len > 0;
+        }
+    };
+};
+
+fn isFalse(val: []const u8) bool {
+    return std.mem.eql(u8, val, "false") or std.mem.eql(u8, val, "no") or std.mem.eql(u8, val, "off");
+}
+
 pub fn load(ctx: Ctx) !Config {
     var cfg = try loadFile(ctx);
     if (ctx.env.get("CL_PORT")) |v| if (v.len > 0) {
@@ -194,6 +250,7 @@ fn loadFile(ctx: Ctx) !Config {
     var gutter: Gutter = .{};
     var tmux: Tmux = .{};
     var voice: Voice = .{};
+    var intake: Intake = .{};
     var lines = std.mem.splitScalar(u8, data, '\n');
     while (lines.next()) |raw| {
         const line = std.mem.trim(u8, raw, " \t\r");
@@ -248,6 +305,26 @@ fn loadFile(ctx: Ctx) !Config {
         } else if (std.mem.eql(u8, key, "voice.tts_pitch")) {
             const pitch = std.fmt.parseFloat(f32, val) catch 1;
             voice.tts_pitch = std.math.clamp(pitch, 0.8, 1.25);
+        } else if (std.mem.eql(u8, key, "intake.every")) {
+            intake.every = @max(15, std.fmt.parseInt(u32, val, 10) catch intake.every);
+        } else if (std.mem.eql(u8, key, "intake.email.url")) {
+            intake.email.url = std.mem.trimEnd(u8, val, "/");
+        } else if (std.mem.eql(u8, key, "intake.email.mailbox")) {
+            if (val.len > 0) intake.email.mailbox = val;
+        } else if (std.mem.eql(u8, key, "intake.email.user")) {
+            intake.email.user = val;
+        } else if (std.mem.eql(u8, key, "intake.email.password_cmd")) {
+            intake.email.password_cmd = val;
+        } else if (std.mem.eql(u8, key, "intake.email.from")) {
+            intake.email.from = val;
+        } else if (std.mem.eql(u8, key, "intake.email.dmarc")) {
+            intake.email.dmarc = !isFalse(val);
+        } else if (std.mem.eql(u8, key, "intake.discord.token_cmd")) {
+            intake.discord.token_cmd = val;
+        } else if (std.mem.eql(u8, key, "intake.discord.channel")) {
+            intake.discord.channel = val;
+        } else if (std.mem.eql(u8, key, "intake.discord.users")) {
+            intake.discord.users = val;
         } else if (std.mem.indexOfScalar(u8, key, '.') != null) {
             continue; // unknown setting
         } else {
@@ -261,6 +338,7 @@ fn loadFile(ctx: Ctx) !Config {
         c.gutter = gutter;
         c.tmux = tmux;
         c.voice = voice;
+        c.intake = intake;
         c.operator_model = operator_model;
         c.review_model = review_model;
         return c;
@@ -282,6 +360,7 @@ fn loadFile(ctx: Ctx) !Config {
         .gutter = gutter,
         .tmux = tmux,
         .voice = voice,
+        .intake = intake,
     };
 }
 
