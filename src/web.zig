@@ -403,8 +403,10 @@ test noDelay {
     noDelay(accepted);
     var on: c_int = 0;
     var len: std.posix.socklen_t = @sizeOf(c_int);
-    try std.testing.expectEqual(@as(usize, 0), std.os.linux.getsockopt(accepted.socket.handle, std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY, std.mem.asBytes(&on), &len));
-    try std.testing.expectEqual(@as(c_int, 1), on);
+    // libc's, not std.os.linux's: the raw Linux syscall means nothing on macOS.
+    try std.testing.expectEqual(@as(c_int, 0), std.c.getsockopt(accepted.socket.handle, std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY, &on, &len));
+    // Nonzero, not 1: macOS reports the flag's own bit (TF_NODELAY, 4).
+    try std.testing.expect(on != 0);
 }
 
 // ---- relays ----
