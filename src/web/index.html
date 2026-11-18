@@ -220,7 +220,16 @@
   let ws = null;
   const enc = new TextEncoder();
 
+  // Keys typed before the server has said whether this is the terminal the
+  // screen shows ("resumed") or a fresh one ("new"): sent on "resumed",
+  // dropped on "new". Coming back to a kept page shows its screen at once,
+  // before it has connected again, so the first keys typed there came too
+  // early and were lost (CL-177). They must never reach a fresh chooser,
+  // where single letters are commands (d then y kills a session).
+  let typedEarly = "";
+  let greeted = false;
   function send(kind, text) {
+    if (kind === "0" && ws && !greeted) { typedEarly += text; return; }
     if (ws && ws.readyState === WebSocket.OPEN) ws.send(kind + text);
   }
   function sendSize() {
@@ -282,6 +291,7 @@
   // going back in history. The browser then shows the board as it was, from
   // its back/forward cache, instead of loading it again. Opened any other
   // way (a link, a new tab), the board is loaded as before.
+  let leaving = false;
   const fromBoard = (() => {
     try {
       if (history.state?.fromBoard) return true;
@@ -297,19 +307,55 @@
     if (!e.target.closest?.('a[href="/board"]')) return;
     e.preventDefault();
     // This page is next in history now: opening it again from the board
-    // goes forward to it (board.html's openTerm).
-    try { sessionStorage.setItem("cl-term-next", location.pathname + location.search); } catch {}
-    history.back();
+    // goes forward to it (board.html's termIsNext). Noted on this page's own
+    // history entry, which the board reads with the Navigation API: Firefox
+    // shows the board from its back/forward cache with the sessionStorage it
+    // had when it left, so a note made there now never reached it (CL-177).
+    // sessionStorage stays for browsers without the Navigation API.
+    // Pressed again while the connection closes: one step back, not two.
+    if (leaving) return;
+    leaving = true;
+    const here = location.pathname + location.search;
+    try { sessionStorage.setItem("cl-term-next", here); } catch {}
+    try { navigation.updateCurrentEntry({ state: { ...(navigation.currentEntry.getState() || {}), clTerm: here } }); } catch {}
+    // Nothing to go back to after all (the Navigation API knows): load the
+    // board. No timer: a slow back (the board not cached, a phone) would be
+    // cut off by a second navigation.
+    disconnectThen(() => {
+      if (window.navigation && navigation.canGoBack === false) location.href = "/board";
+      else history.back();
+    });
   });
   // Kept in the back/forward cache, this page keeps its screen but not its
   // connection (a page with an open WebSocket isn't kept): it lets go of the
   // terminal as an unloaded page does, and takes it up again when shown.
-  addEventListener("pagehide", () => {
+  // Firefox decides whether to keep the page before pagehide, so there
+  // going back closes the connection first and goes once it has closed
+  // (disconnectThen); a socket still open or closing made every return to
+  // this terminal load it afresh (CL-177). Chromium and WebKit keep a page
+  // whose socket closes in pagehide, so they go at once: waiting cost them
+  // ~6 ms here, and a round trip on a phone.
+  const closeFirst = /\bFirefox\//.test(navigator.userAgent);
+  function disconnectThen(then) {
     clearTimeout(retryTimer);
     clearTimeout(probeTimer);
-    if (ws) { ws.onclose = null; ws.close(); ws = null; }
-  });
+    const sock = ws;
+    ws = null;
+    if (!sock || sock.readyState === WebSocket.CLOSED || !closeFirst) {
+      if (sock) { sock.onclose = null; sock.close(); }
+      return then();
+    }
+    let gone = false;
+    const go = () => { if (!gone) { gone = true; then(); } };
+    sock.onclose = null;
+    sock.addEventListener("close", go);
+    sock.close();
+    // A server that doesn't answer the close mustn't hold the page.
+    setTimeout(go, 300);
+  }
+  addEventListener("pagehide", () => disconnectThen(() => {}));
   addEventListener("pageshow", (e) => {
+    leaving = false;
     try { sessionStorage.removeItem("cl-term-next"); sessionStorage.removeItem("cl-left-board"); } catch {}
     // (Unless coming back visible already did.)
     if (e.persisted && !ws && !overlay.classList.contains("show")) { retries = 0; connect(); }
@@ -323,6 +369,8 @@
     clearTimeout(retryTimer);
     overlay.classList.remove("show");
     if (ws) { ws.onclose = null; ws.close(); }
+    typedEarly = "";
+    greeted = false;
     const sock = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws?t=" + termId + (attach ? "&a=" + attach : ""));
     ws = sock;
     sock.binaryType = "arraybuffer";
@@ -336,7 +384,14 @@
       clearTimeout(probeTimer);
       // "new" or "resumed". A resumed terminal's server sends the modes its
       // programs set (tmux's mouse reporting) again, then a redraw.
-      if (typeof e.data === "string") { if (e.data === "new") term.reset(); return; }
+      if (typeof e.data === "string") {
+        if (e.data === "new") term.reset();
+        greeted = true;
+        const early = typedEarly;
+        typedEarly = "";
+        if (early && e.data === "resumed") send("0", early);
+        return;
+      }
       term.write(new Uint8Array(e.data));
     };
     sock.onclose = (e) => {

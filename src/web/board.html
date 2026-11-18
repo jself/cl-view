@@ -1366,11 +1366,23 @@ function openTerm(href) {
   location.href = href;
 }
 function termIsNext(href) {
-  let noted = false;
-  try { noted = !!href && sessionStorage.getItem("cl-term-next") === href; } catch {}
+  if (!href) return false;
   // The Navigation API says what's next, but not its URL here (the pages'
-  // referrer policy hides it): only that there is something.
-  if (noted && window.navigation?.entries && navigation.currentEntry) return !!navigation.entries()[navigation.currentEntry.index + 1];
+  // referrer policy hides it): only that there is something, and the state
+  // the terminal page put on its own entry as it went back (index.html):
+  // which terminal it is. Firefox shows this page from its back/forward
+  // cache with the sessionStorage it had when it left, without the note
+  // the terminal made since, so the entry's state comes first (CL-177).
+  const nav = window.navigation;
+  if (nav?.entries && nav.currentEntry) {
+    const next = nav.entries()[nav.currentEntry.index + 1];
+    if (!next) return false;
+    let term;
+    try { term = next.getState()?.clTerm; } catch {}
+    if (term) return term === href;
+  }
+  let noted = false;
+  try { noted = sessionStorage.getItem("cl-term-next") === href; } catch {}
   return noted;
 }
 async function openTicket(key, tab, focus) {

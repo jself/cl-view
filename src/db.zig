@@ -118,6 +118,14 @@ pub const Stmt = struct {
         _ = c.sqlite3_finalize(self.handle);
     }
 
+    /// Back to the start with no bindings, to run again with new ones
+    /// (`bindAll`). Cheaper than preparing the same SQL again, which parses
+    /// and plans it from scratch.
+    pub fn reset(self: Stmt) void {
+        _ = c.sqlite3_reset(self.handle);
+        _ = c.sqlite3_clear_bindings(self.handle);
+    }
+
     /// Bind each element of `args` to ?1, ?2, ... Strings bind as text,
     /// integers and bools as integers, null as NULL.
     pub fn bindAll(self: Stmt, args: anytype) Error!void {

@@ -552,8 +552,25 @@ pub fn open(ctx: Ctx, cfg: config.Config) !Db {
     const path = try std.fmt.bufPrintZ(&path_buf, "{s}/board.db", .{dir});
     const db = try Db.open(path);
     errdefer db.close();
-    try migrate(db);
+    try migrateOnce(db, path);
     return db;
+}
+
+/// The board this process last brought up to date: a hash of its path.
+var migrated: std.atomic.Value(u64) = .init(0);
+
+/// `migrate`, unless this process already did it for this board and the
+/// board is still at our version or later. `cl web` opens the board for every
+/// request and in every loop, and `migrate` checks ~50 columns one query
+/// at a time: about a tenth of what a board request cost (CL-177). Columns
+/// never go away once added, so once is enough; a board that was replaced
+/// (an older or empty file at the same path) has an older user_version and is
+/// migrated again (a newer build moving it on adds, never drops).
+fn migrateOnce(db: Db, path: []const u8) !void {
+    const h = std.hash.Wyhash.hash(0, path) | 1;
+    if (migrated.load(.acquire) == h and ((try db.int("PRAGMA user_version", .{})) orelse 0) >= version) return;
+    try migrate(db);
+    migrated.store(h, .release);
 }
 
 const version = 13;
@@ -1533,9 +1550,67 @@ fn readTicket(st: sqlite.Stmt, a: std.mem.Allocator) !Ticket {
     };
 }
 
-fn activeFlags(db: Db, a: std.mem.Allocator, id: i64) Error![]Flag {
-    var st = try db.query("SELECT kind, source, detail, at, hidden FROM flags WHERE ticket = ?1 AND cleared IS NULL ORDER BY at, id", .{id});
-    defer st.finalize();
+/// What getTicket and listTickets add to each ticket: its active flags,
+/// park, drift and blockers. Six statements, prepared once and run again for
+/// each ticket (`reset`). Preparing them afresh for every ticket was most of
+/// what GET /api/board cost, and the TUI board's refresh every second, once
+/// the board held a couple of hundred tickets: SQLite parsed and planned the
+/// same SQL over a thousand times per request (CL-177).
+const Extras = struct {
+    flags: sqlite.Stmt,
+    park: sqlite.Stmt,
+    drift: sqlite.Stmt,
+    deps: sqlite.Stmt,
+    parent: sqlite.Stmt,
+    order: sqlite.Stmt,
+
+    const sql = .{
+        .flags = "SELECT kind, source, detail, at, hidden FROM flags WHERE ticket = ?1 AND cleared IS NULL ORDER BY at, id",
+        .park = "SELECT reason, until_cmd, every, at, deadline, next, checked, result, pr, review FROM parks WHERE ticket = ?1",
+        // A Done ticket's result is history until the next pass prunes it.
+        .drift = "SELECT d.files, d.onto, d.at FROM drift d JOIN tickets t ON t.id = d.ticket WHERE d.ticket = ?1 AND d.files != '' AND t.stage != 'done'",
+        .deps = "SELECT b.id, b.key, b.title, b.stage FROM deps d JOIN tickets b ON b.id = d.blocker WHERE d.ticket = ?1 ORDER BY b.rank, b.id",
+        // The parent runs first: split-off work builds on it.
+        .parent = "SELECT p.id, p.key, p.title, p.stage FROM tickets t JOIN tickets p ON p.id = t.parent WHERE t.id = ?1 AND p.umbrella = 0 AND p.todo = 0",
+        .order =
+        \\SELECT s.id, s.key, s.title, s.stage, s.parallel FROM tickets t JOIN tickets s ON s.parent = t.parent
+        \\WHERE t.id = ?1 AND t.parallel = 0 AND s.id != t.id AND (s.rank < t.rank OR (s.rank = t.rank AND s.id < t.id))
+        \\ORDER BY s.rank DESC, s.id DESC
+        ,
+    };
+
+    fn prepare(db: Db) Error!Extras {
+        var e: Extras = undefined;
+        const fields = std.meta.fields(Extras);
+        inline for (fields, 0..) |f, i| {
+            @field(e, f.name) = db.prepare(@field(sql, f.name)) catch |err| {
+                inline for (fields[0..i]) |g| @field(e, g.name).finalize();
+                return err;
+            };
+        }
+        return e;
+    }
+
+    fn finalize(e: Extras) void {
+        inline for (std.meta.fields(Extras)) |f| @field(e, f.name).finalize();
+    }
+
+    fn fill(e: Extras, a: std.mem.Allocator, t: *Ticket) Error!void {
+        t.flags = try readFlags(e.flags, a, t.id);
+        t.park = try readPark(e.park, a, t.id);
+        t.drift = try readDrift(e.drift, a, t.id);
+        t.blocked_by = try readBlockers(e.deps, e.parent, e.order, a, t.id);
+    }
+};
+
+/// Run `st` (one of `Extras`) again for ticket `id`.
+fn rerun(st: sqlite.Stmt, id: i64) Error!void {
+    st.reset();
+    try st.bind(1, id);
+}
+
+fn readFlags(st: sqlite.Stmt, a: std.mem.Allocator, id: i64) Error![]Flag {
+    try rerun(st, id);
     var out: std.ArrayList(Flag) = .empty;
     while (try st.step()) try out.append(a, .{ .kind = try st.dupe(a, 0), .source = try st.dupe(a, 1), .detail = try st.dupe(a, 2), .at = st.int(3), .hidden = st.int(4) != 0 });
     return out.toOwnedSlice(a);
@@ -1547,10 +1622,9 @@ pub fn getTicket(db: Db, a: std.mem.Allocator, key: []const u8) Error!Ticket {
     defer st.finalize();
     if (!try st.step()) return error.NotFound;
     var t = try readTicket(st, a);
-    t.flags = try activeFlags(db, a, t.id);
-    t.park = try parkOf(db, a, t.id);
-    t.drift = try driftOf(db, a, t.id);
-    t.blocked_by = try blockers(db, a, t.id);
+    const extras = try Extras.prepare(db);
+    defer extras.finalize();
+    try extras.fill(a, &t);
     return t;
 }
 
@@ -1673,12 +1747,9 @@ pub fn listTickets(db: Db, a: std.mem.Allocator, f: Filter) Error![]Ticket {
         if (f.needs and try isWorking(db, t, f.busy)) continue;
         try out.append(a, t);
     }
-    for (out.items) |*t| {
-        t.flags = try activeFlags(db, a, t.id);
-        t.park = try parkOf(db, a, t.id);
-        t.drift = try driftOf(db, a, t.id);
-        t.blocked_by = try blockers(db, a, t.id);
-    }
+    const extras = try Extras.prepare(db);
+    defer extras.finalize();
+    for (out.items) |*t| try extras.fill(a, t);
     return out.toOwnedSlice(a);
 }
 
@@ -2093,16 +2164,25 @@ fn readDep(st: sqlite.Stmt, a: std.mem.Allocator, order: bool) !Dep {
 /// when that has work of its own (isn't an umbrella), then the sub-tickets
 /// before it.
 pub fn blockers(db: Db, a: std.mem.Allocator, id: i64) Error![]Dep {
+    const deps = try db.prepare(Extras.sql.deps);
+    defer deps.finalize();
+    const parent = try db.prepare(Extras.sql.parent);
+    defer parent.finalize();
+    const order = try db.prepare(Extras.sql.order);
+    defer order.finalize();
+    return readBlockers(deps, parent, order, a, id);
+}
+
+fn readBlockers(deps: sqlite.Stmt, parent: sqlite.Stmt, order: sqlite.Stmt, a: std.mem.Allocator, id: i64) Error![]Dep {
     var out: std.ArrayList(Dep) = .empty;
     {
-        var st = try db.query("SELECT b.id, b.key, b.title, b.stage FROM deps d JOIN tickets b ON b.id = d.blocker WHERE d.ticket = ?1 ORDER BY b.rank, b.id", .{id});
-        defer st.finalize();
+        const st = deps;
+        try rerun(st, id);
         while (try st.step()) try out.append(a, try readDep(st, a, false));
     }
     {
-        // The parent runs first: split-off work builds on it.
-        var st = try db.query("SELECT p.id, p.key, p.title, p.stage FROM tickets t JOIN tickets p ON p.id = t.parent WHERE t.id = ?1 AND p.umbrella = 0 AND p.todo = 0", .{id});
-        defer st.finalize();
+        const st = parent;
+        try rerun(st, id);
         if (try st.step()) {
             var d = try readDep(st, a, false);
             d.parent = true;
@@ -2112,12 +2192,8 @@ pub fn blockers(db: Db, a: std.mem.Allocator, id: i64) Error![]Dep {
         }
     }
     const linked = out.items.len;
-    var st = try db.query(
-        \\SELECT s.id, s.key, s.title, s.stage, s.parallel FROM tickets t JOIN tickets s ON s.parent = t.parent
-        \\WHERE t.id = ?1 AND t.parallel = 0 AND s.id != t.id AND (s.rank < t.rank OR (s.rank = t.rank AND s.id < t.id))
-        \\ORDER BY s.rank DESC, s.id DESC
-    , .{id});
-    defer st.finalize();
+    const st = order;
+    try rerun(st, id);
     while (try st.step()) {
         const d = try readDep(st, a, true);
         // Linked as well: once is enough.
@@ -2896,10 +2972,8 @@ pub fn setTarget(db: Db, id: i64, target: []const u8) Error!void {
 // ---- drift ----
 
 /// Its last test rebase when that found conflicts (see `Drift`).
-fn driftOf(db: Db, a: std.mem.Allocator, id: i64) Error!?Drift {
-    // A Done ticket's result is history until the next pass prunes it.
-    var st = try db.query("SELECT d.files, d.onto, d.at FROM drift d JOIN tickets t ON t.id = d.ticket WHERE d.ticket = ?1 AND d.files != '' AND t.stage != 'done'", .{id});
-    defer st.finalize();
+fn readDrift(st: sqlite.Stmt, a: std.mem.Allocator, id: i64) Error!?Drift {
+    try rerun(st, id);
     if (!try st.step()) return null;
     return .{ .files = try st.dupe(a, 0), .onto = try st.dupe(a, 1), .at = st.int(2) };
 }
@@ -2935,8 +3009,13 @@ pub fn pruneDrift(db: Db) Error!void {
 // ---- parks ----
 
 fn parkOf(db: Db, a: std.mem.Allocator, id: i64) Error!?Park {
-    var st = try db.query("SELECT reason, until_cmd, every, at, deadline, next, checked, result, pr, review FROM parks WHERE ticket = ?1", .{id});
+    const st = try db.prepare(Extras.sql.park);
     defer st.finalize();
+    return readPark(st, a, id);
+}
+
+fn readPark(st: sqlite.Stmt, a: std.mem.Allocator, id: i64) Error!?Park {
+    try rerun(st, id);
     if (!try st.step()) return null;
     return .{
         .reason = try st.dupe(a, 0),
@@ -3716,6 +3795,69 @@ test "dependencies: links, cycles, a removed blocker, and shelving a parent" {
     try move(ctx, db, a, kp, .queued);
     try testing.expectEqual(Stage.backlog, (try getTicket(db, a, s1)).stage);
     try testing.expect(hold(try getTicket(db, a, kp)) == null);
+}
+
+test "listTickets reuses its per-ticket statements: every ticket gets its own flags, park, drift and blockers" {
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = Ctx.testEnv(), .home = "/tmp" };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try Db.open(":memory:");
+    defer db.close();
+    try migrate(db);
+    try addProject(db, .{ .name = "qa", .dir = "/x/qa" });
+    // Something of each kind on some tickets and not on their neighbors, so
+    // a statement run again with a stale binding or row would show.
+    const plain = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Plain" });
+    const asks = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Asks" });
+    try setFlag(ctx, db, a, asks, "question", "claude", "which one?");
+    try setFlag(ctx, db, a, asks, "input", "claude", "");
+    const parked = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Parked" });
+    try setPark(ctx, db, (try getTicket(db, a, parked)).id, .{ .reason = "waiting on CI", .at = 5 });
+    const drifting = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Drifting" });
+    try setDrift(db, (try getTicket(db, a, drifting)).id, "k", "src/a.zig", "master", 7);
+    const linked = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Linked" });
+    _ = try addBlocker(ctx, db, a, linked, asks);
+    const parent = try createTicket(ctx, db, a, .{ .project = "qa", .title = "Parent" });
+    _ = try createTicket(ctx, db, a, .{ .parent = parent, .title = "S1" });
+    _ = try createTicket(ctx, db, a, .{ .parent = parent, .title = "S2" });
+    _ = try createTicket(ctx, db, a, .{ .parent = parent, .title = "S3" });
+    _ = plain;
+
+    const all = try listTickets(db, a, .{ .done = true });
+    try testing.expectEqual(@as(usize, 9), all.len);
+    var seen: usize = 0;
+    for (all) |t| {
+        // getTicket prepares its own statements and runs each once.
+        const one = try getTicket(db, a, t.key);
+        try testing.expectEqualStrings(try std.fmt.allocPrint(a, "{f}", .{std.json.fmt(one, .{})}), try std.fmt.allocPrint(a, "{f}", .{std.json.fmt(t, .{})}));
+        seen += t.flags.len + t.blocked_by.len + @intFromBool(t.park != null) + @intFromBool(t.drift != null);
+    }
+    // asks: 2 flags; parked; drifting; linked: asks; S1: Parent; S2: Parent, S1; S3: Parent, S2.
+    try testing.expectEqual(@as(usize, 2 + 1 + 1 + 1 + 1 + 2 + 2), seen);
+}
+
+test "open migrates a board once per process, and again when the file at that path was replaced" {
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = Ctx.testEnv(), .home = "/tmp" };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = dir_buf[0..try tmp.dir.realPath(ctx.io, &dir_buf)];
+    var cfg: config.Config = .{ .profiles = &.{}, .default = "", .operator = "" };
+    cfg.board.dir = dir;
+
+    const first = try open(ctx, cfg);
+    first.close();
+    // Already migrated here: this open only reads user_version.
+    const again = try open(ctx, cfg);
+    try testing.expectEqual(@as(?i64, version), try again.int("PRAGMA user_version", .{}));
+    again.close();
+    // A new, empty board at the same path is migrated, not taken as done.
+    try tmp.dir.deleteFile(ctx.io, "board.db");
+    const fresh = try open(ctx, cfg);
+    defer fresh.close();
+    try testing.expectEqual(@as(?i64, version), try fresh.int("PRAGMA user_version", .{}));
+    try testing.expect((try fresh.int("SELECT 1 FROM pragma_table_info('tickets') WHERE name = 'priority'", .{})) != null);
 }
 
 test "an umbrella is picked up when a sub-ticket starts and closes when they are all done" {

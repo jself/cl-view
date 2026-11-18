@@ -7,6 +7,8 @@
 # in a new tab load as before, and the pages answer 304 when unchanged.
 # Prints how long each switch took.
 #
+# Then the reopen and back checks again in headless Firefox, when installed.
+#
 # Run from the checkout after `zig build`; needs chromium and node (22+).
 # Every tmux call names the sandbox's socket (-S); nothing touches the real
 # server. PORT (default 8439) must not be web.listen's.
@@ -15,6 +17,7 @@ cd "$(dirname "$0")/.."
 CL="$PWD/zig-out/bin/cl"
 PORT=${PORT:-8439}
 CDP=${CDP:-9339}
+BIDI=${BIDI:-9340}
 T=$(mktemp -d /tmp/cl-switch-test.XXXX)
 S=$T/s
 export HOME=$T XDG_RUNTIME_DIR=$T CL_TMUX_SOCKET=$S
@@ -22,6 +25,7 @@ t() { tmux -S "$S" "$@"; }
 cleanup() {
   [ -n "${WEB:-}" ] && kill "$WEB" 2>/dev/null
   [ -n "${CHROME:-}" ] && kill "$CHROME" 2>/dev/null
+  [ -n "${FIREFOX:-}" ] && kill "$FIREFOX" 2>/dev/null
   t kill-server 2>/dev/null
   sleep 0.3
   \rm -rf "$T"
@@ -50,5 +54,15 @@ done
 
 node .claude/test-switch.mjs "$PORT" "$CDP" "$S"
 status=$?
+# The same in Firefox, the board's other browser, when it's installed: its
+# back/forward cache keeps pages on other terms (CL-177).
+if command -v firefox >/dev/null; then
+  kill "$CHROME" 2>/dev/null; CHROME=
+  mkdir -p "$T/firefox"
+  firefox --headless --no-remote --profile "$T/firefox" --remote-debugging-port="$BIDI" about:blank >"$T/firefox.log" 2>&1 &
+  FIREFOX=$!
+  for _ in $(seq 60); do grep -q "WebDriver BiDi listening" "$T/firefox.log" && break; sleep 0.25; done
+  node .claude/test-switch-firefox.mjs "$PORT" "$BIDI" "$S" || status=1
+fi
 [ $status -ne 0 ] && { echo "--- web log"; tail -20 "$T/web.log"; }
 exit $status

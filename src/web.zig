@@ -204,6 +204,12 @@ fn sweepTests(ctx: Ctx, cfg: config.Config) !void {
         const cwd = linkOf(ctx, std.fmt.bufPrint(&path_buf, "/proc/{d}/cwd", .{srv.pid}) catch continue, &cwd_buf);
         if (!leftOver(root, wts.items, exe, cwd)) continue;
         logf("sweep: stopping test server pid {d} (port {d}), left from a finished ticket in {s}", .{ srv.pid, srv.port, if (under(root, exe)) exe else cwd });
+        // Its loop would start it again in 10 s, to be stopped again a
+        // minute later, for as long as the tmux server lives (CL-177).
+        if (srv.looped) if (tmux.findRole(ctx, a, try std.fmt.allocPrint(a, "{s}:{d}", .{ tmux.web_role, srv.port })) catch null) |s| {
+            tmux.kill(ctx, s.tmux_name) catch {};
+            logf("sweep: closed {s}, the background loop that restarted it", .{s.tmux_name});
+        };
         try pids.append(a, srv.pid);
     }
     stopAll(ctx, pids.items);
@@ -257,7 +263,9 @@ fn stopAll(ctx: Ctx, pids: []const std.posix.pid_t) void {
     }
 }
 
-const TestServer = struct { pid: std.posix.pid_t, port: u16 };
+/// `looped`: it runs in the background loop `cl web start` makes for its
+/// port (see `inLoop`), which starts it again 10 s after it stops.
+const TestServer = struct { pid: std.posix.pid_t, port: u16, looped: bool = false };
 
 /// Every running second `cl web` but this process (see `testServerPort`).
 fn testServers(ctx: Ctx, arena: std.mem.Allocator) []TestServer {
@@ -275,7 +283,7 @@ fn testServers(ctx: Ctx, arena: std.mem.Allocator) []TestServer {
         if (std.mem.indexOf(u8, cmd, "\x00web\x00") == null) continue;
         const env = readProc(ctx, proc, std.fmt.bufPrint(&path_buf, "{d}/environ", .{pid}) catch continue, arena) catch continue;
         const port = testServerPort(cmd, env) orelse continue;
-        out.append(arena, .{ .pid = pid, .port = port }) catch break;
+        out.append(arena, .{ .pid = pid, .port = port, .looped = inLoop(env, port) }) catch break;
     }
     return out.items;
 }
@@ -315,6 +323,25 @@ fn testServerPort(cmdline: []const u8, environ: []const u8) ?u16 {
         if (std.mem.startsWith(u8, v, "CL_TEST_WEB=")) test_web = true;
     }
     return if (test_web) 0 else null;
+}
+
+/// Does this process (its NUL-separated /proc environ) run in the
+/// background loop for `port`: the tmux session `cl web start` names
+/// web-<port> (CL_SESSION, set by tmux.newSession)?
+fn inLoop(environ: []const u8, port: u16) bool {
+    var buf: [32]u8 = undefined;
+    const want = std.fmt.bufPrint(&buf, "CL_SESSION=web-{d}", .{port}) catch return false;
+    var vars = std.mem.splitScalar(u8, environ, 0);
+    while (vars.next()) |v| if (std.mem.eql(u8, v, want)) return true;
+    return false;
+}
+
+test inLoop {
+    try std.testing.expect(inLoop("HOME=/h\x00CL_SESSION=web-8422\x00", 8422));
+    try std.testing.expect(!inLoop("HOME=/h\x00CL_SESSION=web-8422\x00", 8423));
+    // Started by hand in a ticket's session, or the main server's loop.
+    try std.testing.expect(!inLoop("CL_SESSION=cl-175\x00CL_PORT=8422\x00", 8422));
+    try std.testing.expect(!inLoop("CL_SESSION=web\x00", 8422));
 }
 
 test "testServerPort" {
@@ -1435,8 +1462,27 @@ fn serveTerminal(state: *State, req: *std.http.Server.Request, key: []const u8) 
     t.pty.resize(cols, rows);
     tmux.runQuiet(ctx, &.{ "refresh-client", "-t", tty }) catch t.pty.write("\x0c");
 
+    // Whether the page's close was answered with it detached already.
+    var let_go = false;
     while (true) {
-        const msg = ws.readSmallMessage() catch break;
+        const msg = ws.readSmallMessage() catch |err| {
+            // The page let go (going back to the board): answer its close at
+            // once, not after the tmux call below. The page waits for the
+            // answer before it goes, so Firefox can keep it in its
+            // back/forward cache (index.html, disconnectThen; CL-177).
+            // Detached in the same breath, so no output follows the answer.
+            if (err == error.ConnectionClose) {
+                t.mutex.lockUncancelable(ctx.io);
+                defer t.mutex.unlock(ctx.io);
+                if (t.ws == &ws) {
+                    t.ws = null;
+                    t.detached_at = ctx.nowSeconds();
+                    let_go = true;
+                }
+                ws.writeMessage("", .connection_close) catch {};
+            }
+            break;
+        };
         if (msg.data.len == 0) continue;
         t.mutex.lockUncancelable(ctx.io);
         const current = t.ws == &ws;
@@ -1461,8 +1507,8 @@ fn serveTerminal(state: *State, req: *std.http.Server.Request, key: []const u8) 
         }
     }
     t.mutex.lockUncancelable(ctx.io);
-    const was_current = t.ws == &ws;
-    if (was_current) {
+    const was_current = let_go or t.ws == &ws;
+    if (t.ws == &ws) {
         t.ws = null;
         t.detached_at = ctx.nowSeconds();
     }
