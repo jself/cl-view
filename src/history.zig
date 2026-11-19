@@ -16,6 +16,11 @@ pub const Entry = struct {
     /// Claude's session id, "" when unknown (resume then falls back to --continue).
     session_id: []const u8 = "",
     created: i64 = 0,
+    /// A project session's project (tmux.Session.project), so resuming it
+    /// tags it again; "" for other sessions and lines from before it.
+    project: []const u8 = "",
+    /// A project session's --model ("" for the profile's), to resume it with.
+    model: []const u8 = "",
 };
 
 /// A closed session that can be resumed.
@@ -59,9 +64,10 @@ pub fn load(ctx: Ctx, arena: std.mem.Allocator) ![]Entry {
     var lines = std.mem.splitScalar(u8, data, '\n');
     while (lines.next()) |line| {
         if (line.len == 0) continue;
-        const e = std.json.parseFromSliceLeaky(Entry, arena, line, .{ .ignore_unknown_fields = true }) catch continue;
+        var e = std.json.parseFromSliceLeaky(Entry, arena, line, .{ .ignore_unknown_fields = true }) catch continue;
         const gop = try index.getOrPut(arena, e.tmux);
         if (gop.found_existing) {
+            e = merged(entries.items[gop.value_ptr.*], e);
             entries.items[gop.value_ptr.*] = e;
         } else {
             gop.value_ptr.* = entries.items.len;
@@ -69,6 +75,24 @@ pub fn load(ctx: Ctx, arena: std.mem.Allocator) ![]Entry {
         }
     }
     return entries.items;
+}
+
+/// A later line for the same tmux name, keeping what only launch knew (a
+/// project session's model) when that line (from `sync`) doesn't say.
+fn merged(old: Entry, new: Entry) Entry {
+    var e = new;
+    if (e.project.len == 0) e.project = old.project;
+    if (e.model.len == 0 and std.mem.eql(u8, e.project, old.project)) e.model = old.model;
+    return e;
+}
+
+test merged {
+    const launched: Entry = .{ .tmux = "cl_srd_1", .name = "srd", .dir = "/x", .profile = "w", .project = "srd", .model = "haiku" };
+    const synced: Entry = .{ .tmux = "cl_srd_1", .name = "srd", .dir = "/x", .profile = "w", .session_id = "abc" };
+    const m = merged(launched, synced);
+    try std.testing.expectEqualStrings("srd", m.project);
+    try std.testing.expectEqualStrings("haiku", m.model);
+    try std.testing.expectEqualStrings("abc", m.session_id);
 }
 
 /// Record live sessions whose Claude session id is new to the history: ones
@@ -79,7 +103,7 @@ pub fn sync(ctx: Ctx, gpa: std.mem.Allocator, known: *std.StringHashMapUnmanaged
         const info = statuses.get(s.tmux_name) orelse continue;
         if (info.session_id.len == 0) continue;
         if (known.get(s.tmux_name)) |sid| if (std.mem.eql(u8, sid, info.session_id)) continue;
-        try record(ctx, .{ .tmux = s.tmux_name, .name = s.name, .dir = s.dir, .profile = s.profile, .session_id = info.session_id, .created = s.created });
+        try record(ctx, .{ .tmux = s.tmux_name, .name = s.name, .dir = s.dir, .profile = s.profile, .session_id = info.session_id, .created = s.created, .project = s.project });
         try remember(gpa, known, s.tmux_name, info.session_id);
     }
 }
@@ -157,4 +181,16 @@ pub fn closed(ctx: Ctx, arena: std.mem.Allocator, cfg: config.Config, live: []co
         }
     }.gt);
     return out.items;
+}
+
+test "an entry keeps a project session's project, and a line from before it reads as none" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const line = try std.fmt.allocPrint(a, "{f}", .{std.json.fmt(Entry{ .tmux = "cl_srd_1", .name = "srd", .dir = "/x/srd", .profile = "work", .project = "srd" }, .{})});
+    const back = try std.json.parseFromSliceLeaky(Entry, a, line, .{ .ignore_unknown_fields = true });
+    try std.testing.expectEqualStrings("srd", back.project);
+    const old = try std.json.parseFromSliceLeaky(Entry, a, "{\"tmux\":\"cl_x_1\",\"name\":\"x\",\"dir\":\"/x\",\"profile\":\"work\",\"session_id\":\"\",\"created\":5}", .{ .ignore_unknown_fields = true });
+    try std.testing.expectEqualStrings("", old.project);
+    try std.testing.expectEqual(@as(i64, 5), old.created);
 }

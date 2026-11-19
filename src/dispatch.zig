@@ -45,7 +45,7 @@ threadlocal var why_len: usize = 0;
 
 /// Record why the session didn't start (from `err`, what tmux or launch
 /// failed with) and return SessionFailed.
-fn sessionFailed(err: anyerror, dir: []const u8) error{SessionFailed} {
+pub fn sessionFailed(err: anyerror, dir: []const u8) error{SessionFailed} {
     const text = switch (err) {
         error.TmuxFailed => std.fmt.bufPrint(&why_buf, "tmux: {s}", .{tmux.lastError()}),
         error.NoSuchDir => std.fmt.bufPrint(&why_buf, "no such directory: {s}", .{dir}),
@@ -569,11 +569,13 @@ fn endPlanning(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator,
 
 /// The project's session in the cl list: a live session in its directory,
 /// preferably the one named after it, else the oldest. Not one of `skip`
-/// (a todo's: `todoSessions`).
+/// (a todo's: `todoSessions`), nor a project session (`project_session`):
+/// those are the human's own, told to leave the checkout alone.
 fn homeSession(view: View, p: board.Project, skip: []const []const u8) ?tmux.Session {
     var best: ?tmux.Session = null;
     sessions: for (view.sessions) |s| {
         if (!std.mem.eql(u8, s.dir, p.dir)) continue;
+        if (s.project.len > 0) continue;
         for (skip) |k| if (std.mem.eql(u8, k, s.tmux_name)) continue :sessions;
         if (std.mem.eql(u8, s.name, p.name) or std.mem.eql(u8, s.name, std.fs.path.basename(p.dir))) return s;
         if (best == null or s.created < best.?.created) best = s;
@@ -1855,6 +1857,13 @@ test "queue tickets run one at a time in the project's session" {
     const view: View = .{ .sessions = &sessions, .statuses = .empty };
     try std.testing.expectEqualStrings("cl_qa-tool_3", try queueTarget(db, a, t2, view, p));
     try std.testing.expectEqualStrings("cl_qa-1_2", (homeSession(.{ .sessions = sessions[0..2], .statuses = .empty }, p, &.{})).?.tmux_name);
+
+    // A project session is never the target, even named after the project
+    // and the oldest one there.
+    var with_ps = [_]tmux.Session{ mk("cl_qa_0", "qa", "/x/qa-tool", 0), mk("cl_qa-1_2", "qa-1", "/x/qa-tool", 2) };
+    with_ps[0].project = "qa";
+    try std.testing.expectEqualStrings("cl_qa-1_2", (homeSession(.{ .sessions = &with_ps, .statuses = .empty }, p, &.{})).?.tmux_name);
+    try std.testing.expect(homeSession(.{ .sessions = with_ps[0..1], .statuses = .empty }, p, &.{}) == null);
 
     // The first one is being tested in some session: the second waits.
     try std.testing.expect(!try projectBusy(db, a, view, t2));

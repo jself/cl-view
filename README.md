@@ -390,12 +390,14 @@ web.font_size = 16              # text size of the board and terminal pages, in 
   or title, or a command; Tab on a ticket lists what you can do with it
   (open a tab, start, approve, move, park, kill...). / searches, h/j/k/l
   and the arrows move between cards (g/G: top and bottom of the column) and
-  Enter opens one, Q makes a quick ticket and N a new one. Single keys don't
+  Enter opens one, Q makes a quick ticket and N a new one, and A asks in a
+  project (a project session, see Project sessions). Single keys don't
   fire in a text box: Esc leaves the box, keeping what you typed, and the
   next Esc closes its dialog. Of these keys, only S, Ctrl+K and ? work
   with a dialog open; the dialogs have keys of their own (below).
 - In the New ticket dialog, Ctrl+Enter (Cmd+Enter on a Mac) creates the
-  ticket from any field, the description box included.
+  ticket from any field, the description box included; in Ask, it starts the
+  session.
 - In a ticket's popup, T opens its session's terminal, like Open shell (or a
   todo's Open terminal); with no session running, it says so instead.
 - A terminal opened from the board goes back to it (✕, Ctrl-Q or Alt-Q)
@@ -931,6 +933,7 @@ board.dispatch = true            # cl web starts queued tickets
 board.trust_projects = true      # say yes to Claude's folder-trust dialog in project folders and worktrees
 board.todo_project = me          # where `cl todo` puts todos (see Todos)
 board.morning = 08:00            # when a todo's date with no time comes up (see Due dates and reminders)
+board.session_model = sonnet     # a project session's Default model (see Project sessions); default: the profile's
 ```
 
 Every ticket belongs to a project, which gives it a key prefix:
@@ -1492,6 +1495,46 @@ each, overdue first: what it says, its title and project, and Done, Snooze
 (in an hour, tomorrow morning, Monday, in a week, or a day and time you
 pick), Open and Hide. Today folds on its own (remembered in the browser). In
 `cl board` they're the last rows of Needs you, with `m d` to move one to Done.
+
+### Project sessions
+
+Sometimes you want Claude in a project without a ticket: to ask where
+something is parsed, to run the project's tool (an srd capture, the tests),
+or for a longer talk that isn't a piece of work. A project session is that:
+a Claude session in the project's own folder, started from the board, that
+is never a ticket. It has no row on the board, no stages and nothing to
+finish, and it never lands in Needs You.
+
+```
+cl project session srd "where does the capture get its timeout?"   # prints its tmux name
+cl project session srd --model haiku                               # no question: it waits for you
+```
+
+- On the board, Ask in the header (or `a`, or Ctrl+K's "Ask in a project…")
+  picks the project (the project filter's, else the one you used last), an
+  optional question that goes in as its first message, and a model. You land
+  in its terminal.
+- Each live one is a chip above Needs You, labeled with the project's key
+  prefix (`SD`, then `SD 2` for a second one, oldest first). Its dot pulses
+  while Claude works and is green when it's idle; when it asks a question or
+  for a permission, the chip turns amber, and that's all: no Needs You card.
+  (`cl alert` from inside one still raises an alert, as from any session.)
+  Hidden projects' chips go with their tickets, and so does a session hidden
+  with `cl hide`. Ctrl+K lists them too ("Open SD session").
+- Click a chip to open its terminal. Back leaves it running, to come back to.
+- It ends when you say so: × on the chip (after a confirm), or `/exit` in
+  Claude. Nothing ends it for being idle. An ended one is in the chooser's
+  `R` list, and resuming it there brings its chip back.
+- Its model is the project's profile's, or `board.session_model` when that
+  is set; the board's Model list (Default, sonnet, haiku, opus) or `--model`
+  picks another for one session.
+- It is told to leave the checkout alone: no edits to tracked files and no
+  jj or git commands that change anything, because the folder is shared with
+  the project's queue tickets. Running commands is fine. For a change, it
+  offers to make a ticket (`cl ticket new <project> ...`). The dispatcher
+  never types a queue ticket into it, and the board's Queue session lists
+  leave it out.
+- In the chooser it is a session like any other.
 
 ### What needs you
 

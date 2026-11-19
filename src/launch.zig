@@ -17,6 +17,11 @@ pub const Options = struct {
     detach: bool = false,
     /// See tmux.NewOptions.role.
     role: []const u8 = "",
+    /// See tmux.NewOptions.project: a project session's project.
+    project: []const u8 = "",
+    /// A project session's --model, recorded in history so resuming it
+    /// starts it again (the caller puts --model in `extra`).
+    model: []const u8 = "",
     /// Set to true when --resume/--continue had no transcript to resume, so a
     /// fresh session was started instead.
     started_fresh: ?*bool = null,
@@ -138,12 +143,13 @@ pub fn create(ctx: Ctx, cfg: config.Config, o: Options) ![]const u8 {
         .profile = profile.name,
         .config_dir = profile.config_dir,
         .role = o.role,
+        .project = o.project,
         .command = cmd.items,
         .env = o.env,
     });
 
     if (o.role.len == 0) {
-        history.record(ctx, .{ .tmux = tmux_name, .name = name, .dir = dir, .profile = profile.name, .session_id = session_id, .created = ctx.nowSeconds() }) catch {};
+        history.record(ctx, .{ .tmux = tmux_name, .name = name, .dir = dir, .profile = profile.name, .session_id = session_id, .created = ctx.nowSeconds(), .project = o.project, .model = o.model }) catch {};
     }
 
     if (o.message) |m| {

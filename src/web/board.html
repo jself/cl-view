@@ -84,6 +84,21 @@
   textarea { width: 100%; resize: vertical; }
   #search { min-width: 0; flex: 0 1 calc(280 * var(--u)); margin-left: auto; }
 
+  /* Project sessions: a chip per live one, above Needs you (project_session.zig). */
+  #psStrip { display: flex; gap: calc(8 * var(--u)); overflow-x: auto; margin: calc(12 * var(--u)) calc(16 * var(--u)) 0; scrollbar-width: thin; }
+  #psStrip[hidden] { display: none; }
+  .pschip { flex: none; display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 999px; background: var(--card); }
+  .pschip a { display: inline-flex; align-items: center; gap: calc(7 * var(--u)); min-height: calc(32 * var(--u)); padding: 0 calc(4 * var(--u)) 0 calc(12 * var(--u));
+              color: var(--fg); text-decoration: none; font: 500 calc(12.5 * var(--u)) var(--mono); white-space: nowrap; border-radius: 999px 0 0 999px; }
+  .pschip a:hover, .pschip a:focus-visible { color: #fff; } .pschip:hover { border-color: #3a3c42; }
+  .pschip .dot { --sc: #8b8e94; }
+  .pschip.ps-busy .dot { --sc: var(--st-running); animation: busy-pulse .8s ease-in-out infinite alternate; }
+  .pschip.ps-idle .dot { --sc: #4ade80; }
+  .pschip.ps-blocked { border-color: var(--input); background: var(--input-bg); } .pschip.ps-blocked .dot { --sc: var(--input); }
+  .pschip .psx { min-width: calc(30 * var(--u)); min-height: calc(32 * var(--u)); border: 0; background: transparent; color: var(--muted); cursor: pointer;
+                 font-size: calc(16 * var(--u)); line-height: 1; border-radius: 0 999px 999px 0; }
+  .pschip .psx:hover, .pschip .psx:focus-visible { color: #fff; }
+  @media (prefers-reduced-motion: reduce) { .pschip.ps-busy .dot { animation: none; } }
   #needs { margin: calc(12 * var(--u)) calc(16 * var(--u)) 0; border: 1px solid #3a2f1a; background: #17150f; border-radius: calc(14 * var(--u)); }
   #needs > .nhd { display: flex; align-items: center; }
   #needsToggle { flex: 1; display: flex; align-items: center; gap: calc(10 * var(--u)); width: 100%; min-height: calc(46 * var(--u)); padding: 0 calc(14 * var(--u)); border: 0;
@@ -491,7 +506,7 @@
     header .brand { flex-direction: column; align-items: flex-start; gap: calc(2 * var(--u)); }
     #summary { max-width: 100%; font-size: calc(12 * var(--u)); }
     .vtabs button { width: calc(38 * var(--u)); }
-    #needs { margin: calc(10 * var(--u)) calc(12 * var(--u)) 0; } #needs .sum#needsSum { display: none; }
+    #needs, #psStrip { margin: calc(10 * var(--u)) calc(12 * var(--u)) 0; } #needs .sum#needsSum { display: none; }
     .cols { grid-auto-columns: 86vw; }
     .lanes { --lane: calc(104 * var(--u)); --stage: calc(100vw - var(--lane) - calc(48 * var(--u))); }
     dialog { width: 100vw; max-width: 100vw; height: 100dvh; max-height: 100dvh; border-radius: 0; margin: 0; }
@@ -546,6 +561,7 @@
   <a class="btn" href="/">Terminal</a>
   <button type="button" class="btn" id="micBtn" hidden title="Talk to the operator: click, speak, click again (or hold V); it answers out loud" aria-label="Talk to the operator"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5.5" y="1.5" width="5" height="8.5" rx="2.5"/><path d="M3 7.5a5 5 0 0 0 10 0M8 12.5v2"/></svg></button>
   <a class="btn" id="chatBtn" href="/?attach=operator" title="Talk to the operator: it can make tickets and check on sessions (O)">Chat</a>
+  <button type="button" class="btn" id="askBtn" title="Ask Claude in a project: a quick session in its folder, not a ticket (A)"><span>Ask</span></button>
   <button type="button" class="btn" id="quickBtn" title="Tell the operator what to add; it makes the ticket"><span>Quick<span class="long"> ticket</span></span></button>
   <button type="button" class="btn primary" id="newBtn" title="New ticket"><span>New<span class="long"> ticket</span></span></button>
   </div>
@@ -554,6 +570,8 @@
 <div id="pauseBar" role="status" hidden></div>
 <div id="offBar" role="status" hidden>Can't reach cl web (it restarts after a merge); trying again…</div>
 <div id="reloadBar" role="status" hidden><span>cl was updated. It reloads by itself once you stop typing, or now:</span><button type="button" class="btn primary" id="reloadBtn">Reload</button></div>
+
+<div id="psStrip" role="list" aria-label="Project sessions" hidden></div>
 
 <section id="needs" aria-label="Needs you">
   <div class="nhd"><button type="button" id="needsToggle" aria-expanded="true"><span>Needs you</span><span class="count" id="needsCount">0</span>
@@ -587,6 +605,14 @@
     <label>What should be added<textarea name="text" rows="4" required placeholder="In your own words. The operator picks the project and the rest."></textarea></label>
     <p class="muted" style="margin:0">Enter sends it to the operator as &ldquo;Add a Ticket or Todo: &hellip;&rdquo;: a ticket for Claude, or a todo when it&rsquo;s yours to do (&ldquo;remind me Monday to&hellip;&rdquo;); Shift+Enter starts a new line.</p>
     <div class="actions"><button type="submit" class="btn primary" id="quickSend">Send to the operator</button></div></form></div></dialog>
+<dialog id="askDlg" aria-label="Ask in a project" style="width:min(calc(560 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg">
+  <div class="head"><h1 style="flex:1">Ask in a project</h1><button type="button" class="btn" id="closeAsk">Cancel</button></div>
+  <form class="form" id="askForm">
+    <label>Project<select name="project" required></select></label>
+    <label>Question (optional)<textarea name="text" rows="4" placeholder="Where does the board parse a ticket's flags? Or leave it empty and type in the terminal."></textarea></label>
+    <label>Model<select name="model"></select></label>
+    <p class="muted" style="margin:0">A Claude session in the project's own folder, not a ticket: it shows as a chip above Needs you until you end it (&times; on the chip, or <span class="mono">/exit</span>). It leaves the checkout alone, and offers to make a ticket for a change.</p>
+    <div class="actions"><button type="submit" class="btn primary" title="Ctrl+Enter">Start</button></div></form></div></dialog>
 <dialog id="parkDlg" aria-label="Park the ticket" style="width:min(calc(560 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg">
   <div class="head"><h1 style="flex:1" id="parkTitle">Park</h1><button type="button" class="btn" id="closePark">Cancel</button></div>
   <form class="form" id="parkForm">
@@ -627,11 +653,12 @@
     <tr><td><kbd>/</kbd></td><td>Search the tickets shown; <kbd>Enter</kbd> goes to the first card, <kbd>Esc</kbd> leaves the box and keeps the search.</td></tr>
     <tr><td><kbd>h</kbd> <kbd>j</kbd> <kbd>k</kbd> <kbd>l</kbd>, arrows</td><td>Move between cards (and Needs you, and the list's rows); <kbd>Enter</kbd> opens one. <kbd>g</kbd> / <kbd>G</kbd> go to the top and bottom of the column.</td></tr>
     <tr><td><kbd>q</kbd> / <kbd>n</kbd></td><td>Quick ticket / New ticket.</td></tr>
+    <tr><td><kbd>a</kbd></td><td>Ask in a project: start a project session (Claude in its folder, not a ticket). Its chip above Needs you opens it again.</td></tr>
     <tr><td><kbd>o</kbd></td><td>The operator chat. Hold <kbd>v</kbd> to talk to it (with voice on).</td></tr>
     <tr><td><kbd>Esc</kbd></td><td>Leave a text box (it keeps what you typed); again, close the dialog.</td></tr>
     <tr><td><kbd>?</kbd></td><td>This list.</td></tr>
   </table>
-  <p class="muted">Single keys don't fire while you type in a box, and of these only <kbd>s</kbd>, <kbd>Ctrl</kbd>+<kbd>K</kbd> and <kbd>?</kbd> work with a dialog open. Dialogs have their own: <kbd>Ctrl</kbd>+<kbd>Enter</kbd> creates the ticket in New ticket, and in a ticket, <kbd>t</kbd> opens its session's terminal and, in its Test tab, <kbd>p</kbd> <kbd>f</kbd> <kbd>n</kbd> <kbd>c</kbd> walk the test plan (and in its Demo tab, <kbd>n</kbd> goes to the next step).</p></div></dialog>
+  <p class="muted">Single keys don't fire while you type in a box, and of these only <kbd>s</kbd>, <kbd>Ctrl</kbd>+<kbd>K</kbd> and <kbd>?</kbd> work with a dialog open. Dialogs have their own: <kbd>Ctrl</kbd>+<kbd>Enter</kbd> creates the ticket in New ticket (and starts the session in Ask), and in a ticket, <kbd>t</kbd> opens its session's terminal and, in its Test tab, <kbd>p</kbd> <kbd>f</kbd> <kbd>n</kbd> <kbd>c</kbd> walk the test plan (and in its Demo tab, <kbd>n</kbd> goes to the next step).</p></div></dialog>
 <div id="toast" role="status" popover="manual"></div>
 <div id="voiceBar" hidden role="status"><div class="txt"><div class="heard" id="voiceHeard"></div><div id="voiceText"></div></div><a id="voiceOpen" href="/?attach=voice" title="Open the voice operator (it runs on voice.model, apart from Chat)" aria-label="Open the voice operator" hidden>&#8599;</a><button type="button" id="voiceReplay" title="Say it again" aria-label="Say it again" hidden>&#8635;</button><button type="button" id="voiceClose" title="Stop and close" aria-label="Stop and close">&times;</button></div>
 
@@ -984,7 +1011,7 @@ function render() {
   const live = shown.filter((r) => r.status && r.status !== "gone").length;
   document.getElementById("summary").textContent = `${shown.length} tickets · ${live} sessions live`;
   for (const b of document.querySelectorAll("[data-view]")) { const on = b.dataset.view === state.view; b.classList.toggle("on", on); b.setAttribute("aria-selected", on); }
-  renderNeeds(); renderFilters(); renderPaused();
+  renderSessions(); renderNeeds(); renderFilters(); renderPaused();
   const main = document.getElementById("main");
   // The filters are about tickets; the Projects view lists every project.
   document.getElementById("filters").hidden = state.view === "projects";
@@ -2107,7 +2134,7 @@ function detailsTab(d) {
     <div class="row2"><label>Project<select name="project">${state.data.projects.map((p) => `<option ${p.name === t.project ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select></label>
       <label ${t.todo ? "" : "hidden"} title="${esc(KIND_TITLE)}">Kind<select name="kind">${kindOptions(t)}</select></label>
       <label ${!t.todo && (t.repo || t.mode !== "queue") ? "" : "hidden"}>Runs as<select name="mode"><option value="queue" ${t.mode === "queue" ? "selected" : ""}>Queue in a session</option><option value="worktree" ${t.mode === "worktree" ? "selected" : ""}>Its own worktree</option></select></label>
-      <label ${t.todo ? "hidden" : ""}>Queue session<select name="target"><option value="">Project default / parent's</option>${sessions.map((s) => `<option value="${esc(s.tmux)}" ${s.tmux === t.target ? "selected" : ""}>${esc(s.name)} (${esc(s.status)})</option>`).join("")}</select></label></div>
+      <label ${t.todo ? "hidden" : ""}>Queue session<select name="target"><option value="">Project default / parent's</option>${sessions.filter((s) => !s.project).map((s) => `<option value="${esc(s.tmux)}" ${s.tmux === t.target ? "selected" : ""}>${esc(s.name)} (${esc(s.status)})</option>`).join("")}</select></label></div>
     <div class="row2" ${t.todo ? "hidden" : ""}><label>Plan first<select name="plan"><option value="0">No</option><option value="1" ${t.plan ? "selected" : ""}>Yes</option></select></label>
       <label title="${esc(KIND_TITLE)}">Kind<select name="kind2">${kindOptions(t)}</select></label>
       <label>Planning skill<input type="text" name="skill" value="${esc(t.skill)}" placeholder="grilling, wayfinder"></label></div>
@@ -2223,7 +2250,7 @@ function openNew(parentKey, pick = {}) {
       <div class="row2" data-todo-only hidden><label title="Then it's in Needs you's Today group, once. Without a time: that morning">Remind me<input type="date" name="remind_day"></label><label>At (empty: the morning)<input type="time" name="remind_time"></label></div>
       <div class="row2" data-claude-only><label title="Start now: it starts as soon as it's created, in its own worktree even when all the project's worktree slots are taken (in the queue it still waits for its session)">When<select name="when"><option value="queued">Start when there's room</option><option value="start">Start now, even if every slot is taken</option><option value="backlog">Backlog for now</option><option value="planning">Plan first</option></select></label>
         <label data-repo-only>Runs as<select name="mode"><option value="queue" ${p?.mode !== "worktree" ? "selected" : ""}>Queue in a session</option><option value="worktree" ${p?.mode === "worktree" ? "selected" : ""}>Its own worktree</option></select></label></div>
-      <div class="row2" data-claude-only><label>Queue session<select name="target"><option value="">Project default / parent's</option>${d.sessions.map((s) => `<option value="${esc(s.tmux)}">${esc(s.name)} (${esc(s.status)})</option>`).join("")}</select></label>
+      <div class="row2" data-claude-only><label>Queue session<select name="target"><option value="">Project default / parent's</option>${d.sessions.filter((s) => !s.project).map((s) => `<option value="${esc(s.tmux)}">${esc(s.name)} (${esc(s.status)})</option>`).join("")}</select></label>
         <label>Planning skill (plan first)<input type="text" name="skill" placeholder="grilling, wayfinder"></label></div>
       <div class="row2"><label data-claude-only>Profile<select name="profile"><option value="">Project's</option>${d.profiles.map((x) => `<option>${esc(x)}</option>`).join("")}</select></label>
         <label title="${esc(PRIO_TITLE)}">Priority<select name="priority">${prioOptions(PRIO_NORMAL)}</select></label></div>
@@ -2311,6 +2338,67 @@ document.getElementById("newDlg").addEventListener("keydown", (e) => {
   if (e.key !== "Enter" || !(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey || e.isComposing) return;
   const form = document.getElementById("newForm"), btn = form?.querySelector("[type=submit]");
   if (!btn || !form.contains(e.target)) return;
+  e.preventDefault();
+  if (e.repeat || btn.classList.contains("busy")) return;
+  form.requestSubmit(btn);
+});
+
+// ---- project sessions: Claude in a project's folder, not a ticket (project_session.zig) ----
+// Live ones show as chips above Needs you, oldest first, labeled with the
+// project's key prefix ("CL", then "CL 2" for a second one). Their status
+// shows only on the chip: a blocked one (a question or a permission) turns
+// amber, never a Needs you card. Waiting on something external isn't that.
+function projectSessions() {
+  const d = state.data; if (!d) return [];
+  const list = (d.sessions || []).filter((s) => s.project && !s.hidden && projectShown(s.project)).sort((a, b) => a.created - b.created || (a.tmux < b.tmux ? -1 : 1));
+  const n = {};
+  return list.map((s) => { const p = d.projects.find((x) => x.name === s.project); const pre = p?.prefix || s.project;
+    n[s.project] = (n[s.project] || 0) + 1; return { s, label: n[s.project] > 1 ? `${pre} ${n[s.project]}` : pre }; });
+}
+const sessionHref = (s) => `/?attach=${encodeURIComponent(s.tmux)}`;
+const psClass = (st) => st === "busy" ? "ps-busy" : st === "idle" || st === "shell" ? "ps-idle" : st === "blocked" ? "ps-blocked" : "ps-other";
+function renderSessions() {
+  const box = document.getElementById("psStrip"); const items = projectSessions();
+  box.hidden = !items.length;
+  setHtml(box, items.map(({ s, label }) => { const st = STATUS_NAME[s.status] || s.status;
+    return `<span class="pschip ${psClass(s.status)}" role="listitem"><a href="${esc(sessionHref(s))}" data-shell="${esc(sessionHref(s))}" title="${esc(`${s.name} (${s.tmux}) · ${s.project} · ${st}`)}" aria-label="${esc(`${label} session: ${st}`)}"><span class="dot"></span>${esc(label)}</a>`
+      + `<button type="button" class="psx" data-ps-kill="${esc(s.tmux)}" title="End this session" aria-label="End the ${esc(label)} session">&times;</button></span>`; }).join(""));
+}
+async function endSession(tmuxName) {
+  const x = projectSessions().find((y) => y.s.tmux === tmuxName);
+  const dlg = document.getElementById("killDlg");
+  document.getElementById("killBody").innerHTML = `<h2 style="margin:0;font-size:calc(17 * var(--u))">End the ${esc(x?.label || "")} session?</h2>
+    <p style="margin:0">This ends <span class="mono">${esc(tmuxName)}</span> and Claude in it. You can resume it from the chooser's <kbd>R</kbd> list.</p>
+    <div class="actions"><button type="button" class="btn danger" data-kill="yes">End session</button><button type="button" class="btn" data-kill="">Cancel</button></div>`;
+  dlg.returnValue = ""; dlg.showModal();
+  const yes = await new Promise((res) => { dlg.onclose = () => res(dlg.returnValue === "yes"); });
+  if (!yes) return;
+  try { await api(`session/${encodeURIComponent(tmuxName)}/kill`, {}); toast(`Ended ${x?.label || tmuxName}`); } catch (e) { toast(e.message, true); }
+  await refresh();
+}
+function openAsk() {
+  const d = state.data; if (!d) return;
+  if (!d.projects.length) return toast("No projects yet: add one in the Projects view", true);
+  const form = document.getElementById("askForm"); form.reset();
+  let last = ""; try { last = localStorage.getItem("cl-ask-project") || ""; } catch {}
+  const names = d.projects.filter((p) => projectShown(p.name) || p.name === state.project).map((p) => p.name);
+  const pick = names.includes(state.project) ? state.project : names.includes(last) ? last : names[0];
+  form.elements.project.innerHTML = names.map((n) => `<option value="${esc(n)}" ${n === pick ? "selected" : ""}>${esc(n)}</option>`).join("");
+  form.elements.model.innerHTML = [["", `Default (${d.session_model || "the profile's"})`], ["sonnet", "sonnet"], ["haiku", "haiku"], ["opus", "opus"]]
+    .map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join("");
+  document.getElementById("askDlg").showModal(); form.elements.text.focus();
+}
+async function submitAsk(form) {
+  const project = form.elements.project.value; if (!project) return;
+  let r; try { r = await api(`project/${encodeURIComponent(project)}/session`, { text: form.elements.text.value, model: form.elements.model.value }); }
+  catch (e) { toast(e.message, true); return; }
+  try { localStorage.setItem("cl-ask-project", project); } catch {}
+  document.getElementById("askDlg").close();
+  openTerm(sessionHref({ tmux: r.tmux }));
+}
+document.getElementById("askDlg").addEventListener("keydown", (e) => {
+  if (e.key !== "Enter" || !(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey || e.isComposing) return;
+  const form = document.getElementById("askForm"), btn = form.querySelector("[type=submit]");
   e.preventDefault();
   if (e.repeat || btn.classList.contains("busy")) return;
   form.requestSubmit(btn);
@@ -2670,6 +2758,9 @@ async function onClick(e) {
   if (ds.newWhen || ds.newProject) return openNew(null, { when: ds.newWhen, project: ds.newProject });
   if (el.id === "closeNew") return document.getElementById("newDlg").close();
   if (el.id === "quickBtn") return openQuick();
+  if (el.id === "askBtn") return openAsk();
+  if (el.id === "closeAsk") return document.getElementById("askDlg").close();
+  if (ds.psKill) { e.stopPropagation(); return endSession(ds.psKill); }
   if (el.id === "reloadBtn") return location.reload();
   if (el.id === "closeQuick") return document.getElementById("quickDlg").close();
   if (el.id === "closePark") return document.getElementById("parkDlg").close();
@@ -3127,6 +3218,7 @@ document.addEventListener("keydown", (e) => {
 async function onSubmit(e) {
   if (e.target.id === "newForm") return submitNew(e.target);
   if (e.target.id === "quickForm") return submitQuick(e.target);
+  if (e.target.id === "askForm") return submitAsk(e.target);
   if (e.target.id === "projForm") return submitProject(e.target);
   if (e.target.id === "parkForm") return submitPark(e.target);
   if (e.target.id === "snoozeForm") return snoozeTo(document.getElementById("snoozeDlg").dataset.key, whenOf(e.target.elements.day.value, e.target.elements.time.value));
@@ -3458,6 +3550,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "/") { e.preventDefault(); searchFocus(); return; }
   if (e.key === "q") { e.preventDefault(); openQuick(); return; }
   if (e.key === "n") { e.preventDefault(); openNew(null); return; }
+  if (e.key === "a") { e.preventDefault(); openAsk(); return; }
   const dir = NAV_KEYS[e.key];
   if (dir && !(e.key.startsWith("Arrow") && e.shiftKey)) { e.preventDefault(); navMove(dir); }
 });
@@ -3494,6 +3587,8 @@ function palCommands() {
   return [
     { label: "New ticket", hint: "n", run: () => openNew(null) },
     { label: "Quick ticket", hint: "q", run: () => openQuick() },
+    { label: "Ask in a project…", hint: "a", note: "a project session, not a ticket", run: () => openAsk() },
+    ...projectSessions().map((x) => ({ label: `Open ${x.label} session`, note: STATUS_NAME[x.s.status] || x.s.status, run: () => openTerm(sessionHref(x.s)) })),
     { label: "Chat with the operator", hint: "o", run: () => document.getElementById("chatBtn").click() },
     { label: "Open the voice operator", run: () => openTerm("/?attach=voice") },
     { label: "Search tickets", hint: "/", run: searchFocus },

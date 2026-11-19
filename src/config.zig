@@ -18,6 +18,7 @@
 //!                                          ticket worktrees; board.trust_worktrees is the old name)
 //!   board.todo_project = me              (the project `cl todo` puts todos in)
 //!   board.morning = 08:00                (when a todo due or reminded on a date, with no time, comes up)
+//!   board.session_model = sonnet         (a project session's Default model; default: the profile's)
 //!
 //!   gutter.path = ~/bin/gutter           (gutter for reviews; "" looks it up on PATH)
 //!   review.model = sonnet                (the automated reviewer's model; default: the profile's)
@@ -135,6 +136,9 @@ pub const Board = struct {
     /// When a todo's date with no time comes up (its reminder, or showing
     /// as due), in minutes after local midnight: `board.morning = 08:00`.
     morning: i64 = when.default_morning,
+    /// The model a project session (`project_session`) starts with when the
+    /// board's Model is Default; "" for the profile's own.
+    session_model: []const u8 = "",
 };
 
 pub const Gutter = struct {
@@ -285,6 +289,8 @@ fn loadFile(ctx: Ctx) !Config {
             board.todo_project = val;
         } else if (std.mem.eql(u8, key, "board.morning")) {
             board.morning = when.parseMorning(val) orelse board.morning;
+        } else if (std.mem.eql(u8, key, "board.session_model")) {
+            board.session_model = val;
         } else if (std.mem.eql(u8, key, "board.dispatch")) {
             board.dispatch = !(std.mem.eql(u8, val, "false") or std.mem.eql(u8, val, "no") or std.mem.eql(u8, val, "off"));
         } else if (std.mem.eql(u8, key, "gutter.path")) {

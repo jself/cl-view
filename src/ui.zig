@@ -11,6 +11,7 @@ const operator = @import("operator.zig");
 const history = @import("history.zig");
 const actions = @import("actions.zig");
 const board = @import("board.zig");
+const project_session = @import("project_session.zig");
 const park = @import("park.zig");
 const board_view = @import("board_view.zig");
 
@@ -466,6 +467,12 @@ const App = struct {
             if (count == 0) return;
             const e = self.closed[vis[self.hist_cursor]].entry;
             var fresh = false;
+            // A project session gets its instructions and model again: they
+            // last only as long as Claude's process (project_session.zig).
+            const extra: []const []const u8 = if (e.project.len > 0)
+                project_session.resumeArgs(self.db, self.arena(), e.project, e.dir, e.model) catch &.{}
+            else
+                &.{};
             const tmux_name = launch.create(self.ctx, self.cfg, .{
                 .started_fresh = &fresh,
                 .dir = e.dir,
@@ -474,6 +481,9 @@ const App = struct {
                 .resume_flag = e.session_id.len > 0,
                 .resume_id = if (e.session_id.len > 0) e.session_id else null,
                 .continue_flag = e.session_id.len == 0,
+                .project = e.project,
+                .model = e.model,
+                .extra = extra,
             }) catch |err| {
                 self.setMessage("resume failed: {s}", .{@errorName(err)});
                 return;

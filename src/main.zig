@@ -463,4 +463,5 @@ test {
     std.testing.refAllDecls(alerts);
     std.testing.refAllDecls(@import("push.zig"));
     std.testing.refAllDecls(@import("intake.zig"));
+    std.testing.refAllDecls(@import("project_session.zig"));
 }

@@ -20,6 +20,7 @@ const park = @import("park.zig");
 const drift = @import("drift.zig");
 const ticket_watch = @import("ticket_watch.zig");
 const alerts = @import("alerts.zig");
+const project_session = @import("project_session.zig");
 
 pub const ticket_usage =
     \\usage: cl ticket <command>    (cl t for short)
@@ -310,6 +311,10 @@ pub const project_usage =
     \\                              (back to Queued or Planning; they resume their conversation)
     \\  resume <name> | --all       start dispatching there again, top of the queue first
     \\  list [--json]
+    \\  session <name> [<text>] [--model <model>]
+    \\                              start a project session: Claude in the project's folder, not
+    \\                              a ticket, shown on the board as a chip; <text> is its first
+    \\                              message. Prints its tmux name (attach with cl <name>)
     \\  after-merge <name>          run the after-merge command (and push) now, on trunk as it is
     \\  push <name>                 push trunk to the --push-after-merge remote now and watch its
     \\                              CI, without the after-merge command
@@ -517,7 +522,7 @@ pub fn projectMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void
     defer arena_state.deinit();
     const a = arena_state.allocator();
     const cmd = argv[0];
-    const args = try Args.parse(a, argv[1..], &.{ "--prefix", "--slots", "--planners", "--mode", "--profile", "--name", "--dir", "--after-merge", "--after-merge-claude", "--onto", "--review-skill", "--auto-review", "--push-after-merge" }, project_usage);
+    const args = try Args.parse(a, argv[1..], &.{ "--prefix", "--slots", "--planners", "--mode", "--profile", "--name", "--dir", "--after-merge", "--after-merge-claude", "--onto", "--review-skill", "--auto-review", "--push-after-merge", "--model" }, project_usage);
     const db = openBoard(ctx, cfg);
     defer db.close();
 
@@ -674,6 +679,17 @@ pub fn projectMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void
         if (args.pos.items.len != 1) fail("usage: cl project {s} <name>", .{cmd});
         board.setProjectHidden(db, args.pos.items[0], std.mem.eql(u8, cmd, "hide")) catch |e| boardFail(db, e, "project");
         return;
+    }
+    if (std.mem.eql(u8, cmd, "session")) {
+        args.only(&.{"--model"}, project_usage);
+        if (args.pos.items.len < 1 or args.pos.items.len > 2) fail("usage: cl project session <name> [<text>] [--model <model>]", .{});
+        const text = if (args.pos.items.len == 2) args.pos.items[1] else "";
+        const name = project_session.start(ctx, cfg, db, a, args.pos.items[0], text, args.get("--model") orelse "") catch |e| switch (e) {
+            error.SessionFailed => fail("the session didn't start: {s}", .{dispatch.failureReason(e)}),
+            error.BadInput => fail("--model takes a model name, like sonnet", .{}),
+            else => boardFail(db, e, "project"),
+        };
+        return out(try std.fmt.allocPrint(a, "{s}\n", .{name}));
     }
     if (std.mem.eql(u8, cmd, "rm")) {
         args.only(&.{}, project_usage);

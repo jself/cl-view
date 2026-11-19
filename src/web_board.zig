@@ -20,6 +20,8 @@
 //!   POST /api/alert/<tmux>/dismiss      clear a session's alert (cl alert)
 //!   POST /api/project                   add a project
 //!   POST /api/project/<name>/<action>   set rm hide unhide after-merge push
+//!   POST /api/project/<name>/session    start a project session: {text, model} -> {tmux}
+//!   POST /api/session/<tmux>/kill       end a project session (no other kind)
 //!   GET  /api/push                      push notifications: the key, devices, settings
 //!   POST /api/push/<action>             subscribe settings device remove test
 const std = @import("std");
@@ -41,6 +43,7 @@ const park = @import("park.zig");
 const drift = @import("drift.zig");
 const images = @import("images.zig");
 const alerts = @import("alerts.zig");
+const project_session = @import("project_session.zig");
 const voice = @import("voice.zig");
 const ticket_watch = @import("ticket_watch.zig");
 const push = @import("push.zig");
@@ -153,6 +156,8 @@ pub fn handle(ctx: Ctx, cfg: config.Config, req: *std.http.Server.Request, path:
             error.BadInput => .{ .bad_request, "invalid input" },
             error.BadWhen => .{ .bad_request, "not a date I know: " ++ when.forms },
             error.NoSuchDir => .{ .bad_request, "no such directory" },
+            error.NoSuchSession => .{ .not_found, "no such session; it may have ended already" },
+            error.NotProjectSession => .{ .forbidden, "only a project session can be ended from here" },
             error.NoSession => .{ .conflict, "the ticket has no live session" },
             error.CustomClose => .{ .conflict, "Claude asked to close it its own way; tell Claude, or just close it" },
             error.NoSuchBranch => .{ .bad_request, "the project's repo has no branch or bookmark by that name (create it first)" },
@@ -295,6 +300,8 @@ const Body = struct {
     before: ?[]const u8 = null,
     /// unpark: end the park without resuming the session.
     no_resume: ?bool = null,
+    /// project session: the model ("" for board.session_model or the profile's).
+    model: ?[]const u8 = null,
     /// park: what it waits on, the check command ("" for none), and its
     /// interval and give-up time as durations ("1h", "7d"; "" for defaults).
     reason: ?[]const u8 = null,
@@ -460,7 +467,20 @@ fn route(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, req: 
         };
         return ok(req, a, .{ .ok = true, .stopped = stopped.items, .left = left.items });
     }
+    // End a project session (its chip's ×). Only one: never a ticket's
+    // session or any other through this.
+    if (std.mem.eql(u8, what, "session") and std.mem.eql(u8, action, "kill")) {
+        const s = (try tmux.findByTmuxName(ctx, a, name)) orelse return error.NoSuchSession;
+        if (!killable(s)) return error.NotProjectSession;
+        try tmux.kill(ctx, s.tmux_name);
+        return ok(req, a, .{ .ok = true });
+    }
     if (std.mem.eql(u8, what, "project")) {
+        // Start a project session (the board's Ask): {text, model}.
+        if (name.len > 0 and std.mem.eql(u8, action, "session")) {
+            const t = try project_session.start(ctx, cfg, db, a, name, b.text orelse "", b.model orelse "");
+            return ok(req, a, .{ .tmux = t });
+        }
         if (name.len == 0) {
             const repo = b.repo orelse true;
             var in: board.ProjectInput = .{
@@ -789,7 +809,29 @@ const SessionRow = struct {
     name: []const u8,
     dir: []const u8,
     status: []const u8,
+    /// A project session's project (`project_session`), "" for others: the
+    /// board shows those as chips and leaves them out of Queue's targets.
+    project: []const u8 = "",
+    created: i64 = 0,
+    hidden: bool = false,
 };
+
+/// Whether the board may end session `s` (POST /api/session/<tmux>/kill):
+/// only a project session.
+fn killable(s: tmux.Session) bool {
+    return s.project.len > 0 and s.role.len == 0;
+}
+
+test killable {
+    const mk = struct {
+        fn s(project: []const u8, role: []const u8) tmux.Session {
+            return .{ .tmux_name = "cl_x_1", .name = "x", .dir = "/x", .profile = "", .created = 0, .pane_title = "", .pane_dead = false, .activity = 0, .role = role, .alert = "", .project = project };
+        }
+    }.s;
+    try std.testing.expect(killable(mk("srd", "")));
+    try std.testing.expect(!killable(mk("", "")));
+    try std.testing.expect(!killable(mk("srd", tmux.operator_role)));
+}
 
 const TicketRow = struct {
     ticket: board.Ticket,
@@ -884,7 +926,7 @@ fn sessionStatuses(ctx: Ctx, cfg: config.Config, a: std.mem.Allocator) !struct {
     var busy: std.ArrayList([]const u8) = .empty;
     for (sessions) |s| {
         const st = claude.statusFor(ctx, statuses, s);
-        try rows.append(a, .{ .tmux = s.tmux_name, .name = s.name, .dir = s.dir, .status = st.label() });
+        try rows.append(a, .{ .tmux = s.tmux_name, .name = s.name, .dir = s.dir, .status = st.label(), .project = s.project, .created = s.created, .hidden = s.hidden });
         try map.put(a, s.tmux_name, st.label());
         if (st == .busy) try busy.append(a, s.tmux_name);
     }
@@ -917,6 +959,7 @@ fn getBoard(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, re
         .build = try buildId(a),
         // Descriptions refer to pasted images by their path under here.
         .images_dir = try images.root(ctx, a, cfg),
+        .session_model = cfg.board.session_model,
         // The mic button shows only with voice.stt; voice.tts picks who speaks.
         // `split`: a resident TTS server (voice.tts is a URL) is quick per
         // request, so the board asks for each sentence and starts on the first.
@@ -938,6 +981,8 @@ const Board = struct {
     build: []const u8,
     /// Descriptions refer to pasted images by their path under here.
     images_dir: []const u8,
+    /// What a project session's Default model is ("" for the profile's).
+    session_model: []const u8 = "",
     /// The mic button shows only with voice.stt; voice.tts picks who speaks.
     /// `split`: a resident TTS server (voice.tts is a URL) is quick per
     /// request, so the board asks for each sentence and starts on the first.

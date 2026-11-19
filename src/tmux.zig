@@ -29,6 +29,10 @@ pub const Session = struct {
     alert_ticket: []const u8 = "",
     /// Hidden from the chooser (h) while it keeps running (@cl_hidden).
     hidden: bool = false,
+    /// The board project a project session was started in (@cl_project;
+    /// `project_session`), "" for any other session. Not a role: it stays in
+    /// the chooser like any session.
+    project: []const u8 = "",
 };
 
 pub const operator_role = "operator";
@@ -325,6 +329,8 @@ pub const NewOptions = struct {
     config_dir: ?[]const u8,
     /// Stored as @cl_role; any role hides the session from listings.
     role: []const u8 = "",
+    /// Stored as @cl_project: a project session's project (`Session.project`).
+    project: []const u8 = "",
     /// Command to run as the pane's initial process.
     command: []const []const u8,
     /// Extra "KEY=value" environment for the session (CL_TICKET, say).
@@ -383,6 +389,7 @@ pub fn newSession(ctx: Ctx, opts: NewOptions) ![]const u8 {
         "set-option", "-t", tmux_name, "@cl_profile", opts.profile, ";",
         "set-option", "-t", tmux_name, "@cl_created", created, ";",
         "set-option", "-t", tmux_name, "@cl_role", opts.role, ";",
+        "set-option", "-t", tmux_name, "@cl_project", opts.project, ";",
         "set-option", "-t", tmux_name, "mouse", "on", ";",
         "set-option", "-t", tmux_name, "-q", "allow-passthrough", "on", ";",
         "set-option", "-t", tmux_name, "set-clipboard", "on", ";",
@@ -595,7 +602,7 @@ test dictateCommand {
 /// after "❯ "). Menus hide the cursor, so their Left still works.
 const agents_guard = "#{&&:#{m:cl_*,#{session_name}},#{&&:#{==:#{pane_current_command},claude},#{&&:#{cursor_flag},#{e|<=:#{cursor_x},2}}}}";
 
-const list_format = "#{session_name}\t#{@cl_name}\t#{@cl_dir}\t#{@cl_profile}\t#{@cl_created}\t#{pane_dead}\t#{session_activity}\t#{@cl_role}\t#{@cl_alert}\t#{@cl_alert_at}\t#{@cl_alert_ticket}\t#{@cl_hidden}\t#{pane_title}";
+const list_format = "#{session_name}\t#{@cl_name}\t#{@cl_dir}\t#{@cl_profile}\t#{@cl_created}\t#{pane_dead}\t#{session_activity}\t#{@cl_role}\t#{@cl_alert}\t#{@cl_alert_at}\t#{@cl_alert_ticket}\t#{@cl_hidden}\t#{@cl_project}\t#{pane_title}";
 
 /// List Claude sessions, oldest first, leaving out cl's own (operator, web).
 /// Caller owns the slice and its strings (use an arena).
@@ -648,6 +655,7 @@ pub fn listAll(ctx: Ctx, arena: std.mem.Allocator) ![]Session {
         const alert_at_s = f.next() orelse continue;
         const alert_ticket = f.next() orelse continue;
         const hidden_s = f.next() orelse continue;
+        const project = f.next() orelse continue;
         const title = f.rest();
         try sessions.append(arena, .{
             .tmux_name = try arena.dupe(u8, tmux_name),
@@ -662,6 +670,7 @@ pub fn listAll(ctx: Ctx, arena: std.mem.Allocator) ![]Session {
             .alert_at = std.fmt.parseInt(i64, alert_at_s, 10) catch 0,
             .alert_ticket = try arena.dupe(u8, alert_ticket),
             .hidden = std.mem.eql(u8, hidden_s, "1"),
+            .project = try arena.dupe(u8, project),
             .pane_title = try arena.dupe(u8, title),
         });
     }
@@ -671,6 +680,12 @@ pub fn listAll(ctx: Ctx, arena: std.mem.Allocator) ![]Session {
         }
     }.lt);
     return sessions.toOwnedSlice(arena);
+}
+
+/// The cl session (cl's own included) with full tmux name `tmux_name`, or null.
+pub fn findByTmuxName(ctx: Ctx, arena: std.mem.Allocator, tmux_name: []const u8) !?Session {
+    for (try listAll(ctx, arena)) |s| if (std.mem.eql(u8, s.tmux_name, tmux_name)) return s;
+    return null;
 }
 
 /// Resolve a user-supplied name (cl name or full tmux name) to a session.
@@ -1010,6 +1025,14 @@ test "sessions go to the socket's server, not the default one" {
     const sessions = try list(ctx, arena);
     try std.testing.expectEqual(@as(usize, 1), sessions.len);
     try std.testing.expectEqualStrings(name, sessions[0].tmux_name);
+    try std.testing.expectEqualStrings("", sessions[0].project);
+    // A project session's tag comes back in the listing, and it stays in it
+    // (not a role).
+    const tagged = try newSession(ctx, .{ .name = "srd", .dir = dir, .profile = "", .config_dir = null, .project = "srd", .command = &.{ "sleep", "60" } });
+    const both = try list(ctx, arena);
+    try std.testing.expectEqual(@as(usize, 2), both.len);
+    const t = for (both) |s| (if (std.mem.eql(u8, s.tmux_name, tagged)) break s) else unreachable;
+    try std.testing.expectEqualStrings("srd", t.project);
     // The session's processes get the socket too.
     const env = try run(ctx, &.{ "show-environment", "-t", name, socket_env });
     defer a.free(env);
