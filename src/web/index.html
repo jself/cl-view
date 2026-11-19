@@ -385,7 +385,7 @@
       // "new" or "resumed". A resumed terminal's server sends the modes its
       // programs set (tmux's mouse reporting) again, then a redraw.
       if (typeof e.data === "string") {
-        if (e.data === "new") term.reset();
+        if (e.data === "new") { term.clear(); term.reset(); } // clear() first: see board.html's resetTerm
         greeted = true;
         const early = typedEarly;
         typedEarly = "";

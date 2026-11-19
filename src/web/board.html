@@ -1464,6 +1464,13 @@ function setPinned(pinned) {
   if (pinned && !was) drawTail(); // catch up on what came in while scrolled up
 }
 const openLink = (uri) => { if (/^https?:\/\//i.test(uri)) window.open(uri, "_blank", "noopener"); };
+// reset() alone leaks in xterm.js 5.5: each OSC 8 link (Claude's file and URL
+// links) is kept until the line it's on goes, and reset() drops the lines
+// without letting go of their links. The tail redraws on every change, so a
+// popup left open on a working session grew cl window's WebKit process by
+// gigabytes over a day, and everything in it slowed down. clear() first lets
+// them go.
+function resetTerm(term) { term.clear(); term.reset(); }
 function tailTerm() {
   const term = new Terminal({
     fontFamily: 'ui-monospace, SFMono-Regular, Menlo, "DejaVu Sans Mono", monospace',
@@ -1520,7 +1527,7 @@ function drawTail() {
   const text = d.tail || (d.ticket.tmux ? "(the session is gone)" : "(not started yet)");
   if (text === tail.text) { term.scrollToBottom(); return; }
   tail.text = text; tail.writing = true;
-  term.reset();
+  resetTerm(term);
   term.write(text, () => { tail.writing = false; if (state.tailPinned) term.scrollToBottom(); });
 }
 // Claude handed in a plan (cl ticket done --plan) that can be approved. Sending

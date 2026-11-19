@@ -139,6 +139,21 @@ try {
   await ev2(`setTimeout(() => document.getElementById("close").click()), 1`);
   for (let i = 0; i < 400 && !(await ev2(onBoard).catch(() => false)); i++) await sleep(25);
   check(await ev2(onBoard), "a terminal opened in a new tab: X opens the board");
+
+  // The popup's Session tab redraws its xterm.js on every change. Redrawn
+  // with reset() alone, each OSC 8 link (Claude's file and URL links) was
+  // never let go: cl window's WebKit process grew by gigabytes in a day.
+  // 2000 redraws through resetTerm, as drawTail does, must leave the heap
+  // where it was (reset() alone added ~27 MB here).
+  const heap = async () => { await cdp2.send("HeapProfiler.collectGarbage"); return (await cdp2.send("Runtime.getHeapUsage")).usedSize / 1e6; };
+  await cdp2.send("HeapProfiler.enable");
+  await ev2(`window.leakTerm = new Terminal({ scrollback: 1000 }); leakTerm.open(document.body.appendChild(document.createElement("div"))); 1`);
+  const redraw = (n) => ev2(`(async () => { for (let i = 0; i < ${n}; i++) { resetTerm(leakTerm); await new Promise((r) => leakTerm.write("line\\n".repeat(30) + "\\x1b]8;;file:///x" + i + "\\x1b\\\\link\\x1b]8;;\\x1b\\\\\\n", r)); } return 1; })()`);
+  await redraw(50);
+  const before = await heap();
+  await redraw(2000);
+  const grew = (await heap()) - before;
+  check(grew < 3, `redrawing the session tail with links doesn't grow the page's memory (${grew.toFixed(1)} MB after 2000 redraws)`);
   await cdp.send("Target.closeTarget", { targetId: tab.targetId });
 } catch (e) {
   check(false, e.message);
