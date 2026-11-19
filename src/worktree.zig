@@ -398,10 +398,29 @@ pub fn adoptChange(ctx: Ctx, a: std.mem.Allocator, dir: []const u8, desc: []cons
 /// name already elsewhere only moves forward (an old merged branch); else the
 /// change goes without one.
 fn mark(ctx: Ctx, a: std.mem.Allocator, dir: []const u8, bookmark: []const u8) Error!Change {
-    const id = try workingChange(ctx, a, dir);
+    return markChange(ctx, a, dir, try workingChange(ctx, a, dir), bookmark);
+}
+
+/// Change `id` with `bookmark` put on it, as `mark` does.
+fn markChange(ctx: Ctx, a: std.mem.Allocator, dir: []const u8, id: []const u8, bookmark: []const u8) Error!Change {
     if (run(ctx, a, &.{ "jj", "-R", dir, "bookmark", "set", bookmark, "-r", id })) |_| {
         return .{ .id = id, .bookmark = bookmark };
     } else |_| return .{ .id = id, .bookmark = "" };
+}
+
+/// The change id `rev` names in `dir`; null unless it names exactly one.
+pub fn resolveChange(ctx: Ctx, a: std.mem.Allocator, dir: []const u8, rev: []const u8) ?[]const u8 {
+    const hit = changes(ctx, a, dir, rev) catch return null;
+    return if (hit.len == 1) hit[0] else null;
+}
+
+/// Make change `id` a ticket's own, wherever it is: described `desc` when
+/// it has no description yet (one it has is kept), and `bookmark` put on it
+/// (see `mark`).
+pub fn claimChange(ctx: Ctx, a: std.mem.Allocator, dir: []const u8, id: []const u8, desc: []const u8, bookmark: []const u8) Error!Change {
+    const said = try run(ctx, a, &.{ "jj", "-R", dir, "log", "--no-graph", "-r", id, "-T", "description" });
+    if (std.mem.trim(u8, said, " \n").len == 0) _ = try run(ctx, a, &.{ "jj", "-R", dir, "describe", "-r", id, "-m", desc });
+    return markChange(ctx, a, dir, id, bookmark);
 }
 
 /// The change id of `dir`'s working copy.

@@ -1903,6 +1903,38 @@ Needs You with the ticket's key and why, Done or not:
 A flag rather than a prompt at Close: the board, the CLI and Claude all close
 tickets, and only the result says whether the work is on trunk.
 
+#### Reopened after a merge
+
+A Done ticket moved back to work has a change that is in trunk already, so
+its new work needs a change of its own. cl gives it one as it goes on: the
+working copy's change when nobody has claimed it (undescribed, not in the
+target, no other ticket's: the new change cl left on top of the merged one,
+or one Claude made), described and bookmarked as the ticket's; else, when it
+starts in its old worktree, a new change on top of the target. A queue
+ticket gets a new one when it starts, as before. It happens when the ticket
+starts, when a session is attached to it, when Claude runs `cl t done`
+(in the ticket's own checkout only, not its parent's for a sub-ticket in the
+parent's session) and before a merge, and an "adopted change" event names
+the change it took and the one it left. Until then the conflict check skips
+a change that is in its target: nothing of it is left to conflict.
+
+When there is no such change (Claude described its work, say), `cl t done`
+tells Claude to set it with `cl t change`, and a merge is refused with a
+`merge-failed` flag saying the same: merging a change that is in its target
+would take whatever sits on top of it, or report nothing to merge and leave
+the round's work out.
+
+```
+cl t change QA-1 [<rev>]    Make <rev> (default @) QA-1's jj change
+```
+
+`cl t change` does the same by hand, for any change: `<rev>` is read in the
+ticket's worktree (else the project's checkout), so `@` is its working copy.
+The change is described `QA-1: <title>` if it has no description and given
+the ticket's bookmark. It is refused for a change already in the target or
+another unfinished ticket's; a Done ticket that had it (closed unmerged) lets
+go of it.
+
 #### Before it gets there: Will conflict
 
 Conflicts needn't wait for the merge. The dispatcher (`cl web`, `cl t

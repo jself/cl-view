@@ -120,6 +120,14 @@ fn checkProject(ctx: Ctx, db: board.Db, a: std.mem.Allocator, p: board.Project, 
         const key = try std.fmt.allocPrint(a, "{s} {s} {s}", .{ target_c, s.base, s.tip });
         const prev = try board.driftRow(db, a, t.id);
         if (prev) |r| if (std.mem.eql(u8, r.key, key)) continue;
+        // In the target already (merged, and the ticket reopened): nothing
+        // of it is left to conflict, and testing it against what came after
+        // would report conflicts that aren't real (CL-181).
+        if (inTarget(ctx, a, p.dir, t.change, target_c)) {
+            try board.setDrift(db, t.id, key, "", tgt, ctx.nowSeconds());
+            if (prev) |r| if (r.files.len > 0) try board.logEvent(ctx, db, t.id, "no longer conflicts", try std.fmt.allocPrint(a, "{s} (its change is in it)", .{tgt}));
+            continue;
+        }
         // Its own conflicts are the conflict flag's business (a merge that
         // stopped halfway): nothing to add.
         const found: ?[]const u8 = if (s.conflicted or std.mem.eql(u8, s.base, target_c)) "" else blk: {
@@ -198,6 +206,13 @@ fn stack(ctx: Ctx, a: std.mem.Allocator, dir: []const u8, change: []const u8) ?S
         conflicted = h.next() != null;
     }
     return .{ .base = base, .tip = tip, .conflicted = conflicted };
+}
+
+/// `change` is in commit `target`'s ancestry.
+fn inTarget(ctx: Ctx, a: std.mem.Allocator, dir: []const u8, change: []const u8, target: []const u8) bool {
+    const revs = std.fmt.allocPrint(a, "{s} & ::{s}", .{ change, target }) catch return false;
+    const out = jj(ctx, a, dir, &.{ "log", "--no-graph", "-r", revs, "-T", "change_id" }) orelse return false;
+    return std.mem.trim(u8, out, " \n").len > 0;
 }
 
 /// The trunk bookmark (as `worktree.trunkBookmark` finds it), read without
@@ -448,6 +463,19 @@ test "a ticket's change is tested against trunk as trunk moves" {
     try std.testing.expect((try board.getTicket(db, a, k4)).drift == null);
     try checkAll(ctx, db, a);
     try std.testing.expect(try board.driftRow(db, a, t4.id) == null);
+
+    // T-3 landed, then was reopened with its merged change, and trunk moved
+    // on over the same line: the merged change isn't tested against what
+    // came after it (that would "conflict" with itself), so no warning.
+    const k3 = try T.ticket(ctx, db, a, "three", three);
+    const five = try worktree.newChange(ctx, a, repo, trunk, "T-5: five", "t-5");
+    try tmp.dir.writeFile(ctx.io, .{ .sub_path = "a.txt", .data = "1\nfive\n3\n" });
+    try std.testing.expect((try worktree.mergeChange(ctx, a, repo, "", five.id, five.bookmark, trunk)).merged);
+    try checkAll(ctx, db, a);
+    const t3 = try board.getTicket(db, a, k3);
+    try std.testing.expect(t3.drift == null);
+    try std.testing.expectEqualStrings("", (try board.driftRow(db, a, t3.id)).?.files);
+    try std.testing.expect(!try T.hasEvent(db, a, t3.id, "will conflict"));
 }
 
 test "Rebase now goes only into an idle session that is on the ticket" {

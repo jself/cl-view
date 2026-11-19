@@ -13,6 +13,7 @@ const claude = @import("claude.zig");
 const after_merge = @import("after_merge.zig");
 const operator = @import("operator.zig");
 const park = @import("park.zig");
+const dispatch = @import("dispatch.zig");
 
 pub const Error = error{
     /// The ticket has no live session to act on.
@@ -356,7 +357,24 @@ const Merged = enum { merged, empty, conflicts };
 /// a merge into trunk itself, starts the project's after-merge command (a
 /// feature branch's merges run nothing: what runs is built from trunk).
 /// `empty`: it had no edits, so it was dropped.
-fn merge(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, dir: []const u8, trunk: []const u8) !Merged {
+fn merge(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t_in: board.Ticket, dir: []const u8, trunk: []const u8) !Merged {
+    var t = t_in;
+    // Its change is in the target already (merged, then reopened): merging
+    // it would take whatever sits on top of it, another ticket's change
+    // perhaps, or say there was nothing to merge and leave this round's work
+    // out. Its working copy's new change, if it has one; else it is refused.
+    if (worktree.changeState(ctx, a, dir, t.change, trunk) == .merged) {
+        const c = if (try dispatch.ownDir(db, a, t)) |own| try dispatch.followChange(ctx, db, a, t, own, false) else null;
+        if (c) |ch| {
+            t.change = ch.id;
+            t.branch = ch.bookmark;
+        } else {
+            const short = t.change[0..@min(t.change.len, 12)];
+            try board.logEvent(ctx, db, t.id, "merge failed", try std.fmt.allocPrint(a, "{s} is in {s} already", .{ short, trunk }));
+            try board.setFlagId(ctx, db, t.id, board.flag_merge_failed, "auto", try std.fmt.allocPrint(a, "its jj change {s} is in {s} already, so nothing was merged. If this round's work is in a change of its own, make that the ticket's (`cl ticket change {s} <rev>`) and merge again; if it has none, close it", .{ short, trunk, t.key }));
+            return error.MergeFailed;
+        }
+    }
     const m = worktree.mergeChange(ctx, a, dir, t.worktree, t.change, t.branch, trunk) catch {
         try board.logEvent(ctx, db, t.id, "merge failed", worktree.lastError());
         try board.setFlagId(ctx, db, t.id, board.flag_merge_failed, "auto", try std.fmt.allocPrint(a, "cl couldn't merge its change into {s}; {s} is where it was\n{s}", .{ trunk, trunk, worktree.lastError() }));
@@ -1260,6 +1278,30 @@ test "work that doesn't land is flagged in Needs You until it does: conflicts, c
     try board.setChange(db, (try board.getTicket(db, a, three)).id, (try board.getTicket(db, a, one)).change, "");
     try move(ctx, cfg, db, a, three, .done, false, .close);
     try std.testing.expect(!try inNeeds(db, a, three));
+
+    // Four was reopened holding One's merged change, and another ticket's
+    // change sits on top of master: merging it must not land that one (nor
+    // say there was nothing to merge). Refused, master where it was.
+    const five = try ticket(ctx, db, a, repo, trunk, "Five", "five\n");
+    const four = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Four", .stage = .testing });
+    try board.setChange(db, (try board.getTicket(db, a, four)).id, (try board.getTicket(db, a, one)).change, "");
+    const before = try std.process.run(a, ctx.io, .{ .argv = &.{ "git", "-C", repo, "rev-parse", "master" } });
+    try std.testing.expectError(error.MergeFailed, move(ctx, cfg, db, a, four, .done, false, .merge));
+    const refused = try board.getTicket(db, a, four);
+    try std.testing.expect(std.mem.indexOf(u8, flagOf(refused, board.flag_merge_failed).?.detail, "is in master already") != null);
+    try std.testing.expectEqual(board.Stage.testing, refused.stage);
+    const after = try std.process.run(a, ctx.io, .{ .argv = &.{ "git", "-C", repo, "rev-parse", "master" } });
+    try std.testing.expectEqualStrings(before.stdout, after.stdout);
+    try std.testing.expectEqual(worktree.ChangeState.open, worktree.changeState(ctx, a, repo, (try board.getTicket(db, a, five)).change, trunk));
+    // Its round's work in a new undescribed change: merging takes that one.
+    try sh(ctx, a, &.{ "jj", "-R", repo, "new", trunk });
+    try tmp.dir.writeFile(ctx.io, .{ .sub_path = "b.txt", .data = "four\n" });
+    try move(ctx, cfg, db, a, four, .done, false, .merge);
+    try std.testing.expectEqual(board.Stage.done, (try board.getTicket(db, a, four)).stage);
+    const b = try std.process.run(a, ctx.io, .{ .argv = &.{ "git", "-C", repo, "show", "master:b.txt" } });
+    try std.testing.expectEqualStrings("four\n", b.stdout);
+    const a_txt = try std.process.run(a, ctx.io, .{ .argv = &.{ "git", "-C", repo, "show", "master:a.txt" } });
+    try std.testing.expectEqualStrings("one and two\n", a_txt.stdout);
 }
 
 test "a ticket with a target branch merges into it, runs no after-merge, and isn't flagged for missing trunk" {

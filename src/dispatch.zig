@@ -869,7 +869,13 @@ fn startIn(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, t: 
             };
             // Its conversation ran in the project's checkout: it comes along.
             if (resume_id == null) resume_id = carryConversation(ctx, cfg, a, t, p.dir, wt.path);
-            // A worktree made earlier keeps the change it has.
+            // A worktree made earlier keeps the change it has, unless that
+            // is merged already (reopened after Done): then the one its
+            // working copy went on in, or a new one.
+            if (wt.change.len == 0 and !own) if (try followChange(ctx, db, a, t, wt.path, true)) |c| {
+                wt.change = c.id;
+                wt.branch = c.bookmark;
+            };
             if (wt.change.len > 0) {
                 try board.setChange(db, t.id, wt.change, wt.branch);
                 tc.change = wt.change;
@@ -1130,6 +1136,109 @@ fn toldHere(db: board.Db, a: std.mem.Allocator, t: board.Ticket, tmux_name: []co
 
 const restarted_suffix = " (restarted with its hooks)";
 
+/// A ticket whose change is in its target already (merged, then reopened)
+/// or gone goes on in a new one: the change its working copy in `dir` is on
+/// when nobody has claimed it (undescribed, not in the target, no other
+/// ticket's: `unclaimedWork`), which it takes as its own, described and
+/// bookmarked as a started ticket's is; else, with `fresh`, a new change on
+/// top of the target. Without this the ticket kept the merged change, and the
+/// conflict check tested that against the target (CL-181). Returns the change
+/// it has now, or null when it keeps the one it had (still open, none, not
+/// jj) or jj refused (logged).
+pub fn followChange(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, dir: []const u8, fresh: bool) !?worktree.Change {
+    if (!t.repo or t.change.len == 0) return null;
+    if ((worktree.detect(ctx, a, dir) catch return null) != .jj) return null;
+    const trunk = worktree.target(ctx, a, dir, t.onto) orelse return null;
+    const state = worktree.changeState(ctx, a, dir, t.change, trunk);
+    if (state == .open) return null;
+    const old = t.change[0..@min(t.change.len, 12)];
+    const why = try std.fmt.allocPrint(a, "{s} {s}", .{ old, if (state == .merged) try std.fmt.allocPrint(a, "is in {s}", .{trunk}) else "is gone" });
+    const desc = try std.fmt.allocPrint(a, "{s}: {s}", .{ t.key, t.title });
+    const bookmark = try worktree.slug(a, t.key, t.title);
+    const c: worktree.Change = blk: {
+        if (worktree.unclaimedWork(ctx, a, dir, trunk)) |id| {
+            if ((try db.int("SELECT 1 FROM tickets WHERE change_id = ?1 AND id != ?2", .{ id, t.id })) == null) {
+                const c = worktree.adoptChange(ctx, a, dir, desc, bookmark) catch {
+                    try board.logEvent(ctx, db, t.id, "no change", worktree.lastError());
+                    return null;
+                };
+                try board.logEvent(ctx, db, t.id, "adopted change", try std.fmt.allocPrint(a, "{s} ({s})", .{ c.id, why }));
+                break :blk c;
+            }
+        }
+        if (!fresh) return null;
+        const c = worktree.newChange(ctx, a, dir, trunk, desc, bookmark) catch {
+            try board.logEvent(ctx, db, t.id, "no change", worktree.lastError());
+            return null;
+        };
+        try board.logEvent(ctx, db, t.id, "change", try std.fmt.allocPrint(a, "{s} ({s})", .{ c.id, why }));
+        break :blk c;
+    };
+    try board.setChange(db, t.id, c.id, c.bookmark);
+    // Its old result was the merged change's.
+    _ = try board.dropDrift(db, t.id);
+    return c;
+}
+
+/// Where the ticket's own work is checked out: its worktree, else the
+/// project's checkout. null for a sub-ticket going on in its parent's
+/// session: the working copy there is the parent's, not its own.
+pub fn ownDir(db: board.Db, a: std.mem.Allocator, t: board.Ticket) !?[]const u8 {
+    if (t.worktree.len > 0) return t.worktree;
+    if (t.parent.len > 0 and t.tmux.len > 0) {
+        const p = try board.getTicket(db, a, t.parent);
+        if (std.mem.eql(u8, p.tmux, t.tmux)) return null;
+    }
+    return (try board.getProject(db, a, t.project)).dir;
+}
+
+/// What to tell Claude when the ticket still holds a change that is in its
+/// target already (`followChange` found no change to take): its work this
+/// round can't be merged until the ticket has the change that holds it.
+/// null when its change isn't merged (or it has none, or it isn't jj).
+pub fn mergedChangeNote(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8) !?[]const u8 {
+    const t = try board.getTicket(db, a, key);
+    if (!t.repo or t.change.len == 0) return null;
+    const dir = (try board.getProject(db, a, t.project)).dir;
+    if ((worktree.detect(ctx, a, dir) catch return null) != .jj) return null;
+    const trunk = worktree.target(ctx, a, dir, t.onto) orelse return null;
+    if (worktree.changeState(ctx, a, dir, t.change, trunk) != .merged) return null;
+    return try std.fmt.allocPrint(a, "{s}'s jj change {s} is in {s} already, so this round's work isn't in it, and cl can't merge it. If it is in a change of its own, make that the ticket's: `cl ticket change {s} <rev>` (`@`, the default, is the working copy).", .{ t.key, t.change[0..@min(t.change.len, 12)], trunk, t.key });
+}
+
+/// Make the change `rev` names (in the ticket's checkout: its worktree, else
+/// the project's) the ticket's own, by hand (`cl ticket change`): described
+/// as a started ticket's is when it has no description, and bookmarked.
+/// Refused when `rev` doesn't name exactly one change (error.BadRev), when
+/// that is in the target already (error.InTarget: merging it would do
+/// nothing) or another unfinished ticket's (error.Claimed), and outside jj
+/// (error.NotJj).
+pub fn repointChange(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, rev: []const u8) !worktree.Change {
+    const dir = try review.ticketDir(db, a, t);
+    if (!t.repo or (worktree.detect(ctx, a, dir) catch return error.NotJj) != .jj) return error.NotJj;
+    const id = worktree.resolveChange(ctx, a, dir, rev) orelse return error.BadRev;
+    if (worktree.target(ctx, a, dir, t.onto)) |trunk| {
+        if (worktree.changeState(ctx, a, dir, id, trunk) == .merged) return error.InTarget;
+    }
+    if ((try db.int("SELECT 1 FROM tickets WHERE change_id = ?1 AND id != ?2 AND stage != 'done'", .{ id, t.id })) != null) return error.Claimed;
+    const desc = try std.fmt.allocPrint(a, "{s}: {s}", .{ t.key, t.title });
+    const c = worktree.claimChange(ctx, a, dir, id, desc, try worktree.slug(a, t.key, t.title)) catch return error.CommandFailed;
+    // A Done ticket that had it (closed without merging it) lets go, so two
+    // tickets never work on, merge and test one change.
+    var st = try db.query("SELECT id FROM tickets WHERE change_id = ?1 AND id != ?2", .{ id, t.id });
+    defer st.finalize();
+    var others: std.ArrayList(i64) = .empty;
+    while (try st.step()) try others.append(a, st.int(0));
+    for (others.items) |o| {
+        try board.setChange(db, o, "", "");
+        try board.logEvent(ctx, db, o, "change taken", try std.fmt.allocPrint(a, "{s} by {s}", .{ id[0..@min(id.len, 12)], t.key }));
+    }
+    try board.setChange(db, t.id, c.id, c.bookmark);
+    _ = try board.dropDrift(db, t.id);
+    try board.logEvent(ctx, db, t.id, "change set", if (t.change.len > 0) try std.fmt.allocPrint(a, "{s} (was {s})", .{ c.id, t.change[0..@min(t.change.len, 12)] }) else c.id);
+    return c;
+}
+
 /// Give an attached ticket with no change of its own the one its session
 /// works in (jj): the working copy's change, when it is undescribed, not in
 /// trunk and no other ticket's (`unclaimedWork`), described and bookmarked
@@ -1140,6 +1249,10 @@ fn attachChange(ctx: Ctx, db: board.Db, a: std.mem.Allocator, t: board.Ticket, r
     // Not a code repo: nothing to take (`Project.repo`).
     if (!t.repo) return "";
     var taken: []const u8 = "";
+    // Reopened after its change merged: the session's new change, if it has one.
+    if (t.change.len > 0) if (try followChange(ctx, db, a, t, repo, false)) |c| {
+        taken = c.id;
+    };
     if (t.change.len == 0) if (worktree.target(ctx, a, repo, t.onto)) |trunk| {
         if (worktree.unclaimedWork(ctx, a, repo, trunk)) |c| {
             if ((try db.int("SELECT 1 FROM tickets WHERE change_id = ?1 AND id != ?2", .{ c, t.id })) == null) {
@@ -2458,6 +2571,170 @@ test "a ticket with a target branch starts on it, queued or in a worktree, and i
     // A ticket on trunk hears nothing of the kind.
     t.onto = "";
     try std.testing.expect(std.mem.indexOf(u8, try prompt(a, t, &.{}, null), "targets the branch") == null);
+}
+
+test "a reopened ticket whose change merged goes on in its working copy's new change, or a new one; cl ticket change repoints it" {
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = Ctx.testEnv(), .home = "/tmp", .tmux_blocked = true };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const sh = struct {
+        fn run(c: Ctx, al: std.mem.Allocator, argv: []const []const u8) ![]const u8 {
+            const r = try std.process.run(al, c.io, .{ .argv = argv });
+            if (r.term != .exited or r.term.exited != 0) return error.CommandFailed;
+            return std.mem.trim(u8, r.stdout, " \n");
+        }
+    }.run;
+    _ = sh(ctx, a, &.{ "jj", "--version" }) catch return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = try tmp.dir.realPathFileAlloc(ctx.io, ".", a);
+    const repo = try std.fmt.allocPrint(a, "{s}/repo", .{base});
+    _ = sh(ctx, a, &.{ "git", "init", "-q", "-b", "master", repo }) catch return error.SkipZigTest;
+    _ = try sh(ctx, a, &.{ "git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init" });
+    try std.testing.expect(worktree.ensureJj(ctx, a, repo));
+    const trunk = worktree.target(ctx, a, repo, "").?;
+    const log = struct {
+        fn of(c: Ctx, al: std.mem.Allocator, dir: []const u8, rev: []const u8, tmpl: []const u8) ![]const u8 {
+            return sh(c, al, &.{ "jj", "-R", dir, "log", "--no-graph", "-r", rev, "-T", tmpl });
+        }
+    }.of;
+    const hasEvent = struct {
+        fn has(d: board.Db, al: std.mem.Allocator, id: i64, kind: []const u8) !bool {
+            for (try board.events(d, al, id)) |e| if (std.mem.eql(u8, e.kind, kind)) return true;
+            return false;
+        }
+    }.has;
+
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "qa", .dir = repo });
+    var cfg: config.Config = .{ .profiles = &.{}, .default = "", .operator = "" };
+    cfg.board.worktrees = try std.fmt.allocPrint(a, "{s}/wt", .{base});
+
+    // QA-1 runs in a worktree, and its change merges.
+    const k1 = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Own", .mode = .worktree });
+    var t1 = try board.getTicket(db, a, k1);
+    const wt = try worktree.create(ctx, a, cfg, repo, "qa", k1, t1.title, trunk, "QA-1: Own");
+    try board.setChange(db, t1.id, wt.change, wt.branch);
+    try board.setSession(ctx, db, t1.id, "", "", wt.path, wt.branch);
+    t1 = try board.getTicket(db, a, k1);
+    // Still open: it keeps it.
+    try std.testing.expect(try followChange(ctx, db, a, t1, wt.path, true) == null);
+    try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = try std.fmt.allocPrint(a, "{s}/one.txt", .{wt.path}), .data = "one\n" });
+    try std.testing.expect((try worktree.mergeChange(ctx, a, repo, wt.path, wt.change, wt.branch, trunk)).merged);
+    try std.testing.expectEqual(worktree.ChangeState.merged, worktree.changeState(ctx, a, repo, wt.change, trunk));
+
+    // Reopened: the next round works in a new undescribed change on top.
+    _ = try sh(ctx, a, &.{ "jj", "-R", wt.path, "new", trunk });
+    try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = try std.fmt.allocPrint(a, "{s}/two.txt", .{wt.path}), .data = "two\n" });
+    const round2 = try worktree.workingChange(ctx, a, wt.path);
+    const c = (try followChange(ctx, db, a, t1, wt.path, false)).?;
+    try std.testing.expectEqualStrings(round2, c.id);
+    t1 = try board.getTicket(db, a, k1);
+    try std.testing.expectEqualStrings(round2, t1.change);
+    try std.testing.expectEqualStrings("qa-1-own", t1.branch);
+    try std.testing.expectEqualStrings("QA-1: Own", try log(ctx, a, repo, round2, "description.first_line()"));
+    try std.testing.expect(try hasEvent(db, a, t1.id, "adopted change"));
+    // Now its own, open change: nothing more to do.
+    try std.testing.expect(try followChange(ctx, db, a, t1, wt.path, true) == null);
+
+    // QA-2's change merged and its checkout holds someone else's described
+    // work: not taken. Without `fresh` it keeps what it had; with it, a new
+    // change on top of trunk.
+    const k2 = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Queue" });
+    var t2 = try board.getTicket(db, a, k2);
+    const c2 = try worktree.newChange(ctx, a, repo, trunk, "QA-2: Queue", "qa-2-queue");
+    try board.setChange(db, t2.id, c2.id, c2.bookmark);
+    t2 = try board.getTicket(db, a, k2);
+    try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = try std.fmt.allocPrint(a, "{s}/q.txt", .{repo}), .data = "q\n" });
+    try std.testing.expect((try worktree.mergeChange(ctx, a, repo, "", c2.id, c2.bookmark, trunk)).merged);
+    _ = try sh(ctx, a, &.{ "jj", "-R", repo, "new", trunk, "-m", "someone's own" });
+    try std.testing.expect(try followChange(ctx, db, a, t2, repo, false) == null);
+    try std.testing.expectEqualStrings(c2.id, (try board.getTicket(db, a, k2)).change);
+    const fresh = (try followChange(ctx, db, a, t2, repo, true)).?;
+    try std.testing.expect(!std.mem.eql(u8, fresh.id, c2.id));
+    try std.testing.expectEqualStrings(try log(ctx, a, repo, trunk, "commit_id"), try log(ctx, a, repo, try std.fmt.allocPrint(a, "{s}-", .{fresh.id}), "commit_id"));
+    try std.testing.expectEqualStrings(fresh.id, (try board.getTicket(db, a, k2)).change);
+
+    // By hand: cl ticket change QA-1 [<rev>], read in its worktree.
+    try std.testing.expectError(error.BadRev, repointChange(ctx, db, a, t1, "nosuchrev"));
+    try std.testing.expectError(error.InTarget, repointChange(ctx, db, a, t1, trunk));
+    try std.testing.expectError(error.Claimed, repointChange(ctx, db, a, t1, fresh.id));
+    _ = try sh(ctx, a, &.{ "jj", "-R", wt.path, "new" });
+    const top = try worktree.workingChange(ctx, a, wt.path);
+    const r = try repointChange(ctx, db, a, t1, "@");
+    try std.testing.expectEqualStrings(top, r.id);
+    try std.testing.expectEqualStrings(top, (try board.getTicket(db, a, k1)).change);
+    try std.testing.expectEqualStrings("QA-1: Own", try log(ctx, a, repo, top, "description.first_line()"));
+    try std.testing.expect(try hasEvent(db, a, t1.id, "change set"));
+    // A description it has already is kept.
+    _ = try sh(ctx, a, &.{ "jj", "-R", wt.path, "new", "-m", "mine" });
+    const mine = try worktree.workingChange(ctx, a, wt.path);
+    _ = try repointChange(ctx, db, a, try board.getTicket(db, a, k1), mine);
+    try std.testing.expectEqualStrings("mine", try log(ctx, a, repo, mine, "description.first_line()"));
+    // A Done ticket's change (closed unmerged) can be taken: the Done one lets go.
+    try board.move(ctx, db, a, k1, .done);
+    const r2 = try repointChange(ctx, db, a, try board.getTicket(db, a, k2), mine);
+    try std.testing.expectEqualStrings(mine, r2.id);
+    try std.testing.expectEqualStrings("", (try board.getTicket(db, a, k1)).change);
+    try std.testing.expect(try hasEvent(db, a, t1.id, "change taken"));
+}
+
+test "a worktree ticket reopened after its change merged starts in its old worktree on the working copy's new change" {
+    // Starting a session keeps a few things for the process's life (perm).
+    var perm_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer perm_state.deinit();
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = perm_state.allocator(), .env = Ctx.testEnv(), .home = "/tmp", .tmux_blocked = true };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const sh = struct {
+        fn run(c: Ctx, al: std.mem.Allocator, argv: []const []const u8) ![]const u8 {
+            const r = try std.process.run(al, c.io, .{ .argv = argv });
+            if (r.term != .exited or r.term.exited != 0) return error.CommandFailed;
+            return std.mem.trim(u8, r.stdout, " \n");
+        }
+    }.run;
+    _ = sh(ctx, a, &.{ "jj", "--version" }) catch return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = try tmp.dir.realPathFileAlloc(ctx.io, ".", a);
+    const repo = try std.fmt.allocPrint(a, "{s}/repo", .{base});
+    _ = sh(ctx, a, &.{ "git", "init", "-q", "-b", "master", repo }) catch return error.SkipZigTest;
+    _ = try sh(ctx, a, &.{ "git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init" });
+    try std.testing.expect(worktree.ensureJj(ctx, a, repo));
+    const trunk = worktree.target(ctx, a, repo, "").?;
+
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "qa", .dir = repo });
+    var profiles = [_]config.Profile{.{ .name = "work", .config_dir = "/h/.claude-work" }};
+    var cfg: config.Config = .{ .profiles = &profiles, .default = "work", .operator = "work" };
+    cfg.board.worktrees = try std.fmt.allocPrint(a, "{s}/wt", .{base});
+    const none: View = .{ .sessions = &.{}, .statuses = .empty };
+
+    // The first round: its worktree and change (its session can't start,
+    // tmux being blocked here, but all of that is made first).
+    const k = try board.createTicket(ctx, db, a, .{ .project = "qa", .title = "Own", .mode = .worktree, .stage = .queued });
+    try std.testing.expectError(error.SessionFailed, startIn(ctx, cfg, db, a, try board.getTicket(db, a, k), false, none, false));
+    const first = try board.getTicket(db, a, k);
+    const path = try std.fmt.allocPrint(a, "{s}/wt/qa/qa-1-own", .{base});
+    try std.testing.expectEqualStrings(try worktree.workingChange(ctx, a, path), first.change);
+    // It merges, and its worktree is left on a new change on top (as cl's merge leaves it).
+    try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = try std.fmt.allocPrint(a, "{s}/one.txt", .{path}), .data = "one\n" });
+    try std.testing.expect((try worktree.mergeChange(ctx, a, repo, path, first.change, first.branch, trunk)).merged);
+    _ = worktree.catchUp(ctx, a, path, trunk, true);
+    // Reopened: started again in the same worktree, it takes that change.
+    board.releaseStart(db, first.id) catch {};
+    try std.testing.expectError(error.SessionFailed, startIn(ctx, cfg, db, a, try board.getTicket(db, a, k), false, none, false));
+    const second = try board.getTicket(db, a, k);
+    try std.testing.expect(!std.mem.eql(u8, first.change, second.change));
+    try std.testing.expectEqualStrings(try worktree.workingChange(ctx, a, path), second.change);
+    try std.testing.expectEqual(worktree.ChangeState.open, worktree.changeState(ctx, a, repo, second.change, trunk));
+    try std.testing.expectEqualStrings("QA-1: Own", try sh(ctx, a, &.{ "jj", "-R", repo, "log", "--no-graph", "-r", second.change, "-T", "description.first_line()" }));
 }
 
 test "a ticket of a project that isn't a code repo gets no jj, base or change, and its session no review guide or merge" {

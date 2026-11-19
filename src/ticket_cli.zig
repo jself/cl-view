@@ -197,6 +197,13 @@ pub const ticket_usage =
     \\                              its Claude to rebase onto it and settle the conflicts. Only into
     \\                              an idle session on that ticket; testing/review go back to running
     \\                              (and its done returns them there)
+    \\  change <key> [<rev>]        make the jj change <rev> names (default @, the working copy of
+    \\                              the ticket's worktree, else the project's checkout) the
+    \\                              ticket's own: what is merged, tested for conflicts and
+    \\                              reviewed. Described "<key>: <title>" if it has no description,
+    \\                              and given the ticket's bookmark. Refused for a change already
+    \\                              in its target or another unfinished ticket's. cl does this
+    \\                              itself when a reopened ticket's change was merged already
     \\  approve <key> [--spin-off] [--merge | --pr [--then <steps>] | --tell <text> | --close]
     \\                              plan → queued (a new session builds it, told the plan;
     \\                              an umbrella's sub-tickets queue instead), testing → review,
@@ -1147,6 +1154,16 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         var test_plan = args.get("--test-plan");
         if (test_plan != null and std.mem.eql(u8, test_plan.?, "-")) test_plan = readStdin(ctx, a, "the handoff");
         const plan = if (args.has("--plan")) readStdin(ctx, a, "the plan") else null;
+        // Reopened after its change merged: this round's work is in the
+        // working copy's new change, which becomes the ticket's.
+        // Only in its own checkout: a sub-ticket in its parent's session
+        // would take the parent's work.
+        if (t0.stage != .planning) if (dispatch.ownDir(db, a, t0) catch null) |dir| {
+            _ = dispatch.followChange(ctx, db, a, t0, dir, false) catch |e| {
+                try out(try std.fmt.allocPrint(a, "{s}: cl couldn't check whether its jj change is merged already ({s})\n", .{ t0.key, @errorName(e) }));
+            };
+            if (dispatch.mergedChangeNote(ctx, db, a, key) catch null) |note| try out(try std.fmt.allocPrint(a, "{s}\n", .{note}));
+        };
         review.done(ctx, db, a, key, args.get("--summary") orelse "", test_plan, plan) catch |e| switch (e) {
             error.BadTestPlan => fail("{s}", .{if (t0.stage == .planning) "a plan being approved has no test plan yet" else "the handoff is empty: give # Verified, # Test plan or # Demo (cl ticket testplan --format), or --test-plan \"\" to drop it"}),
             error.TextOutsideSteps => fail("text under # Test plan or # Demo before its first \"## \" step would be dropped: put it in a step (\"## <title>\", then its lines; cl ticket testplan --format)", .{}),
@@ -1315,6 +1332,21 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         try out(aw.writer.buffered());
         park.stopSession(ctx, cfg, db, a, t.key) catch |e| boardFail(db, e, "ticket");
         return;
+    }
+    if (std.mem.eql(u8, cmd, "change")) {
+        args.only(&.{}, ticket_usage);
+        if (pos.len < 1 or pos.len > 2) fail("usage: cl ticket change <key> [<rev>]", .{});
+        const t = board.getTicket(db, a, pos[0]) catch |e| boardFail(db, e, "ticket");
+        const rev = if (pos.len == 2) pos[1] else "@";
+        const c = dispatch.repointChange(ctx, db, a, t, rev) catch |e| switch (e) {
+            error.NotJj => fail("{s}'s checkout isn't a jj repo: it has no change to set", .{t.key}),
+            error.BadRev => fail("{s} doesn't name one jj change in {s}", .{ rev, review.ticketDir(db, a, t) catch "its checkout" }),
+            error.InTarget => fail("{s} is in {s}'s target already: merging it would do nothing", .{ rev, t.key }),
+            error.Claimed => fail("{s} is another unfinished ticket's change", .{rev}),
+            error.CommandFailed => fail("jj refused: {s}", .{worktree.lastError()}),
+            else => boardFail(db, e, "ticket"),
+        };
+        return out(try std.fmt.allocPrint(a, "{s}: its change is now {s}{s}{s}\n", .{ t.key, c.id[0..@min(c.id.len, 12)], if (c.bookmark.len > 0) ", bookmark " else " (no bookmark: the name is taken)", c.bookmark }));
     }
     if (std.mem.eql(u8, cmd, "rebase")) {
         args.only(&.{}, ticket_usage);
