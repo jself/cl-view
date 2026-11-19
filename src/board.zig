@@ -1745,6 +1745,11 @@ pub fn listTickets(db: Db, a: std.mem.Allocator, f: Filter) Error![]Ticket {
     while (try st.step()) {
         const t = try readTicket(st, a);
         if (f.needs and try isWorking(db, t, f.busy)) continue;
+        // Idle was all it asked, and its session is busy again.
+        if (f.needs and staleIdle(flag_idle, t.tmux, f.busy) and (try db.int(
+            "SELECT 1 FROM flags g WHERE g.ticket = ?1 AND g.cleared IS NULL AND g.kind != ?2 AND g.hidden = ?3 AND (g.kind IN ('" ++ flag_reminder ++ "', '" ++ flag_due ++ "') OR NOT EXISTS (SELECT 1 FROM parks k WHERE k.ticket = g.ticket))",
+            .{ t.id, flag_idle, @as(i64, @intFromBool(f.hidden)) },
+        )) == null) continue;
         try out.append(a, t);
     }
     const extras = try Extras.prepare(db);
@@ -1753,18 +1758,47 @@ pub fn listTickets(db: Db, a: std.mem.Allocator, f: Filter) Error![]Ticket {
     return out.toOwnedSlice(a);
 }
 
-/// The ticket a session is on: the newest one there in progress (Running,
-/// Planning) or finishing, else the newest one there not done.
+/// The ticket a session is on: the one there in progress (Running,
+/// Planning) or finishing that moved into its stage last, else the one
+/// there not done that did. Sent back to Running with feedback, an older
+/// ticket is what the session works on again (CL-184).
 pub fn sessionTicket(db: Db, tmux_name: []const u8) Error!?i64 {
     return db.int(
         \\SELECT id FROM tickets WHERE tmux = ?1 AND stage != 'done'
-        \\ORDER BY (stage IN ('running', 'planning') OR finishing != '') DESC, id DESC LIMIT 1
-    , .{tmux_name});
+        \\ORDER BY (stage IN ('running', 'planning') OR finishing != '') DESC, 
+    ++ moved_last ++ " DESC, id DESC LIMIT 1", .{tmux_name});
+}
+
+/// When ticket `tickets.id` moved into its stage, as the id of its last
+/// `moved` event (ids keep the order of moves within the same second);
+/// NULL if it never moved.
+const moved_last = "(SELECT max(e.id) FROM events e WHERE e.ticket = tickets.id AND e.kind = 'moved')";
+
+/// `moved_last` for ticket `id` (0 if it never moved).
+pub fn movedLast(db: Db, id: i64) Error!i64 {
+    return (try db.int("SELECT " ++ moved_last ++ " FROM tickets WHERE id = ?1", .{id})) orelse 0;
 }
 
 /// Is Claude working on `t` right now: its session is one of the `busy` ones
 /// and is on it, or an automated review of it is running (`reviewing`)? Then
 /// it isn't waiting on the human, whatever its flags say.
+/// An `idle` flag on a ticket whose session is busy says nothing: Claude
+/// went back to work (by itself, or on another ticket sharing the session)
+/// and the dispatcher clears it on its next pass. Until then the board
+/// and push leave it out (CL-184).
+pub fn staleIdle(kind: []const u8, tmux_name: []const u8, busy: []const []const u8) bool {
+    if (!std.mem.eql(u8, kind, flag_idle) or tmux_name.len == 0) return false;
+    for (busy) |b| if (std.mem.eql(u8, b, tmux_name)) return true;
+    return false;
+}
+
+/// `flags` without a `staleIdle` one.
+pub fn withoutStaleIdle(a: std.mem.Allocator, flags: []Flag, tmux_name: []const u8, busy: []const []const u8) Error![]Flag {
+    var out: std.ArrayList(Flag) = .empty;
+    for (flags) |f| if (!staleIdle(f.kind, tmux_name, busy)) try out.append(a, f);
+    return out.toOwnedSlice(a);
+}
+
 pub fn isWorking(db: Db, t: Ticket, busy: []const []const u8) Error!bool {
     if (reviewing(t)) return true;
     if (t.tmux.len == 0) return false;
@@ -3758,6 +3792,41 @@ test "an idle session raises idle only when nothing else asks, and it goes when 
     // It comes and goes every turn: not in the activity log. Never dismissed (it would only come back).
     try testing.expect(waitingFlag(flag_idle));
     try testing.expectEqual(@as(?i64, null), try db.int("SELECT 1 FROM events WHERE ticket = ?1 AND detail = 'idle'", .{id}));
+}
+
+test "a busy session's idle flag isn't shown, on whichever ticket there it sits; the one sent back last is the session's (CL-184)" {
+    const ctx = testCtx();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try Db.open(":memory:");
+    defer db.close();
+    try migrate(db);
+    try addProject(db, .{ .name = "gu", .dir = "/x/gu" });
+    // GU-3 and GU-5 share a queue session; GU-5 is sent back from Testing.
+    const k3 = try createTicket(ctx, db, a, .{ .project = "gu", .title = "Three", .stage = .running });
+    const k5 = try createTicket(ctx, db, a, .{ .project = "gu", .title = "Five", .stage = .testing });
+    try db.exec("UPDATE tickets SET tmux = 'cl_gu'", .{});
+    const id3 = (try getTicket(db, a, k3)).id;
+    const id5 = (try getTicket(db, a, k5)).id;
+    try move(ctx, db, a, k5, .running);
+    try testing.expectEqual(@as(?i64, id5), try sessionTicket(db, "cl_gu"));
+    // GU-3's idle was left from before.
+    try setIdle(ctx, db, id3, true);
+    const busy: []const []const u8 = &.{"cl_gu"};
+    try testing.expect(!try isWorking(db, try getTicket(db, a, k3), busy));
+    try testing.expectEqual(@as(usize, 0), (try listTickets(db, a, .{ .needs = true, .busy = busy })).len);
+    try testing.expectEqual(@as(usize, 0), (try withoutStaleIdle(a, (try getTicket(db, a, k3)).flags, "cl_gu", busy)).len);
+    // Not busy, it's there.
+    try testing.expectEqual(@as(usize, 1), (try listTickets(db, a, .{ .needs = true })).len);
+    try testing.expectEqual(@as(usize, 1), (try withoutStaleIdle(a, (try getTicket(db, a, k3)).flags, "cl_gu", &.{})).len);
+    // Anything else it asks still shows while busy.
+    try db.exec("INSERT INTO flags (ticket, kind, source, detail, at) VALUES (?1, 'conflict', 'auto', '', 1)", .{id3});
+    try testing.expectEqual(@as(usize, 1), (try listTickets(db, a, .{ .needs = true, .busy = busy })).len);
+    // GU-3 sent back to Running after GU-5, older as it is: the session is on it.
+    try move(ctx, db, a, k3, .testing);
+    try move(ctx, db, a, k3, .running);
+    try testing.expectEqual(@as(?i64, id3), try sessionTicket(db, "cl_gu"));
 }
 
 test "dependencies: links, cycles, a removed blocker, and shelving a parent" {

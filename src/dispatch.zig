@@ -1456,6 +1456,49 @@ fn sessionGone(ctx: Ctx, db: board.Db, t: board.Ticket) !void {
     try board.logEvent(ctx, db, t.id, "talk ended", t.tmux);
 }
 
+/// In progress: flag a session that is gone, and keep the flags of a live
+/// one in step with what it is waiting on. A queue session shared by several
+/// tickets speaks for the one in progress there that moved into its stage
+/// last (as board.sessionTicket): one sent back with feedback is what it
+/// works on again, older or newer.
+fn followSessions(ctx: Ctx, db: board.Db, a: std.mem.Allocator, view: View) !void {
+    var current: std.StringHashMapUnmanaged(board.Ticket) = .empty;
+    var moved: std.AutoHashMapUnmanaged(i64, i64) = .empty;
+    var live: std.ArrayList(board.Ticket) = .empty;
+    for (try board.listTickets(db, a, .{ .done = false })) |t| {
+        if (t.finishing.len > 0 and t.tmux.len > 0 and t.tmux[0] != '(' and !view.alive(t.tmux)) {
+            finishingGone(ctx, db, a, t) catch {};
+            continue;
+        }
+        if (!followed(t)) continue;
+        if (t.tmux.len == 0 or t.tmux[0] == '(') continue;
+        if (!view.alive(t.tmux)) {
+            sessionGone(ctx, db, t) catch {};
+            continue;
+        }
+        try live.append(a, t);
+        const m = try board.movedLast(db, t.id);
+        try moved.put(a, t.id, m);
+        const prev = current.get(t.tmux) orelse {
+            try current.put(a, t.tmux, t);
+            continue;
+        };
+        const pm = moved.get(prev.id).?;
+        if (pm < m or (pm == m and prev.id < t.id)) try current.put(a, t.tmux, t);
+    }
+    // The others there don't speak for it: what they were flagged with
+    // while they did (idle, a question) is the current one's now (GU-3
+    // stayed idle while its session worked on GU-5's feedback: CL-184).
+    for (live.items) |t| if (current.get(t.tmux).?.id != t.id) signals.release(ctx, db, t.id) catch {};
+    var cur_it = current.valueIterator();
+    while (cur_it.next()) |t| {
+        const s = view.find(t.tmux) orelse continue;
+        const status = claude.statusFor(ctx, view.statuses, s);
+        signals.sync(ctx, db, a, t.*, view.statuses.get(t.tmux), status) catch {};
+        signals.syncIdle(ctx, db, t.*, status, s.hidden) catch {};
+    }
+}
+
 /// One dispatcher pass: start what can start, and flag tickets whose session
 /// went away. Returns how many tickets it started.
 pub fn tick(ctx: Ctx, cfg: config.Config, db: board.Db) !usize {
@@ -1472,31 +1515,7 @@ pub fn tick(ctx: Ctx, cfg: config.Config, db: board.Db) !usize {
     const a = arena_state.allocator();
     const view = try View.read(ctx, a, cfg);
 
-    // In progress: flag a session that is gone, and keep the flags of a
-    // live one in step with what it is waiting on. A queue session shared by
-    // several tickets speaks for the newest one in progress there.
-    var current: std.StringHashMapUnmanaged(board.Ticket) = .empty;
-    for (try board.listTickets(db, a, .{ .done = false })) |t| {
-        if (t.finishing.len > 0 and t.tmux.len > 0 and t.tmux[0] != '(' and !view.alive(t.tmux)) {
-            finishingGone(ctx, db, a, t) catch {};
-            continue;
-        }
-        if (!followed(t)) continue;
-        if (t.tmux.len == 0 or t.tmux[0] == '(') continue;
-        if (!view.alive(t.tmux)) {
-            sessionGone(ctx, db, t) catch {};
-            continue;
-        }
-        const prev = current.get(t.tmux);
-        if (prev == null or prev.?.id < t.id) try current.put(a, t.tmux, t);
-    }
-    var cur_it = current.valueIterator();
-    while (cur_it.next()) |t| {
-        const s = view.find(t.tmux) orelse continue;
-        const status = claude.statusFor(ctx, view.statuses, s);
-        signals.sync(ctx, db, a, t.*, view.statuses.get(t.tmux), status) catch {};
-        signals.syncIdle(ctx, db, t.*, status, s.hidden) catch {};
-    }
+    try followSessions(ctx, db, a, view);
 
     // Out of Planning (approved, or moved): its planning session goes, before
     // the ticket can start building.
@@ -3204,4 +3223,64 @@ test "pause now leaves a ticket held in Running for its automated review alone" 
     const t = try board.getTicket(db, a, k);
     try std.testing.expectEqual(board.Stage.running, t.stage);
     try std.testing.expect(autoreview.holds(a, t));
+}
+
+test "a session shared by two tickets in progress flags only the one sent to it last; the other's idle and question go (CL-184)" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = a, .env = Ctx.testEnv(), .home = "/tmp", .tmux_blocked = true };
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "gu", .dir = "/x/gu" });
+    // GU-3 runs in the queue session; GU-5, in Testing there, is sent back.
+    const k3 = try board.createTicket(ctx, db, a, .{ .project = "gu", .title = "Three", .stage = .running });
+    const k5 = try board.createTicket(ctx, db, a, .{ .project = "gu", .title = "Five", .stage = .testing });
+    try db.exec("UPDATE tickets SET tmux = 'cl_gu_1'", .{});
+    var sessions = [_]tmux.Session{.{ .tmux_name = "cl_gu_1", .name = "gu", .dir = "/x/gu", .profile = "", .created = 1, .pane_title = "", .pane_dead = false, .activity = 0, .role = "", .alert = "" }};
+    var statuses: claude.StatusMap = .empty;
+    const info: claude.Info = .{ .status = .idle, .name = "", .status_since_ms = 0, .updated_ms = 0, .summary = "", .session_id = "", .cwd = "/x/gu" };
+    try statuses.put(a, "cl_gu_1", info);
+    const view: View = .{ .sessions = &sessions, .statuses = statuses };
+    const flagOf = struct {
+        fn f(d: board.Db, al: std.mem.Allocator, key: []const u8) []const u8 {
+            const t = board.getTicket(d, al, key) catch unreachable;
+            return if (t.flags.len == 0) "" else t.flags[0].kind;
+        }
+    }.f;
+
+    // Its turn over with only GU-3 in progress: GU-3 is idle.
+    try followSessions(ctx, db, a, view);
+    try std.testing.expectEqualStrings(board.flag_idle, flagOf(db, a, k3));
+    // GU-5 back in Running: the session speaks for it, and GU-3's idle goes
+    // even before the session goes busy; so does a question it was asking.
+    try board.moveTicket(ctx, db, try board.getTicket(db, a, k5), .running);
+    try followSessions(ctx, db, a, view);
+    try std.testing.expectEqualStrings("", flagOf(db, a, k3));
+    try std.testing.expectEqualStrings(board.flag_idle, flagOf(db, a, k5));
+    try board.setFlag(ctx, db, a, k3, board.flag_input, "auto", "{}");
+    try followSessions(ctx, db, a, view);
+    try std.testing.expectEqualStrings("", flagOf(db, a, k3));
+    // A flag you set by hand on GU-3 stays.
+    try board.setFlag(ctx, db, a, k3, "blocked", "you", "waiting on CI");
+    // Claude goes back to work by itself (a background task finished).
+    try statuses.put(a, "cl_gu_1", .{ .status = .busy, .name = "", .status_since_ms = 0, .updated_ms = 0, .summary = "", .session_id = "", .cwd = "/x/gu" });
+    try followSessions(ctx, db, a, .{ .sessions = &sessions, .statuses = statuses });
+    try std.testing.expectEqualStrings("", flagOf(db, a, k5));
+    try std.testing.expectEqualStrings("blocked", flagOf(db, a, k3));
+    // Its turn over with a background task running (shell): not idle either.
+    try statuses.put(a, "cl_gu_1", .{ .status = .shell, .name = "", .status_since_ms = 0, .updated_ms = 0, .summary = "", .session_id = "", .cwd = "/x/gu" });
+    try followSessions(ctx, db, a, .{ .sessions = &sessions, .statuses = statuses });
+    try std.testing.expectEqualStrings("", flagOf(db, a, k5));
+    // GU-3 sent back to Running after GU-5, older as it is: the session
+    // speaks for it now, and GU-5's flags go.
+    try board.clearFlag(ctx, db, a, k3, "blocked");
+    try board.moveTicket(ctx, db, try board.getTicket(db, a, k3), .testing);
+    try board.moveTicket(ctx, db, try board.getTicket(db, a, k3), .running);
+    try statuses.put(a, "cl_gu_1", info);
+    try board.setFlag(ctx, db, a, k5, board.flag_input, "auto", "{}");
+    try followSessions(ctx, db, a, .{ .sessions = &sessions, .statuses = statuses });
+    try std.testing.expectEqualStrings(board.flag_idle, flagOf(db, a, k3));
+    try std.testing.expectEqualStrings("", flagOf(db, a, k5));
 }

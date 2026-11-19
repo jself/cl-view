@@ -178,7 +178,8 @@ pub fn snapshot(db: board.Db, a: std.mem.Allocator, sessions: Sessions) ![]Seen 
                 .flags = &.{},
             });
         }
-        if (!st.isNull(7)) try flags.append(a, .{ .id = st.int(7), .kind = try st.dupe(a, 8), .detail = try st.dupe(a, 9), .hidden = st.int(10) != 0 });
+        // Idle on a busy session says nothing (board.staleIdle).
+        if (!st.isNull(7) and !board.staleIdle(st.text(8), st.text(5), sessions.busy)) try flags.append(a, .{ .id = st.int(7), .kind = try st.dupe(a, 8), .detail = try st.dupe(a, 9), .hidden = st.int(10) != 0 });
     }
     if (out.items.len > 0) out.items[out.items.len - 1].flags = try flags.toOwnedSlice(a);
     return out.toOwnedSlice(a);
@@ -506,4 +507,27 @@ test "ticket watch: filters" {
     try testing.expect((Filter{ .projects = &.{"web"} }).match(nw));
     try testing.expect(!(Filter{ .projects = &.{"web"} }).match(q));
     try testing.expectEqual(@as(usize, 0), (try splitList(a, null)).len);
+}
+
+test "ticket watch: an idle flag on a busy session isn't seen, so push doesn't send it (CL-184)" {
+    const ctx = testCtx();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try board.Db.open(":memory:");
+    defer db.close();
+    try board.migrate(db);
+    try board.addProject(db, .{ .name = "gu", .dir = "/x/gu" });
+    const k3 = try board.createTicket(ctx, db, a, .{ .project = "gu", .title = "Three", .stage = .running });
+    const k5 = try board.createTicket(ctx, db, a, .{ .project = "gu", .title = "Five", .stage = .running });
+    try db.exec("UPDATE tickets SET tmux = 'cl_gu'", .{});
+    try board.setIdle(ctx, db, (try board.getTicket(db, a, k3)).id, true);
+    try board.setFlag(ctx, db, a, k5, board.flag_testing, "auto", "");
+    const busy = try snapshot(db, a, .{ .busy = &.{"cl_gu"} });
+    try testing.expect(!busy[0].inNeeds());
+    try testing.expectEqual(@as(usize, 0), busy[0].flags.len);
+    // Its other flags still are.
+    try testing.expectEqualStrings(board.flag_testing, busy[1].flags[0].kind);
+    const idle = try snapshot(db, a, .{});
+    try testing.expect(idle[0].inNeeds());
 }

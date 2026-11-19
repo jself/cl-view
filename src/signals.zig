@@ -457,6 +457,14 @@ pub fn syncIdle(ctx: Ctx, db: board.Db, t: board.Ticket, status: claude.Status, 
     }
 }
 
+/// `id` no longer speaks for its session (a newer ticket in progress shares
+/// it): the flags the session raised on it go.
+pub fn release(ctx: Ctx, db: board.Db, id: i64) !void {
+    try clearAuto(ctx, db, id, board.flag_question);
+    try clearAuto(ctx, db, id, board.flag_input);
+    try board.setIdle(ctx, db, id, false);
+}
+
 /// Clear a flag the board set itself, leaving one you set by hand.
 fn clearAuto(ctx: Ctx, db: board.Db, id: i64, kind: []const u8) !void {
     if ((try db.int("SELECT 1 FROM flags WHERE ticket = ?1 AND kind = ?2 AND cleared IS NULL AND source = 'auto'", .{ id, kind })) == null) return;

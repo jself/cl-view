@@ -937,7 +937,9 @@ fn getBoard(ctx: Ctx, cfg: config.Config, db: board.Db, a: std.mem.Allocator, re
     const ss = try sessionStatuses(ctx, cfg, a);
     const tickets = try board.listTickets(db, a, .{});
     var rows: std.ArrayList(TicketRow) = .empty;
-    for (tickets) |t| {
+    for (tickets) |t0| {
+        var t = t0;
+        t.flags = try board.withoutStaleIdle(a, t.flags, t.tmux, ss.busy);
         const ar = autoreview.load(a, t);
         try rows.append(a, .{
             .ticket = try listTicket(a, t, ar),
