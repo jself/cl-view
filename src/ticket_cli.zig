@@ -114,6 +114,8 @@ pub const ticket_usage =
     \\  show <key> [--json | --plan] details, flags, what it waits on and blocks, sub-tickets
     \\                              (in order, how many done), comments and activity;
     \\                              --plan: just the plan its planning session handed in
+    \\  pr-lookup <key>             look for a PR opened from its branch and put it on record
+    \\                              (the dispatcher does it once for a Done ticket with none)
     \\  edit <key> [--title <t>] [-m <body>] [--project <p>] [--worktree | --queue]
     \\      [--target <session>] [--plan | --no-plan] [--skill <name>] [--profile <name>]
     \\      [--after <key,...>] [--not-after <key,...>] [--parallel | --in-order]
@@ -1400,6 +1402,13 @@ pub fn ticketMain(ctx: Ctx, cfg: config.Config, argv: []const []const u8) !void 
         if (pos.len != 1) fail("usage: cl ticket park-check <key> --at <when>", .{});
         const at = std.fmt.parseInt(i64, args.get("--at") orelse fail("--at <when>", .{}), 10) catch fail("--at takes the park's time", .{});
         park.runCheck(ctx, cfg, db, pos[0], at);
+        return;
+    }
+    if (std.mem.eql(u8, cmd, "pr-lookup")) {
+        // The dispatcher's detached look for a Done ticket's PR (park.lookUpPrsDue); by hand, it tries again.
+        args.only(&.{}, ticket_usage);
+        const key = keyArg(pos, 0, env_key, "cl ticket pr-lookup <key>");
+        try out(try std.fmt.allocPrint(a, "{s}\n", .{park.lookUpPr(ctx, db, a, key) catch |e| boardFail(db, e, "ticket")}));
         return;
     }
     if (std.mem.eql(u8, cmd, "hide") or std.mem.eql(u8, cmd, "unhide")) {

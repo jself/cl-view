@@ -2796,6 +2796,33 @@ pub fn setPr(ctx: Ctx, db: Db, id: i64, url: []const u8, stage: Stage) Error!voi
     try touch(ctx, db, id);
 }
 
+/// The event that claims a ticket's one look for its PR (`prLookupsDue`).
+pub const ev_pr_lookup = "pr lookup";
+
+pub const PrLookup = struct { id: i64, key: []const u8 };
+
+/// Done tickets with a branch and no PR on record, never looked up for one
+/// (park.lookUpPrsDue): oldest first, up to `limit`.
+pub fn prLookupsDue(db: Db, a: std.mem.Allocator, limit: i64) Error![]PrLookup {
+    var st = try db.query(
+        \\SELECT t.id, t.key FROM tickets t WHERE t.stage = 'done' AND t.branch != '' AND t.pr_url = ''
+        \\  AND NOT EXISTS (SELECT 1 FROM events e WHERE e.ticket = t.id AND e.kind = ?1)
+        \\ORDER BY t.id LIMIT ?2
+    , .{ ev_pr_lookup, limit });
+    defer st.finalize();
+    var out: std.ArrayList(PrLookup) = .empty;
+    while (try st.step()) try out.append(a, .{ .id = st.int(0), .key = try st.dupe(a, 1) });
+    return out.items;
+}
+
+/// The PR `url` was opened from the ticket's branch outside `cl ticket done
+/// --pr-url` (a session's own `gh pr create`): it is on record, so Ctrl+K
+/// finds the ticket by its number, but nothing waits on it (no `pr_stage`).
+/// A PR already on record stays.
+pub fn notePr(db: Db, id: i64, url: []const u8) Error!void {
+    try db.exec("UPDATE tickets SET pr_url = ?2 WHERE id = ?1 AND pr_url = ''", .{ id, url });
+}
+
 /// It no longer waits on a PR (closed without merging): `prStage` is null.
 pub fn clearPr(ctx: Ctx, db: Db, id: i64) Error!void {
     try db.exec("UPDATE tickets SET pr_url = '', pr_stage = '', pr_seen = 0, pr_seen_sha = '' WHERE id = ?1", .{id});
@@ -4220,4 +4247,38 @@ test "a ticket made a todo: its tasks stop waiting on one another; Claude's work
     try testing.expectError(error.BadInput, createTicket(ctx, db, a, .{ .project = "qa", .title = "x", .link = "javascript:alert(1)" }));
     try testing.expectError(error.BadInput, updateTicket(ctx, db, a, p, .{ .link = "javascript:alert(1)" }));
     try updateTicket(ctx, db, a, p, .{ .link = "mailto:josh@example.com" });
+}
+
+test "a Done ticket's PR: looked up once when it has a branch and none on record; notePr keeps one already there" {
+    const ctx = testCtx();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const db = try Db.open(":memory:");
+    defer db.close();
+    try migrate(db);
+    try addProject(db, .{ .name = "qa", .dir = "/x/qa" });
+    // QA-1 done with a branch: due. QA-2 done, no branch. QA-3 done with its PR
+    // on record. QA-4 has a branch but isn't Done.
+    for ([_][]const u8{ "Done", "No branch", "Has PR", "Running" }) |title| _ = try createTicket(ctx, db, a, .{ .project = "qa", .title = title });
+    try db.exec("UPDATE tickets SET stage = 'done' WHERE key IN ('QA-1', 'QA-2', 'QA-3')", .{});
+    try db.exec("UPDATE tickets SET branch = 'qa-' || id WHERE key != 'QA-2'", .{});
+    try db.exec("UPDATE tickets SET pr_url = 'https://github.com/o/r/pull/3', pr_stage = 'done' WHERE key = 'QA-3'", .{});
+    try db.exec("UPDATE tickets SET stage = 'running' WHERE key = 'QA-4'", .{});
+    var due = try prLookupsDue(db, a, 10);
+    try testing.expectEqual(@as(usize, 1), due.len);
+    try testing.expectEqualStrings("QA-1", due[0].key);
+    // Claimed: not due again, found or not.
+    try logEvent(ctx, db, due[0].id, ev_pr_lookup, "");
+    due = try prLookupsDue(db, a, 10);
+    try testing.expectEqual(@as(usize, 0), due.len);
+
+    try notePr(db, (try getTicket(db, a, "QA-1")).id, "https://github.com/o/r/pull/2738");
+    var t = try getTicket(db, a, "QA-1");
+    try testing.expectEqualStrings("https://github.com/o/r/pull/2738", t.pr_url);
+    // On record, but nothing waits on it.
+    try testing.expectEqual(@as(?Stage, null), prStage(t));
+    try notePr(db, (try getTicket(db, a, "QA-3")).id, "https://github.com/o/r/pull/9");
+    t = try getTicket(db, a, "QA-3");
+    try testing.expectEqualStrings("https://github.com/o/r/pull/3", t.pr_url);
 }

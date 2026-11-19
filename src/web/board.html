@@ -3607,13 +3607,32 @@ function palCommands() {
     { label: "Keyboard shortcuts", hint: "?", run: () => document.getElementById("keysDlg").showModal() },
   ].map((c) => ({ ...c, kind: "cmd" }));
 }
+// A ticket's PR (Ticket.pr_url) as its number and repo: "https://github.com/o/r/pull/2738"
+// is { n: "2738", repo: "o/r" }. null without one.
+function prOf(url) {
+  const m = /^\w+:\/\/[^/]+\/(.*?)\/?(\d+)\/?(?:[?#].*)?$/.exec(url || ""); if (!m) return null;
+  return { n: m[2].replace(/^0+(?=\d)/, ""), repo: m[1].replace(/\/(?:-\/)?(?:pull|pulls|merge_requests)\/?$/, "") };
+}
+// The PR number a query asks for: "2738" or "#2738". null for anything else.
+const prQuery = (q) => /^#?0*(\d+)$/.exec(q.trim())?.[1] ?? null;
 function palTickets() {
   const rows = [...(state.data?.tickets || [])];
   rows.sort((a, b) => (needsMe(b) - needsMe(a)) || ((a.ticket.stage === "done") - (b.ticket.stage === "done")) || b.ticket.updated - a.ticket.updated);
   return rows.map((r) => { const t = r.ticket;
-    return { kind: "ticket", key: t.key, label: t.title, done: t.stage === "done", text: `${t.key} ${t.title}`,
+    return { kind: "ticket", key: t.key, label: t.title, done: t.stage === "done", text: `${t.key} ${t.title}`, pr: prOf(t.pr_url),
       note: [t.project, STAGE_NAME[t.stage], needsMe(r) ? "needs you" : r.status === "busy" ? "working" : ""].filter(Boolean).join(" · "),
       run: () => openTicket(t.key) }; });
+}
+// How well q picks ticket x (from palTickets): its key typed whole (or its number) or its
+// PR's number first; done tickets after open ones that match as well. -1: no match.
+// A PR match says so in the note, with the repo: tickets in other repos can share the number.
+function palTicketScore(q, x) {
+  const qq = q.trim().toLowerCase(), k = x.key.toLowerCase(), pr = prQuery(q);
+  const m = matchScore(q, x.text);
+  const score = k === qq || k.endsWith("-" + qq) ? 1e4 : k.startsWith(qq) ? 5000 : m < 0 ? -1 : m + (x.done ? 0 : 25);
+  // Its key matching as well keeps the key's rank (QA-12 with PR #12, for "12").
+  if (pr !== null && x.pr?.n === pr) return { score: qq.startsWith("#") ? 2e4 : Math.max(9000, score), note: [`PR ${x.pr.repo}#${pr}`, x.note].filter(Boolean).join(" · ") };
+  return { score };
 }
 function palActions(key) {
   const row = state.data?.tickets.find((r) => r.ticket.key === key); if (!row) return [];
@@ -3664,11 +3683,7 @@ function palRender() {
     const tk = palTickets(), cmd = palCommands();
     if (!q.trim()) items = [...tk.slice(0, 8), ...cmd];
     else {
-      const qq = q.trim().toLowerCase();
-      // A key typed whole (or its number) first; done tickets after open ones that match as well.
-      const tkScore = (x) => { const k = x.key.toLowerCase(); if (k === qq || k.endsWith("-" + qq)) return 1e4; if (k.startsWith(qq)) return 5000;
-        const m = matchScore(q, x.text); return m < 0 ? -1 : m + (x.done ? 0 : 25); };
-      items = [...tk.map((x) => ({ ...x, score: tkScore(x) })), ...cmd.map((x) => { const m = matchScore(q, x.label); return { ...x, score: m < 0 ? -1 : m + 35 }; })]
+      items = [...tk.map((x) => ({ ...x, ...palTicketScore(q, x) })), ...cmd.map((x) => { const m = matchScore(q, x.label); return { ...x, score: m < 0 ? -1 : m + 35 }; })]
         .filter((x) => x.score >= 0);
       items.sort((a, b) => b.score - a.score);
     }

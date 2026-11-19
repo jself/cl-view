@@ -387,6 +387,55 @@ fn expire(ctx: Ctx, db: board.Db, a: std.mem.Allocator, d: board.DuePark) !void 
 
 /// `cl ticket park-check <key> --at <when>` detached (`Ctx.detach`), so a
 /// restart of `cl web` leaves it running.
+/// PRs opened outside `cl ticket done --pr-url` (a session's own `gh pr
+/// create`, say) aren't on record, so Ctrl+K can't find their tickets by
+/// number. Each Done ticket with a branch and no PR is looked up once, a few
+/// a pass, in a detached `cl ticket pr-lookup` (`lookUpPr`). The claim is
+/// its `board.ev_pr_lookup` event: a failed look isn't tried again by
+/// itself (`cl ticket pr-lookup <key>` tries it by hand).
+pub fn lookUpPrsDue(ctx: Ctx, db: board.Db) !void {
+    var arena_state = std.heap.ArenaAllocator.init(ctx.gpa);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    for (try board.prLookupsDue(db, a, 3)) |d| {
+        try board.logEvent(ctx, db, d.id, board.ev_pr_lookup, "");
+        // A test's dispatcher pass would start the test binary.
+        if (@import("builtin").is_test) continue;
+        ctx.detach(&.{ "ticket", "pr-lookup", d.key }) catch |e|
+            try board.logEvent(ctx, db, d.id, "pr lookup failed", @errorName(e));
+    }
+}
+
+/// How long `lookUpPr` gives gh, in seconds.
+const pr_lookup_limit = 60;
+
+/// Look for the PR whose head is `key`'s branch (in any state) and put it on
+/// record (`board.notePr`). Returns what it found, for `cl ticket pr-lookup`;
+/// the ticket's log says it too.
+pub fn lookUpPr(ctx: Ctx, db: board.Db, a: std.mem.Allocator, key: []const u8) ![]const u8 {
+    const t = try board.getTicket(db, a, key);
+    if (t.pr_url.len > 0) return std.fmt.allocPrint(a, "{s} already has its PR on record: {s}", .{ key, t.pr_url });
+    if (t.branch.len == 0) return std.fmt.allocPrint(a, "{s} has no branch to look for a PR from", .{key});
+    const dir = try review.ticketDir(db, a, t);
+    var env = try ctx.env.clone(a);
+    _ = env.swapRemove("TMUX");
+    _ = env.swapRemove("TMUX_PANE");
+    const res = try gh(ctx, a, dir, &env, pr_lookup_limit, &.{ "pr", "list", "--head", t.branch, "--state", "all", "--limit", "1", "--json", "url", "--jq", ".[0].url // \"\"" });
+    const url = std.mem.trim(u8, res.out, " \t\r\n");
+    if (!res.ok or (url.len > 0 and std.mem.indexOf(u8, url, "://") == null)) {
+        const why = try std.fmt.allocPrint(a, "gh pr list --head {s} failed: {s}", .{ t.branch, lastLine(res.out) });
+        try board.logEvent(ctx, db, t.id, "pr lookup failed", why);
+        return why;
+    }
+    if (url.len == 0) {
+        try board.logEvent(ctx, db, t.id, "pr not found", t.branch);
+        return std.fmt.allocPrint(a, "{s}: no PR from its branch {s}", .{ key, t.branch });
+    }
+    try board.notePr(db, t.id, url);
+    try board.logEvent(ctx, db, t.id, "pr found", url);
+    return std.fmt.allocPrint(a, "{s}: {s} (from its branch {s}), now on record", .{ key, url, t.branch });
+}
+
 fn spawnCheck(ctx: Ctx, a: std.mem.Allocator, key: []const u8, at: i64) !void {
     try ctx.detach(&.{ "ticket", "park-check", key, "--at", try std.fmt.allocPrint(a, "{d}", .{at}) });
 }

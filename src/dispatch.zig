@@ -1461,6 +1461,8 @@ fn sessionGone(ctx: Ctx, db: board.Db, t: board.Ticket) !void {
 pub fn tick(ctx: Ctx, cfg: config.Config, db: board.Db) !usize {
     // Parked tickets' checks (they run detached; a passing one resumes its ticket).
     park.checkDue(ctx, db) catch {};
+    // Done tickets' PRs opened outside `cl ticket done --pr-url`, looked up once.
+    park.lookUpPrsDue(ctx, db) catch {};
     // Todos' reminders and due dates (Needs You's Today group).
     reminders.checkDue(ctx, cfg, db) catch {};
     // Nothing queued or in progress, and no session to let go of: nothing to look at.

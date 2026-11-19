@@ -392,8 +392,9 @@ web.font_size = 16              # text size of the board and terminal pages, in 
   operator chat, like the Chat button.
 - The board works from the keyboard (? lists the keys). S labels everything
   on screen that can be clicked (buttons, cards, tabs, boxes; in a dialog,
-  the dialog's), and typing a label clicks it. Ctrl+K finds a ticket by key
-  or title, or a command; Tab on a ticket lists what you can do with it
+  the dialog's), and typing a label clicks it. Ctrl+K finds a ticket by key,
+  title or PR number (2738 or #2738: the PR it was finished with, or one
+  opened from its branch, see "PRs opened from a branch"), or a command; Tab on a ticket lists what you can do with it
   (open a tab, start, approve, move, park, kill...). / searches, h/j/k/l
   and the arrows move between cards (g/G: top and bottom of the column) and
   Enter opens one, Q makes a quick ticket and N a new one, and A asks in a
@@ -1863,6 +1864,15 @@ runs `cl t done QA-1 --close`: the ticket moves to done and then the session
 closes. After a PR it runs `cl t done QA-1 --close --pr-url <url>` (the URL is
 required): the PR link becomes a comment, and the ticket waits on the PR,
 parked in its stage, as above.
+
+PRs opened from a branch: a PR opened some other way (a session's own `gh pr
+create`, or by hand) isn't on record. Once a ticket with a branch is in Done
+with no PR on record, the dispatcher looks once for a PR (open, merged or
+closed) from its branch, with `gh pr list --head <branch>` in the project, and
+puts it on record. Nothing waits on that PR: it's there for `cl t show` and so
+Ctrl+K finds the ticket by its number. The ticket's Activity says what was found
+("pr found", "pr not found", "pr lookup failed"). A failed look isn't tried
+again by itself: `cl t pr-lookup QA-1` tries again.
 
 A jj change is merged by cl itself: it rebases the change onto trunk and,
 with no conflicts, moves trunk to it and drops the bookmark (a change with no
