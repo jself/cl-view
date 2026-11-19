@@ -120,6 +120,12 @@ install -m755 zig-out/bin/cl ~/.local/bin/cl
 
 With zvm: `~/.local/share/zvm/0.16.0/zig build -Doptimize=ReleaseSafe`.
 
+On a machine that has never fetched with Zig 0.16, the build can stop at
+the sqlite dependency with "failed to create temporary zip file:
+FileNotFound": Zig needs a `tmp` directory in its global cache before it
+can fetch a zip. Create it in the directory `zig env` shows as
+`global_cache_dir` (on Linux, `mkdir -p ~/.cache/zig/tmp`) and build again.
+
 Or with make, which does the same (zvm's 0.16.0 when it's installed, else
 the `zig` on PATH; `make ZIG=...` picks another):
 

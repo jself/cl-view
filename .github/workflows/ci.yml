@@ -21,6 +21,11 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
+      # Zig 0.16 can't fetch a .zip dependency (sqlite) unless the global
+      # cache already has tmp/ ("failed to create temporary zip file:
+      # FileNotFound"), and setup-zig's cache can come back without it.
+      - name: Create Zig cache tmp
+        run: mkdir -p "${ZIG_GLOBAL_CACHE_DIR:?setup-zig did not set it}/tmp"
       - name: Test
         if: matrix.target == 'x86_64-linux-musl'
         run: zig build test
@@ -44,6 +49,11 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
+      # Zig 0.16 can't fetch a .zip dependency (sqlite) unless the global
+      # cache already has tmp/ ("failed to create temporary zip file:
+      # FileNotFound"), and setup-zig's cache can come back without it.
+      - name: Create Zig cache tmp
+        run: mkdir -p "${ZIG_GLOBAL_CACHE_DIR:?setup-zig did not set it}/tmp"
       - name: Test
         run: zig build test
       - name: Build
