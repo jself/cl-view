@@ -83,6 +83,16 @@
     min-height: calc(36 * var(--u)); padding: calc(6 * var(--u)) calc(10 * var(--u)); border: 1px solid var(--line); border-radius: calc(8 * var(--u)); background: #18191c; }
   textarea { width: 100%; resize: vertical; }
   #search { min-width: 0; flex: 0 1 calc(280 * var(--u)); margin-left: auto; }
+  /* A project <select data-combo> becomes a box you type in (combo below): "ep" or "astro" picks astro. */
+  input.combo { min-width: 0; padding-right: calc(28 * var(--u)); cursor: pointer;
+                background: #18191c url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M3 4.5l3 3 3-3' fill='none' stroke='%23a0a3a8' stroke-width='1.5'/%3E%3C/svg%3E") no-repeat right calc(9 * var(--u)) center / calc(12 * var(--u)); }
+  input.combo:focus { cursor: text; }
+  .comboList { position: fixed; inset: auto; margin: 0; padding: calc(4 * var(--u)); list-style: none; max-height: 50vh; overflow-y: auto;
+               background: var(--card); color: var(--fg); border: 1px solid var(--line); border-radius: calc(8 * var(--u)); box-shadow: 0 6px 20px rgba(0,0,0,.5); }
+  .comboList li { display: flex; gap: calc(12 * var(--u)); align-items: baseline; padding: calc(6 * var(--u)) calc(10 * var(--u)); border-radius: calc(6 * var(--u)); cursor: pointer; white-space: nowrap; font-size: calc(14 * var(--u)); }
+  .comboList li.on { background: #24324a; }
+  .comboList li .k { margin-left: auto; font: calc(12 * var(--u)) var(--mono); color: var(--muted); }
+  .comboList li.none { color: var(--muted); cursor: default; }
 
   /* Project sessions: a chip per live one, above Needs you (project_session.zig). */
   #psStrip { display: flex; gap: calc(8 * var(--u)); overflow-x: auto; margin: calc(12 * var(--u)) calc(16 * var(--u)) 0; scrollbar-width: thin; }
@@ -139,7 +149,7 @@
   .trow.hidden { opacity: .6; }
 
   nav#filters { display: flex; flex-wrap: wrap; align-items: center; gap: calc(8 * var(--u)); padding: calc(12 * var(--u)) calc(16 * var(--u)); }
-  nav#filters select { min-height: calc(34 * var(--u)); }
+  nav#filters select, nav#filters .combo { min-height: calc(34 * var(--u)); }
   nav#filters[hidden] { display: none; }
   .switch { position: relative; display: inline-flex; align-items: center; gap: calc(8 * var(--u)); min-height: calc(34 * var(--u)); padding: 0 calc(4 * var(--u));
             cursor: pointer; white-space: nowrap; flex: none; color: #d6d7da; user-select: none; }
@@ -489,7 +499,7 @@
      the dropdowns share the rest, and nothing in the bar can widen the page. */
   @media (max-width: 1024px) {
     nav#filters > * { min-width: 0; max-width: 100%; }
-    nav#filters select { flex: 1 1 calc(140 * var(--u)); }
+    nav#filters select, nav#filters .combo { flex: 1 1 calc(140 * var(--u)); }
     #search { flex: 1 1 100%; margin-left: 0; }
     /* The header gets two rows: name and counts on the left with the view
        tabs across from them, then the four actions sharing the width evenly. */
@@ -584,7 +594,7 @@
 
 <nav id="filters" aria-label="Filters">
   <select id="statusSel" aria-label="Status"></select>
-  <select id="projectSel" aria-label="Project"></select>
+  <select id="projectSel" aria-label="Project" data-combo></select>
   <label class="switch"><input type="checkbox" role="switch" id="subsSw"><span class="track"></span>Sub-tickets</label>
   <label class="switch"><input type="checkbox" role="switch" id="doneSw"><span class="track"></span>Done<span class="n" id="doneN"></span></label>
   <label class="switch" title="Show parked tickets (waiting on something outside cl)"><input type="checkbox" role="switch" id="parkedSw"><span class="track"></span>Parked<span class="n" id="parkedN"></span></label>
@@ -608,7 +618,7 @@
 <dialog id="askDlg" aria-label="Ask in a project" style="width:min(calc(560 * var(--u)), calc(100vw - calc(24 * var(--u))))"><div class="dlg">
   <div class="head"><h1 style="flex:1">Ask in a project</h1><button type="button" class="btn" id="closeAsk">Cancel</button></div>
   <form class="form" id="askForm">
-    <label>Project<select name="project" required></select></label>
+    <label>Project<select name="project" required data-combo></select></label>
     <label>Question (optional)<textarea name="text" rows="4" placeholder="Where does the board parse a ticket's flags? Or leave it empty and type in the terminal."></textarea></label>
     <label>Model<select name="model"></select></label>
     <p class="muted" style="margin:0">A Claude session in the project's own folder, not a ticket: it shows as a chip above Needs you until you end it (&times; on the chip, or <span class="mono">/exit</span>). It leaves the checkout alone, and offers to make a ticket for a change.</p>
@@ -2138,7 +2148,7 @@ function detailsTab(d) {
     <label title="Where it came from (a Slack message, an email, a PR); a todo's Claude tasks are told it">Link<input type="url" name="link" value="${esc(t.link || "")}" placeholder="https://..." autocomplete="off"></label>
     ${t.todo ? `<div class="row2"><label title="From that day's morning (or its time) it's in Needs you's Today group, and again each morning while it's overdue, until it's done">Due<input type="date" name="due_day" value="${t.due_at ? isoDay(t.due_at) : ""}"></label><label>Due at (optional)<input type="time" name="due_time" value="${t.due_at && t.due_time ? isoTime(t.due_at) : ""}"></label></div>
     <div class="row2"><label title="Then it's in Needs you's Today group, once. Without a time: that morning">Remind me<input type="date" name="remind_day" value="${t.remind_at ? isoDay(t.remind_at) : ""}"></label><label>At (empty: the morning)<input type="time" name="remind_time" value="${t.remind_at ? isoTime(t.remind_at) : ""}"></label></div>` : ""}
-    <div class="row2"><label>Project<select name="project">${state.data.projects.map((p) => `<option ${p.name === t.project ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select></label>
+    <div class="row2"><label>Project<select name="project" data-combo>${state.data.projects.map((p) => `<option ${p.name === t.project ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select></label>
       <label ${t.todo ? "" : "hidden"} title="${esc(KIND_TITLE)}">Kind<select name="kind">${kindOptions(t)}</select></label>
       <label ${!t.todo && (t.repo || t.mode !== "queue") ? "" : "hidden"}>Runs as<select name="mode"><option value="queue" ${t.mode === "queue" ? "selected" : ""}>Queue in a session</option><option value="worktree" ${t.mode === "worktree" ? "selected" : ""}>Its own worktree</option></select></label>
       <label ${t.todo ? "hidden" : ""}>Queue session<select name="target"><option value="">Project default / parent's</option>${sessions.filter((s) => !s.project).map((s) => `<option value="${esc(s.tmux)}" ${s.tmux === t.target ? "selected" : ""}>${esc(s.name)} (${esc(s.status)})</option>`).join("")}</select></label></div>
@@ -2246,7 +2256,7 @@ function openNew(parentKey, pick = {}) {
     <div class="head"><h1 style="flex:1">${parent ? "New sub-ticket of " + esc(parent.key) : "New ticket"}</h1><button type="button" class="btn" id="closeNew">Close</button></div>
     ${d.projects.length ? "" : `<p class="muted">Add a project first: give it a name and its directory.</p>`}
     <form class="form" id="newForm">
-      ${d.projects.length ? `<label>Project<select name="project">${d.projects.map((x) => `<option ${x.name === proj ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select></label>` :
+      ${d.projects.length ? `<label>Project<select name="project" data-combo>${d.projects.map((x) => `<option ${x.name === proj ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select></label>` :
         `<div class="row2"><label>Project name<input type="text" name="pname" required></label><label>Directory<input type="text" name="pdir" placeholder="~/devel/project" required></label></div>`}
       <label>Kind<select name="kind" title="${esc(KIND_TITLE)}">${kindOptions(null)}</select></label>
       <label>Title<input type="text" name="title" required></label>
@@ -3571,6 +3581,114 @@ document.getElementById("search").addEventListener("keydown", (e) => {
 });
 document.addEventListener("click", (e) => { const v = e.target.closest?.("[data-view]")?.dataset.view; if (v && v !== "projects") store("cl-view-tickets", v); }, true);
 document.getElementById("closeKeys").addEventListener("click", () => document.getElementById("keysDlg").close());
+
+// -- Project combobox --
+// Project dropdowns you type in: a <select data-combo> gets a text box in
+// front of it (the select stays, hidden, holding the value for the form and
+// the change handlers). Typing filters the projects by name or key prefix:
+// "ep" or "ast" finds astro, "cl" cl-wrapper; Enter, Tab, a click or leaving the box picks.
+const comboPrefix = (value) => state.data?.projects.find((p) => p.name === value)?.prefix || "";
+// How well q matches a project: its key prefix, the start of its name or of
+// a word in it, anywhere in it, its initials, or its letters in order. -1: no match.
+function comboScore(q, label, prefix) {
+  const s = label.toLowerCase(), pre = prefix.toLowerCase(), words = s.split(/[^a-z0-9]+/).filter(Boolean);
+  if (pre && pre === q) return 1000;
+  if (s === q) return 950;
+  if (s.startsWith(q)) return 800;
+  if (pre.startsWith(q)) return 700;
+  if (words.some((w) => w.startsWith(q))) return 600;
+  if (s.includes(q)) return 500;
+  if (words.map((w) => w[0]).join("").startsWith(q)) return 400;
+  let at = -1; for (const c of q) { at = s.indexOf(c, at + 1); if (at < 0) return -1; }
+  return 100;
+}
+function comboMatches(sel, q) {
+  const opts = [...sel.options].map((o, i) => ({ value: o.value, label: o.textContent, prefix: comboPrefix(o.value), i }));
+  q = q.trim().toLowerCase(); if (!q) return opts;
+  return opts.map((o) => ({ ...o, score: comboScore(q, o.label, o.prefix) })).filter((o) => o.score >= 0).sort((a, b) => b.score - a.score || a.i - b.i);
+}
+let comboN = 0;
+function combo(sel) {
+  sel.dataset.comboed = "1";
+  const id = `combo${++comboN}`;
+  const box = document.createElement("input");
+  box.type = "text"; box.className = "combo"; box.autocomplete = "off"; box.spellcheck = false;
+  box.setAttribute("role", "combobox"); box.setAttribute("aria-autocomplete", "list"); box.setAttribute("aria-expanded", "false"); box.setAttribute("aria-controls", id);
+  if (sel.getAttribute("aria-label")) box.setAttribute("aria-label", sel.getAttribute("aria-label"));
+  box.placeholder = "Type to find a project";
+  // A popover, so it shows over the dialog's edges; inside the dialog, so the modal doesn't make it inert.
+  const list = document.createElement("ul");
+  list.id = id; list.className = "comboList"; list.setAttribute("role", "listbox"); list.popover = "manual";
+  sel.before(box); sel.after(list); sel.hidden = true;
+  let items = [], on = 0, typed = false;
+  const shown = () => list.matches(":popover-open");
+  const sync = () => {
+    const o = sel.selectedOptions[0]; if (document.activeElement !== box || !shown()) box.value = o ? o.textContent : "";
+    box.size = Math.max(8, ...[...sel.options].map((x) => x.textContent.length + 2));
+  };
+  const draw = () => {
+    list.innerHTML = items.length ? items.map((x, i) => `<li role="option" id="${id}-${i}" data-i="${i}" class="${i === on ? "on" : ""}" aria-selected="${i === on}"><span>${esc(x.label)}</span>${x.prefix ? `<span class="k">${esc(x.prefix)}</span>` : ""}</li>`).join("")
+      : `<li class="none">No project matches</li>`;
+    box.setAttribute("aria-activedescendant", items.length ? `${id}-${on}` : "");
+    list.querySelector("li.on")?.scrollIntoView({ block: "nearest" });
+  };
+  const place = () => {
+    const r = box.getBoundingClientRect(), below = innerHeight - r.bottom;
+    list.style.left = `${r.left}px`; list.style.minWidth = `${r.width}px`;
+    if (below < 200 && r.top > below) { list.style.top = "auto"; list.style.bottom = `${innerHeight - r.top + 2}px`; list.style.maxHeight = `${r.top - 8}px`; }
+    else { list.style.bottom = "auto"; list.style.top = `${r.bottom + 2}px`; list.style.maxHeight = `${Math.max(120, below - 8)}px`; }
+  };
+  const open = (q) => {
+    items = comboMatches(sel, q); typed = !!q.trim();
+    on = typed ? 0 : Math.max(0, items.findIndex((x) => x.value === sel.value));
+    draw();
+    if (!shown()) { try { list.showPopover(); } catch {} box.setAttribute("aria-expanded", "true"); }
+    place();
+  };
+  const close = () => { if (shown()) { try { list.hidePopover(); } catch {} } box.setAttribute("aria-expanded", "false"); typed = false; sync(); };
+  const pick = (x) => {
+    const changed = x && x.value !== sel.value;
+    if (x) sel.value = x.value;
+    close();
+    if (changed) sel.dispatchEvent(new Event("change", { bubbles: true }));
+  };
+  box.addEventListener("focus", () => { open(""); box.select(); });
+  box.addEventListener("pointerdown", () => { if (document.activeElement === box && !shown()) open(""); });
+  // A typed query counts as picked when the focus leaves (clicking Create, Ask, another field), as Tab does.
+  box.addEventListener("blur", () => { if (shown() && typed && items.length) pick(items[on]); else close(); });
+  // The box's own input and change are not the form's: the select's change is.
+  box.addEventListener("input", (e) => { e.stopPropagation(); open(box.value); });
+  box.addEventListener("change", (e) => e.stopPropagation());
+  box.addEventListener("keydown", (e) => {
+    if (e.isComposing) return;
+    const step = (n) => { e.preventDefault(); if (!shown()) return open(""); if (items.length) { on = (on + n + items.length) % items.length; draw(); } };
+    if (e.key === "ArrowDown") return step(1);
+    if (e.key === "ArrowUp") return step(-1);
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { if (shown() && typed) pick(items[on]); return; } // then the dialog's Ctrl+Enter submits it
+    if (e.key === "Enter") { e.preventDefault(); if (shown()) pick(items[on]); else open(""); return; }
+    if (e.key === "Tab" && shown() && typed) return pick(items[on]);
+    if (e.key === "Escape" && shown()) { e.preventDefault(); e.stopPropagation(); close(); box.select(); }
+  });
+  // Pressing an item mustn't take the focus from the box first.
+  list.addEventListener("pointerdown", (e) => e.preventDefault());
+  list.addEventListener("click", (e) => { const li = e.target.closest("[data-i]"); if (li) pick(items[+li.dataset.i]); });
+  // The select's options and value change under it (a refresh, a restored draft, form.reset).
+  new MutationObserver(sync).observe(sel, { childList: true, subtree: true, attributes: true });
+  const own = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value");
+  Object.defineProperty(sel, "value", { configurable: true, get() { return own.get.call(this); }, set(v) { own.set.call(this, v); sync(); } });
+  sel.form?.addEventListener("reset", () => setTimeout(sync));
+  sync();
+  box.comboPlace = place;
+}
+// The open list follows its box when the page or dialog scrolls (the phone's keyboard coming up) or resizes.
+const comboFollow = (e) => { const box = document.activeElement; if (box?.comboPlace && box.getAttribute("aria-expanded") === "true" && !e.target?.classList?.contains("comboList")) box.comboPlace(); };
+addEventListener("scroll", comboFollow, true);
+addEventListener("resize", comboFollow);
+visualViewport?.addEventListener("resize", comboFollow);
+// Every <select data-combo> the board draws (now, or later in a dialog) becomes one.
+function combos() { for (const sel of document.querySelectorAll("select[data-combo]:not([data-comboed])")) combo(sel); }
+new MutationObserver(combos).observe(document.body, { childList: true, subtree: true });
+combos();
 
 // -- Ctrl+K: go to a ticket, run a command --
 const pal = { mode: "root", key: null, q: "", rootQ: "", sel: 0, items: [] };
