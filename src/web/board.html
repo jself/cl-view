@@ -2400,10 +2400,13 @@ function openAsk() {
   let last = ""; try { last = localStorage.getItem("cl-ask-project") || ""; } catch {}
   const names = d.projects.filter((p) => projectShown(p.name) || p.name === state.project).map((p) => p.name);
   const pick = names.includes(state.project) ? state.project : names.includes(last) ? last : names[0];
-  form.elements.project.innerHTML = names.map((n) => `<option value="${esc(n)}" ${n === pick ? "selected" : ""}>${esc(n)}</option>`).join("");
+  const sel = form.elements.project;
+  sel.innerHTML = names.map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join("");
+  sel.value = pick; // through the combobox's setter, so its box shows the pick before it takes the focus
   form.elements.model.innerHTML = [["", `Default (${d.session_model || "the profile's"})`], ["sonnet", "sonnet"], ["haiku", "haiku"], ["opus", "opus"]]
     .map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join("");
-  document.getElementById("askDlg").showModal(); form.elements.text.focus();
+  // The project first (its box selects the name, so typing replaces it), then Tab to the question.
+  document.getElementById("askDlg").showModal(); (sel.previousElementSibling?.matches(".combo") ? sel.previousElementSibling : sel).focus();
 }
 async function submitAsk(form) {
   const project = form.elements.project.value; if (!project) return;

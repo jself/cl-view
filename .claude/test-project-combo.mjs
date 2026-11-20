@@ -112,6 +112,29 @@ await ev(`document.querySelectorAll("dialog[open]").forEach((d) => d.close()); o
 await until(`document.getElementById("askDlg").open`, "the Ask dialog");
 const A = "#askForm select[name=project]";
 check(await boxText(A) === await ev(`document.querySelector(${JSON.stringify(A)}).value`) && await boxText(A) !== "", "Ask: the box shows the picked project", await boxText(A));
+// CL-187: the project box has the focus, its name selected, so typing replaces it; Tab goes on to the question.
+check(await ev(`document.activeElement === document.querySelector(${JSON.stringify(A)}).previousElementSibling`), "Ask: the project box has the focus when it opens", await ev(`document.activeElement?.outerHTML.slice(0, 80)`));
+check(await ev(`(() => { const b = document.activeElement; return b.selectionStart === 0 && b.selectionEnd === b.value.length && b.value.length > 0; })()`), "Ask: its name is selected");
+await cdp.send("Input.insertText", { text: "ch" }); await sleep(80);
+await press("Tab");
+check(await ev(`document.querySelector(${JSON.stringify(A)}).value`) === "charts" && await ev(`document.activeElement === document.querySelector("#askForm [name=text]")`), "Ask: typing ch, then Tab picks charts and moves to the question", [await ev(`document.querySelector(${JSON.stringify(A)}).value`), await ev(`document.activeElement?.name`)]);
+await ev(`document.getElementById("askDlg").close(); openAsk()`);
+await until(`document.getElementById("askDlg").open`, "the Ask dialog again");
+const before = await ev(`document.querySelector(${JSON.stringify(A)}).value`);
+await press("Tab");
+check(await ev(`document.querySelector(${JSON.stringify(A)}).value`) === before && await ev(`document.activeElement === document.querySelector("#askForm [name=text]")`) && !(await isOpen(A)), "Ask: Tab without typing keeps the project, closes the list and moves to the question");
+// Escape: in any text box the first one only leaves the box (the board's capture-phase rule), the second closes the dialog.
+// The same two presses as before CL-187, when the question box had the focus.
+await press("Escape");
+check(await ev(`document.getElementById("askDlg").open`) && await ev(`document.activeElement !== document.querySelector("#askForm [name=text]")`), "Ask: Escape in the question box leaves it; the dialog stays open");
+await ev(`document.getElementById("askDlg").close(); openAsk()`);
+await until(`document.getElementById("askDlg").open`, "the Ask dialog again");
+await press("Escape");
+check(await ev(`document.getElementById("askDlg").open`) && !(await isOpen(A)) && await ev(`!document.activeElement?.classList.contains("combo")`), "Ask: the first Escape closes the project list and leaves the box; the dialog stays open");
+await press("Escape");
+check(!(await ev(`document.getElementById("askDlg").open`)), "Ask: the second Escape closes the dialog");
+await ev(`openAsk()`);
+await until(`document.getElementById("askDlg").open`, "the Ask dialog again");
 await type(A, "ep");
 await press("Enter");
 check(await ev(`document.querySelector(${JSON.stringify(A)}).value`) === "astro", "Ask: ep, Enter picks astro");
