@@ -338,11 +338,61 @@ fn claudeArgs(ctx: Ctx, cfg: config.Config, a: std.mem.Allocator, t: board.Ticke
     // outside the project). Like the tool list, it takes every argument up to
     // the next option.
     if (images.ticketDir(ctx, a, cfg, t.key)) |d| try args.appendSlice(a, &.{ "--add-dir", d });
-    try args.appendSlice(a, &.{ if (resuming) "--resume" else "--session-id", sid, "--settings", try hooksFile(ctx, a, cfg) });
     // Planning writes nothing, and ExitPlanMode would let it start building.
-    // The tool list goes before another option: it takes every argument up to one.
-    if (t.stage == .planning) try args.appendSlice(a, &.{ "--disallowedTools", "Edit,Write,NotebookEdit,ExitPlanMode", "--permission-mode", "plan" });
+    // It runs in the human's default permission mode (no --permission-mode),
+    // like every other session: the tool list is what keeps it from building.
+    // The tool list takes every argument up to the next option, so one must
+    // follow it (here --session-id or --resume): last, it would swallow the
+    // prompt tmux.respawn adds after these arguments.
+    if (t.stage == .planning) try args.appendSlice(a, &.{ "--disallowedTools", "Edit,Write,NotebookEdit,ExitPlanMode" });
+    try args.appendSlice(a, &.{ if (resuming) "--resume" else "--session-id", sid, "--settings", try hooksFile(ctx, a, cfg) });
     return args.items;
+}
+
+test "a planning session keeps the default permission mode but can't build; other stages get neither" {
+    const ctx: Ctx = .{ .io = std.testing.io, .gpa = std.testing.allocator, .perm = std.testing.allocator, .env = Ctx.testEnv(), .home = "/tmp" };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cfg: config.Config = .{ .profiles = &.{}, .default = "", .operator = "", .board = .{ .dir = try tmp.dir.realPathFileAlloc(ctx.io, ".", a) } };
+    var t = std.mem.zeroInit(board.Ticket, .{ .key = "QA-1", .project = "qa", .stage = .planning });
+    const has = struct {
+        fn f(args: []const []const u8, s: []const u8) bool {
+            for (args) |x| if (std.mem.eql(u8, x, s)) return true;
+            return false;
+        }
+    }.f;
+    // A list option (--disallowedTools, --add-dir) takes arguments up to the
+    // next option, so its one value must be followed by another option, never
+    // by the prompt that respawn appends.
+    const ended = struct {
+        fn f(args: []const []const u8) bool {
+            for (args, 0..) |x, i| {
+                if (!std.mem.eql(u8, x, "--disallowedTools") and !std.mem.eql(u8, x, "--add-dir")) continue;
+                if (i + 2 >= args.len or !std.mem.startsWith(u8, args[i + 2], "--")) return false;
+            }
+            return true;
+        }
+    }.f;
+    try std.testing.expect(!ended(&.{ "--settings", "x", "--disallowedTools", "Edit" }));
+    const planning = try claudeArgs(ctx, cfg, a, t, "sid", false);
+    try std.testing.expect(!has(planning, "--permission-mode"));
+    try std.testing.expect(has(planning, "--disallowedTools"));
+    try std.testing.expect(has(planning, "Edit,Write,NotebookEdit,ExitPlanMode"));
+    try std.testing.expect(ended(planning));
+    try std.testing.expect(ended(try claudeArgs(ctx, cfg, a, t, "sid", true)));
+    // With pasted images it also gets --add-dir, ended the same way.
+    try std.Io.Dir.cwd().createDirPath(ctx.io, try std.fmt.allocPrint(a, "{s}/QA-1", .{try images.root(ctx, a, cfg)}));
+    const with_images = try claudeArgs(ctx, cfg, a, t, "sid", false);
+    try std.testing.expect(has(with_images, "--add-dir"));
+    try std.testing.expect(ended(with_images));
+    t.stage = .queued;
+    const queued = try claudeArgs(ctx, cfg, a, t, "sid", true);
+    try std.testing.expect(!has(queued, "--permission-mode"));
+    try std.testing.expect(!has(queued, "--disallowedTools"));
+    try std.testing.expect(has(queued, "--resume"));
 }
 
 /// The environment that tells the hooks which ticket a session works on.

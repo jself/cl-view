@@ -1033,7 +1033,8 @@ cl t done QA-1 --last "Fixed the race; ready to test" --summary "Retry the lock 
   session, or its parent's), which would be cut off too.
 - Inside a ticket's session (`CL_TICKET` set) the key can be left out:
   `cl t done --summary ...`, `cl t comment "..."` (as claude).
-- `--plan` starts a ticket in planning: Claude runs in plan mode, interviews
+- `--plan` starts a ticket in planning: Claude runs in your default permission mode
+  but can't edit files or call ExitPlanMode, interviews
   you (`--skill grilling` or `--skill wayfinder` names a skill for it), posts
   the plan and runs `done`, which means "plan ready" there. On the web board,
   its Needs you card's Read the plan opens the ticket's Plan tab, with Approve
